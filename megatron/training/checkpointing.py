@@ -17,6 +17,7 @@ from time import time
 
 import torch
 
+from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core import mpu, tensor_parallel, dist_checkpointing
 from megatron.core.dist_checkpointing.mapping import ShardedObject
 from megatron.core.dist_checkpointing.serialization import get_default_load_sharded_strategy
@@ -1298,6 +1299,47 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
                 mpu.set_virtual_pipeline_model_parallel_rank(i)
                 model[i].load_state_dict(state_dict['model%d' % i], strict=strict)
 
+    # Expand the embedding size to make the model multimodal
+    scatter_embedding_sequence_parallel = model[0].embedding.scatter_to_sequence_parallel
+    model[0].embedding = LanguageModelEmbedding(
+                config=model[0].config,
+                vocab_size=model[0].vocab_size + 128, # EXPAND
+                max_sequence_length=model[0].max_sequence_length,
+                position_embedding_type=model[0].position_embedding_type,
+                scatter_to_sequence_parallel=scatter_embedding_sequence_parallel,
+            )
+    # Extend the output layer to match the new vocab size
+    model[0].output_layer = tensor_parallel.ColumnParallelLinear(
+                model[0].config.hidden_size,
+                model[0].vocab_size + 128, # EXPAND
+                config=model[0].config,
+                init_method=model[0].config.init_method,
+                bias=False,
+                skip_bias_add=False,
+                gather_output=not model[0].parallel_output,
+                skip_weight_param_allocation=model[0].pre_process
+                and model[0].share_embeddings_and_output_weights,
+                embedding_activation_buffer=model[0].embedding_activation_buffer,
+                grad_output_buffer=model[0].grad_output_buffer,
+            )
+    # Load the pretrained weights into the new embeddings
+    load_expanded_embedding_weights(
+        model[0].embedding.word_embeddings.weight.data,
+        ckpt_state_dict=state_dict,
+        global_old_vocab_size=model[0].vocab_size,
+        global_new_vocab_size=model[0].vocab_size + 128, # EXPAND
+        mpu=mpu
+    )
+    # Load the pretrained weights into the new output layer
+    load_expanded_output_weights(
+        model_output_weight=model[0].output_layer.weight,
+        ckpt_state_dict=state_dict,
+        global_old_vocab_size=model[0].vocab_size,
+        global_new_vocab_size=model[0].vocab_size + 128,
+        mpu=mpu,
+    )
+    model[0].vocab_size += 128  # EXPAND
+    
     # Fix up query/key/value matrix ordering if needed.
     checkpoint_version = get_checkpoint_version()
     print_rank_0(f' checkpoint version {checkpoint_version}')
@@ -1402,6 +1444,93 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
         ft_integration.on_checkpoint_loaded(is_local_chkpt=is_local_chkpt)
 
     return iteration, num_floating_point_operations_so_far, tokens_so_far
+
+def load_expanded_embedding_weights(
+    model_embedding_weight: torch.Tensor,
+    ckpt_state_dict: dict,
+    global_old_vocab_size: int,
+    global_new_vocab_size: int,
+    mpu,
+    weight_key='embedding.word_embeddings.weight'
+):
+
+    tp_rank = mpu.get_tensor_model_parallel_rank()
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+    tp_group = mpu.get_tensor_model_parallel_group()
+
+    local_old_weight = ckpt_state_dict['model'][weight_key]  # [local_old_vocab, hidden_dim]
+
+    # Make sure it's on the correct device and contiguous
+    local_old_weight = local_old_weight.contiguous().to(model_embedding_weight.device)
+
+    # All-gather old embedding shards from all TP ranks
+    gathered_weights = [
+        torch.empty_like(local_old_weight) for _ in range(tp_size)
+    ]
+
+    torch.distributed.all_gather(gathered_weights, local_old_weight, group=tp_group)
+    full_old_weight = torch.cat(gathered_weights, dim=0)  # [global_old_vocab, hidden_dim]
+    # Determine the new slice range for this rank
+    base_new_shard = global_new_vocab_size // tp_size
+    remainder = global_new_vocab_size % tp_size
+    new_local_start = tp_rank * base_new_shard
+    new_local_end = new_local_start + base_new_shard
+    if tp_rank == tp_size - 1:
+        new_local_end += remainder
+
+    new_local_vocab_size = new_local_end - new_local_start
+
+    # Compute how many rows we can copy from old embeddings
+    num_rows_to_copy = max(0, min(global_old_vocab_size - new_local_start, new_local_vocab_size))
+    print(f"Loading {num_rows_to_copy} rows into model embedding from old weight on tp rank {tp_rank}")
+    if num_rows_to_copy > 0:
+        model_embedding_weight[:num_rows_to_copy].data.copy_(
+            full_old_weight[new_local_start:new_local_start + num_rows_to_copy].clone()
+        )
+
+
+def load_expanded_output_weights(
+    model_output_weight: torch.Tensor,
+    ckpt_state_dict: dict,
+    global_old_vocab_size: int,
+    global_new_vocab_size: int,
+    mpu,
+    weight_key='output_layer.weight'
+):
+    tp_rank = mpu.get_tensor_model_parallel_rank()
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+    tp_group = mpu.get_tensor_model_parallel_group()
+
+    local_old_weight = ckpt_state_dict['model'][weight_key]  # [local_old_vocab, hidden_dim]
+
+    # Make sure it's on the correct device and contiguous
+    local_old_weight = local_old_weight.contiguous().to(model_output_weight.device)
+
+    # All-gather old output weight shards from all TP ranks
+    gathered_weights = [
+        torch.empty_like(local_old_weight) for _ in range(tp_size)
+    ]
+    torch.distributed.all_gather(gathered_weights, local_old_weight, group=tp_group)
+    full_old_weight = torch.cat(gathered_weights, dim=0)  # [global_old_vocab, hidden_dim]
+
+    # Determine the new slice range for this rank
+    base_new_shard = global_new_vocab_size // tp_size
+    remainder = global_new_vocab_size % tp_size
+    new_local_start = tp_rank * base_new_shard
+    new_local_end = new_local_start + base_new_shard
+    if tp_rank == tp_size - 1:
+        new_local_end += remainder
+
+    new_local_vocab_size = new_local_end - new_local_start
+
+    # Compute how many rows we can copy from old output weights
+    num_rows_to_copy = max(0, min(global_old_vocab_size - new_local_start, new_local_vocab_size))
+    print(f"Loading {num_rows_to_copy} rows into model output layer from old weight on tp rank {tp_rank}")
+    
+    if num_rows_to_copy > 0:
+        model_output_weight[:num_rows_to_copy].data.copy_(
+            full_old_weight[new_local_start:new_local_start + num_rows_to_copy].clone()
+        )
 
 
 def load_biencoder_checkpoint(model, only_query_model=False,
