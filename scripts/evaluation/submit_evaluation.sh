@@ -297,7 +297,7 @@ EOM
 # Now let's prepare the sbatch.
 cat > $SBATCH_PATH <<- EOM
 #!/bin/bash
-#SBATCH --account=a-a06
+#SBATCH --account=a-infra01-1
 #SBATCH --cpus-per-task=288
 #SBATCH --gres=gpu:4
 #SBATCH --environment=$CONTAINER_PATH
@@ -342,7 +342,9 @@ srun -l --unbuffered numactl --membind=0-3 bash -c "
 	git checkout swissai-model
 	python -m pip install -e .
 	cd ..
-	git clone https://github.com/AleHD/lm-evaluation-harness.git
+	git clone git@github.com:fan1dy/lm-evaluation-harness.git
+	git checkout std-5shot
+	# git clone https://github.com/AleHD/lm-evaluation-harness.git
 	cd lm-evaluation-harness
 	python -m pip install -e .[api]
 
