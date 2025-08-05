@@ -1324,7 +1324,7 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
             )
     # Load the pretrained weights into the new embeddings
     load_expanded_embedding_weights(
-        model[0].embedding.word_embeddings.weight.data,
+        model[0].embedding.word_embeddings.weight,
         ckpt_state_dict=state_dict,
         global_old_vocab_size=model[0].vocab_size,
         global_new_vocab_size=model[0].vocab_size + 128, # EXPAND
@@ -1484,9 +1484,10 @@ def load_expanded_embedding_weights(
     num_rows_to_copy = max(0, min(global_old_vocab_size - new_local_start, new_local_vocab_size))
     print(f"Loading {num_rows_to_copy} rows into model embedding from old weight on tp rank {tp_rank}")
     if num_rows_to_copy > 0:
-        model_embedding_weight[:num_rows_to_copy].data.copy_(
-            full_old_weight[new_local_start:new_local_start + num_rows_to_copy].clone()
-        )
+        with torch.no_grad():
+            model_embedding_weight[:num_rows_to_copy].copy_(
+                full_old_weight[new_local_start:new_local_start + num_rows_to_copy]
+            )
 
 
 def load_expanded_output_weights(
@@ -1528,9 +1529,10 @@ def load_expanded_output_weights(
     print(f"Loading {num_rows_to_copy} rows into model output layer from old weight on tp rank {tp_rank}")
     
     if num_rows_to_copy > 0:
-        model_output_weight[:num_rows_to_copy].data.copy_(
-            full_old_weight[new_local_start:new_local_start + num_rows_to_copy].clone()
-        )
+        with torch.no_grad():
+            model_output_weight[:num_rows_to_copy].copy_(
+                full_old_weight[new_local_start:new_local_start + num_rows_to_copy]
+            )
 
 
 def load_biencoder_checkpoint(model, only_query_model=False,
