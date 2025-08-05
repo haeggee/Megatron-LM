@@ -24,6 +24,7 @@ from megatron.core.dist_checkpointing.serialization import get_default_load_shar
 from megatron.core.dist_checkpointing.strategies.fully_parallel import \
     FullyParallelSaveStrategyWrapper, FullyParallelLoadStrategyWrapper
 from megatron.core.dist_checkpointing.core import OldXieluException
+from megatron.core.optimizer import get_megatron_optimizer
 from megatron.core.num_microbatches_calculator import update_num_microbatches
 from megatron.core.utils import is_float8tensor
 from megatron.core.rerun_state_machine import get_rerun_state_machine
@@ -36,6 +37,14 @@ from .one_logger_utils import on_save_checkpoint_start, on_save_checkpoint_succe
 from . import wandb_utils
 
 from . import ft_integration
+
+from megatron.core.distributed import DistributedDataParallel as DDP
+try:
+    from megatron.core.distributed import TorchFullyShardedDataParallel as torch_FSDP
+
+    HAVE_FSDP2 = True
+except ImportError:
+    HAVE_FSDP2 = False
 
 # [ModelOpt]: Import
 try:
@@ -1112,6 +1121,15 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
     """
     args = get_args()
     load_dir = getattr(args, load_arg)
+    vision_tokenizer_vocab_size = 16384
+    wrapping_metadata = []
+
+    for m in model:
+        wrapping_metadata.append({
+            "config": m.config,
+            "ddp_config": m.ddp_config,
+            "disable_bucketing": getattr(m, "disable_bucketing", False)
+        })
 
     # Finetuning directories
     pretrained_dir = getattr(args, 'pretrained_checkpoint', None)
@@ -1299,47 +1317,17 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
                 mpu.set_virtual_pipeline_model_parallel_rank(i)
                 model[i].load_state_dict(state_dict['model%d' % i], strict=strict)
 
-    # Expand the embedding size to make the model multimodal
-    scatter_embedding_sequence_parallel = model[0].embedding.scatter_to_sequence_parallel
-    model[0].embedding = LanguageModelEmbedding(
-                config=model[0].config,
-                vocab_size=model[0].vocab_size + 128, # EXPAND
-                max_sequence_length=model[0].max_sequence_length,
-                position_embedding_type=model[0].position_embedding_type,
-                scatter_to_sequence_parallel=scatter_embedding_sequence_parallel,
-            )
-    # Extend the output layer to match the new vocab size
-    model[0].output_layer = tensor_parallel.ColumnParallelLinear(
-                model[0].config.hidden_size,
-                model[0].vocab_size + 128, # EXPAND
-                config=model[0].config,
-                init_method=model[0].config.init_method,
-                bias=False,
-                skip_bias_add=False,
-                gather_output=not model[0].parallel_output,
-                skip_weight_param_allocation=model[0].pre_process
-                and model[0].share_embeddings_and_output_weights,
-                embedding_activation_buffer=model[0].embedding_activation_buffer,
-                grad_output_buffer=model[0].grad_output_buffer,
-            )
-    # Load the pretrained weights into the new embeddings
-    load_expanded_embedding_weights(
-        model[0].embedding.word_embeddings.weight,
-        ckpt_state_dict=state_dict,
-        global_old_vocab_size=model[0].vocab_size,
-        global_new_vocab_size=model[0].vocab_size + 128, # EXPAND
-        mpu=mpu
-    )
-    # Load the pretrained weights into the new output layer
-    load_expanded_output_weights(
-        model_output_weight=model[0].output_layer.weight,
-        ckpt_state_dict=state_dict,
-        global_old_vocab_size=model[0].vocab_size,
-        global_new_vocab_size=model[0].vocab_size + 128,
-        mpu=mpu,
-    )
-    model[0].vocab_size += 128  # EXPAND
-    
+    # Expand the embedding size to make the model multimodal (TODO: replace model[0].vocab_size with the tokenizer vocab size)
+    if vision_tokenizer_vocab_size != None:
+        if model[0].vocab_size < vision_tokenizer_vocab_size + model[0].vocab_size:
+            old_vocab_size = model[0].vocab_size
+            print_rank_0(f"Expanding model vocab size from {model[0].vocab_size} to {vision_tokenizer_vocab_size + model[0].vocab_size}")
+            model[0].vocab_size = vision_tokenizer_vocab_size + model[0].vocab_size
+            extend_vocab_and_load_weights(model, state_dict, old_vocab_size, mpu)
+            DP = get_wrapping_class(args)
+            wrapped_model = rewrap_model(model, wrapping_metadata, wrap_class=DP)
+            optimizer = get_megatron_optimizer(optimizer.config, wrapped_model)
+
     # Fix up query/key/value matrix ordering if needed.
     checkpoint_version = get_checkpoint_version()
     print_rank_0(f' checkpoint version {checkpoint_version}')
@@ -1443,7 +1431,73 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
         is_local_chkpt = (ckpt_type == CheckpointType.LOCAL)
         ft_integration.on_checkpoint_loaded(is_local_chkpt=is_local_chkpt)
 
+    save_checkpoint(1, model , optimizer, opt_param_scheduler, 0)
     return iteration, num_floating_point_operations_so_far, tokens_so_far
+
+def get_wrapping_class(args):
+    if getattr(args, "use_torch_fsdp2", False):
+        assert HAVE_FSDP2, "Torch FSDP2 requires torch>=2.4.0"
+        return torch_FSDP
+    else:
+        return DDP
+
+def rewrap_model(unwrapped_model, wrapping_metadata, wrap_class):
+    rewrapped = []
+    for i, module in enumerate(unwrapped_model):
+        md = wrapping_metadata[i]
+        rewrapped.append(
+            wrap_class(
+                config=md["config"],
+                ddp_config=md["ddp_config"],
+                module=module,
+                disable_bucketing=md["disable_bucketing"]
+            )
+        )
+    return rewrapped
+
+def extend_vocab_and_load_weights(
+    model: list,
+    state_dict: dict,
+    old_vocab_size: int,
+    mpu,
+):
+    model[0].embedding = LanguageModelEmbedding(
+                config=model[0].config,
+                vocab_size=model[0].vocab_size,
+                max_sequence_length=model[0].max_sequence_length,
+                position_embedding_type=model[0].position_embedding_type,
+                scatter_to_sequence_parallel=model[0].embedding.scatter_to_sequence_parallel,
+            )
+    # Extend the output layer to match the new vocab size
+    model[0].output_layer = tensor_parallel.ColumnParallelLinear(
+                model[0].config.hidden_size,
+                model[0].vocab_size,
+                config=model[0].config,
+                init_method=model[0].config.init_method,
+                bias=False,
+                skip_bias_add=False,
+                gather_output=not model[0].parallel_output,
+                skip_weight_param_allocation=model[0].pre_process
+                and model[0].share_embeddings_and_output_weights,
+                embedding_activation_buffer=model[0].embedding_activation_buffer,
+                grad_output_buffer=model[0].grad_output_buffer,
+            )
+    # Load the pretrained weights into the new embeddings
+    load_expanded_embedding_weights(
+        model[0].embedding.word_embeddings.weight,
+        ckpt_state_dict=state_dict,
+        global_old_vocab_size=old_vocab_size,
+        global_new_vocab_size=model[0].vocab_size, # EXPAND
+        mpu=mpu
+    )
+    # Load the pretrained weights into the new output layer
+    load_expanded_output_weights(
+        model_output_weight=model[0].output_layer.weight,
+        ckpt_state_dict=state_dict,
+        global_old_vocab_size=old_vocab_size,
+        global_new_vocab_size=model[0].vocab_size,
+        mpu=mpu,
+    )
 
 def load_expanded_embedding_weights(
     model_embedding_weight: torch.Tensor,
