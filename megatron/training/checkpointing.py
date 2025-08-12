@@ -38,14 +38,6 @@ from . import wandb_utils
 
 from . import ft_integration
 
-from megatron.core.distributed import DistributedDataParallel as DDP
-try:
-    from megatron.core.distributed import TorchFullyShardedDataParallel as torch_FSDP
-
-    HAVE_FSDP2 = True
-except ImportError:
-    HAVE_FSDP2 = False
-
 # [ModelOpt]: Import
 try:
     from modelopt.torch.opt.plugins import (
@@ -1433,7 +1425,7 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
         is_local_chkpt = (ckpt_type == CheckpointType.LOCAL)
         ft_integration.on_checkpoint_loaded(is_local_chkpt=is_local_chkpt)
 
-    save_checkpoint(0, model , None, None, 0)
+    save_checkpoint(1, model , None, None, 0)
     return iteration, num_floating_point_operations_so_far, tokens_so_far
 
 def extend_vocab_and_load_weights(
