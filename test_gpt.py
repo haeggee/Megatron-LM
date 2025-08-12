@@ -491,40 +491,41 @@ if __name__ == "__main__":
         local_module_name = layer_name.split('.')[0]
         param_attr = layer_name.split('.')[1]
 
-        local_module = getattr(model1[0], local_module_name)
-        param_tensor = getattr(local_module, param_attr)
-        if not isinstance(param_tensor, torch.Tensor):
-            if hasattr(param_tensor, 'weight') and isinstance(param_tensor.weight, torch.Tensor):
-                param_tensor = param_tensor.weight
+        # Get param tensor from model1
+        local_module_1 = getattr(model1[0], local_module_name)
+        param_tensor_1 = getattr(local_module_1, param_attr)
+        if not isinstance(param_tensor_1, torch.Tensor):
+            if hasattr(param_tensor_1, 'weight') and isinstance(param_tensor_1.weight, torch.Tensor):
+                param_tensor_1 = param_tensor_1.weight
             else:
-                raise TypeError(f"Expected tensor parameter but got {type(param_tensor)} for {layer_name}")
+                raise TypeError(f"Expected tensor parameter but got {type(param_tensor_1)} for {layer_name}")
 
-        gathered = [torch.empty_like(param_tensor) for _ in range(tp_size)]
-        torch.distributed.all_gather(gathered, param_tensor, group=tp_group)
+        # Get param tensor from model2
+        local_module_2 = getattr(model2[0], local_module_name)
+        param_tensor_2 = getattr(local_module_2, param_attr)
+        if not isinstance(param_tensor_2, torch.Tensor):
+            if hasattr(param_tensor_2, 'weight') and isinstance(param_tensor_2.weight, torch.Tensor):
+                param_tensor_2 = param_tensor_2.weight
+            else:
+                raise TypeError(f"Expected tensor parameter but got {type(param_tensor_2)} for {layer_name}")
 
-        full_weight = torch.cat(gathered, dim=0)
+        # Gather shards from all ranks for model1
+        gathered_1 = [torch.empty_like(param_tensor_1) for _ in range(tp_size)]
+        torch.distributed.all_gather(gathered_1, param_tensor_1, group=tp_group)
 
-        base_shard_size = full_weight.shape[0] // tp_size
-        remainder = full_weight.shape[0] % tp_size
+        # Gather shards from all ranks for model2
+        gathered_2 = [torch.empty_like(param_tensor_2) for _ in range(tp_size)]
+        torch.distributed.all_gather(gathered_2, param_tensor_2, group=tp_group)
 
-        for r in range(tp_size):
-            start = r * base_shard_size
-            end = start + base_shard_size
-            if r == tp_size - 1:
-                end += remainder
+        # Reconstruct full tensors by concatenating shards
+        full_weight_1 = torch.cat(gathered_1, dim=0)
+        full_weight_2 = torch.cat(gathered_2, dim=0)
 
-            expected_slice = full_weight[start:end]
-            actual_slice = gathered[r]
-
-            if not torch.allclose(expected_slice, actual_slice, atol=1e-6, rtol=1e-5):
-                if tp_rank == 0:
-                    print(f"[Verification] Mismatch detected in layer '{layer_name}' at shard rank {r}")
-                all_match = False
-
-        if tp_rank == 0:
-            print(f"[Verification] Layer '{layer_name}' shards match perfectly across TP ranks")
-
-    if all_match:
-        print_rank_0("TP sharded weights verified successfully — all shards consistent!")
-    else:
-        print_rank_0("Verification failed: TP shards inconsistent.")
+        # Now compare the reconstructed full tensors
+        if torch.allclose(full_weight_1, full_weight_2[:128256], atol=1e-6, rtol=1e-5):
+            if tp_rank == 0:
+                print(f"[Comparison] Layer '{layer_name}' matches perfectly between model1 and model2")
+        else:
+            if tp_rank == 0:
+                print(f"[Comparison] Layer '{layer_name}' mismatch detected between model1 and model2")
+            all_match = False
