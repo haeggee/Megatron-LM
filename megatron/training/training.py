@@ -477,6 +477,31 @@ def pretrain(
     ft_integration.shutdown()
     one_logger_utils.finish()
 
+def load_two_models(
+    model_provider_1,
+    model_provider,
+    model_type,
+    extra_args_provider=None,
+    args_defaults={}
+):
+    initialize_megatron(
+        extra_args_provider=extra_args_provider,
+        args_defaults=args_defaults
+    )
+    args = get_args()
+
+    # Setup first model (without optimizer)
+    model1, _, _ = setup_model_and_optimizer(
+        model_provider_1, model_type, checkpointing_context={}, load_dir='/capstor/store/cscs/swissai/infra01/VLLM/llama-3.1-8B')
+
+    # Setup second model (without optimizer)
+    model2, _, _ = setup_model_and_optimizer(
+        model_provider, model_type, checkpointing_context={}, load_dir='/iopsstor/scratch/cscs/nirmiger/Megatron-LM/checkpoints')
+
+    unwrapped_model1 = unwrap_model(model1)
+    unwrapped_model2 = unwrap_model(model2)
+
+    return unwrapped_model1, unwrapped_model2
 
 def update_train_iters(args):
 
@@ -697,7 +722,7 @@ def setup_model_and_optimizer(model_provider_func,
                               no_wd_decay_cond=None,
                               scale_lr_cond=None,
                               lr_mult=1.0,
-                              checkpointing_context=None):
+                              checkpointing_context=None, load_dir=None):
     """Setup model and optimizer."""
     args = get_args()
     timers = get_timers()
@@ -758,7 +783,7 @@ def setup_model_and_optimizer(model_provider_func,
 
         args.iteration, args.num_floating_point_operations_so_far, args.tokens_so_far = load_checkpoint(
                 model, optimizer, opt_param_scheduler, checkpointing_context=checkpointing_context,
-                skip_load_to_model_and_opt=HAVE_FSDP2 and getattr(args, "use_torch_fsdp2", False))
+                skip_load_to_model_and_opt=HAVE_FSDP2 and getattr(args, "use_torch_fsdp2", False), load_dir=load_dir)
         timers('load-checkpoint').stop(barrier=True)
         timers.log(['load-checkpoint'])
         one_logger and one_logger.log_metrics({
