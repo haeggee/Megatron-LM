@@ -119,6 +119,9 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
                 raise RuntimeError("--fp8-param-gather requires `fp8_model_init` from TransformerEngine, but not found.")
 
         with build_model_context(**build_model_context_args):
+            if args.image_vocab_size is not None:
+                args.padded_vocab_size += args.image_vocab_size
+                print_rank_0(f"Using image vocab size {args.image_vocab_size}")
             model = GPTModel(
                 config=config,
                 transformer_layer_spec=transformer_layer_spec,
