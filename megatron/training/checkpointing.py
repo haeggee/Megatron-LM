@@ -1121,7 +1121,6 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
     """
     args = get_args()
     load_dir = getattr(args, load_arg)
-    vision_tokenizer_vocab_size = 16384
     wrapping_metadata = []
 
     for m in model:
@@ -1318,15 +1317,13 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
                 model[i].load_state_dict(state_dict['model%d' % i], strict=strict)
 
     # Expand the embedding size to make the model multimodal (TODO: replace model[0].vocab_size with the tokenizer vocab size)
-    if vision_tokenizer_vocab_size != None:
-        if model[0].vocab_size < vision_tokenizer_vocab_size + model[0].vocab_size:
-            old_vocab_size = model[0].vocab_size
-            print_rank_0(f"Expanding model vocab size from {model[0].vocab_size} to {vision_tokenizer_vocab_size + model[0].vocab_size}")
-            model[0].vocab_size = vision_tokenizer_vocab_size + model[0].vocab_size
-            extend_vocab_and_load_weights(model, state_dict, old_vocab_size, mpu)
-            DP = get_wrapping_class(args)
-            wrapped_model = rewrap_model(model, wrapping_metadata, wrap_class=DP)
-            optimizer = get_megatron_optimizer(optimizer.config, wrapped_model)
+    if args.image_vocab_size is not None:
+        if args.image_vocab_size + 131072 != model[0].vocab_size:
+            if model[0].vocab_size < args.image_vocab_size + model[0].vocab_size:
+                old_vocab_size = model[0].vocab_size
+                print_rank_0(f"Expanding model vocab size from {model[0].vocab_size} to {args.image_vocab_size + model[0].vocab_size}")
+                model[0].vocab_size = args.image_vocab_size + model[0].vocab_size
+                extend_vocab_and_load_weights(model, state_dict, old_vocab_size, mpu)
 
     # Fix up query/key/value matrix ordering if needed.
     checkpoint_version = get_checkpoint_version()
@@ -1431,29 +1428,8 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
         is_local_chkpt = (ckpt_type == CheckpointType.LOCAL)
         ft_integration.on_checkpoint_loaded(is_local_chkpt=is_local_chkpt)
 
-    save_checkpoint(1, model , optimizer, opt_param_scheduler, 0)
+    save_checkpoint(0, model , None, None, 0)
     return iteration, num_floating_point_operations_so_far, tokens_so_far
-
-def get_wrapping_class(args):
-    if getattr(args, "use_torch_fsdp2", False):
-        assert HAVE_FSDP2, "Torch FSDP2 requires torch>=2.4.0"
-        return torch_FSDP
-    else:
-        return DDP
-
-def rewrap_model(unwrapped_model, wrapping_metadata, wrap_class):
-    rewrapped = []
-    for i, module in enumerate(unwrapped_model):
-        md = wrapping_metadata[i]
-        rewrapped.append(
-            wrap_class(
-                config=md["config"],
-                ddp_config=md["ddp_config"],
-                module=module,
-                disable_bucketing=md["disable_bucketing"]
-            )
-        )
-    return rewrapped
 
 def extend_vocab_and_load_weights(
     model: list,
