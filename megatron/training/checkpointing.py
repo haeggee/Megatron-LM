@@ -1314,7 +1314,7 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
                 mpu.set_virtual_pipeline_model_parallel_rank(i)
                 model[i].load_state_dict(state_dict['model%d' % i], strict=strict)
 
-    # Expand the embedding size to make the model multimodal (TODO: replace model[0].vocab_size with the tokenizer vocab size)
+    # Expand the embedding size to make the model multimodal
     if args.extend_model_vocab and args.image_vocab_size != None:
         if model[0].vocab_size < args.image_vocab_size + args.original_vocab_size:
             old_vocab_size = args.original_vocab_size
@@ -1328,7 +1328,7 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
     fix_query_key_value_ordering(model, checkpoint_version)
     if args.extend_model_vocab:
         save_checkpoint(1, model , None, None, 0)
-        sys.exit(0)
+        sys.exit()
 
     # Optimizer.
     if not release and not args.finetune and not args.no_load_optim:
@@ -1458,48 +1458,48 @@ def extend_vocab_and_load_weights(
                 grad_output_buffer=model[0].grad_output_buffer,
             )
     # Load the pretrained weights into the new embeddings
-    load_expanded_embedding_weights(
-        model[0].embedding.word_embeddings.weight,
+    load_expanded_weights(
+        model_weight=model[0].embedding.word_embeddings.weight,
         ckpt_state_dict=state_dict,
         global_old_vocab_size=old_vocab_size,
         global_new_vocab_size=model[0].vocab_size, # EXPAND
-        mpu=mpu
+        mpu=mpu,
+        weight_key='embedding.word_embeddings.weight',
+        weight_type='embedding',
     )
     # Load the pretrained weights into the new output layer
-    load_expanded_output_weights(
-        model_output_weight=model[0].output_layer.weight,
+    load_expanded_weights(
+        model_weight=model[0].output_layer.weight,
         ckpt_state_dict=state_dict,
         global_old_vocab_size=old_vocab_size,
         global_new_vocab_size=model[0].vocab_size,
         mpu=mpu,
+        weight_key='output_layer.weight',
+        weight_type='output',
     )
 
-def load_expanded_embedding_weights(
-    model_embedding_weight: torch.Tensor,
+def load_expanded_weights(
+    model_weight: torch.Tensor,
     ckpt_state_dict: dict,
     global_old_vocab_size: int,
     global_new_vocab_size: int,
     mpu,
-    weight_key='embedding.word_embeddings.weight'
+    weight_key: str,
+    weight_type: str = "embedding"  # for logging
 ):
-
     tp_rank = mpu.get_tensor_model_parallel_rank()
     tp_size = mpu.get_tensor_model_parallel_world_size()
     tp_group = mpu.get_tensor_model_parallel_group()
 
-    local_old_weight = ckpt_state_dict['model'][weight_key]  # [local_old_vocab, hidden_dim]
+    # Get local shard from checkpoint
+    local_old_weight = ckpt_state_dict['model'][weight_key].contiguous().to(model_weight.device)
 
-    # Make sure it's on the correct device and contiguous
-    local_old_weight = local_old_weight.contiguous().to(model_embedding_weight.device)
-
-    # All-gather old embedding shards from all TP ranks
-    gathered_weights = [
-        torch.empty_like(local_old_weight) for _ in range(tp_size)
-    ]
-
+    # All-gather old shards
+    gathered_weights = [torch.empty_like(local_old_weight) for _ in range(tp_size)]
     torch.distributed.all_gather(gathered_weights, local_old_weight, group=tp_group)
     full_old_weight = torch.cat(gathered_weights, dim=0)  # [global_old_vocab, hidden_dim]
-    # Determine the new slice range for this rank
+
+    # Compute new shard slice for this rank
     base_new_shard = global_new_vocab_size // tp_size
     remainder = global_new_vocab_size % tp_size
     new_local_start = tp_rank * base_new_shard
@@ -1509,57 +1509,13 @@ def load_expanded_embedding_weights(
 
     new_local_vocab_size = new_local_end - new_local_start
 
-    # Compute how many rows we can copy from old embeddings
+    # Determine how many rows we can copy from old weights
     num_rows_to_copy = max(0, min(global_old_vocab_size - new_local_start, new_local_vocab_size))
-    print(f"Loading {num_rows_to_copy} rows into model embedding from old weight on tp rank {tp_rank}")
+    print(f"Loading {num_rows_to_copy} rows into model {weight_type} from old weight on tp rank {tp_rank}")
+
     if num_rows_to_copy > 0:
         with torch.no_grad():
-            model_embedding_weight[:num_rows_to_copy].copy_(
-                full_old_weight[new_local_start:new_local_start + num_rows_to_copy]
-            )
-
-
-def load_expanded_output_weights(
-    model_output_weight: torch.Tensor,
-    ckpt_state_dict: dict,
-    global_old_vocab_size: int,
-    global_new_vocab_size: int,
-    mpu,
-    weight_key='output_layer.weight'
-):
-    tp_rank = mpu.get_tensor_model_parallel_rank()
-    tp_size = mpu.get_tensor_model_parallel_world_size()
-    tp_group = mpu.get_tensor_model_parallel_group()
-
-    local_old_weight = ckpt_state_dict['model'][weight_key]  # [local_old_vocab, hidden_dim]
-
-    # Make sure it's on the correct device and contiguous
-    local_old_weight = local_old_weight.contiguous().to(model_output_weight.device)
-
-    # All-gather old output weight shards from all TP ranks
-    gathered_weights = [
-        torch.empty_like(local_old_weight) for _ in range(tp_size)
-    ]
-    torch.distributed.all_gather(gathered_weights, local_old_weight, group=tp_group)
-    full_old_weight = torch.cat(gathered_weights, dim=0)  # [global_old_vocab, hidden_dim]
-
-    # Determine the new slice range for this rank
-    base_new_shard = global_new_vocab_size // tp_size
-    remainder = global_new_vocab_size % tp_size
-    new_local_start = tp_rank * base_new_shard
-    new_local_end = new_local_start + base_new_shard
-    if tp_rank == tp_size - 1:
-        new_local_end += remainder
-
-    new_local_vocab_size = new_local_end - new_local_start
-
-    # Compute how many rows we can copy from old output weights
-    num_rows_to_copy = max(0, min(global_old_vocab_size - new_local_start, new_local_vocab_size))
-    print(f"Loading {num_rows_to_copy} rows into model output layer from old weight on tp rank {tp_rank}")
-    
-    if num_rows_to_copy > 0:
-        with torch.no_grad():
-            model_output_weight[:num_rows_to_copy].copy_(
+            model_weight[:num_rows_to_copy].copy_(
                 full_old_weight[new_local_start:new_local_start + num_rows_to_copy]
             )
 
