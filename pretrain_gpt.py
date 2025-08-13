@@ -120,7 +120,9 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
 
         with build_model_context(**build_model_context_args):
             if args.image_vocab_size is not None:
-                args.padded_vocab_size += args.image_vocab_size
+                args.original_vocab_size = args.padded_vocab_size
+                if not args.extend_model_vocab:
+                    args.padded_vocab_size += args.image_vocab_size
                 print_rank_0(f"Using image vocab size {args.image_vocab_size}")
             model = GPTModel(
                 config=config,

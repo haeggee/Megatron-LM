@@ -1305,6 +1305,7 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
 
     # Model.
     strict = False if args.retro_add_retriever else strict
+    strict = False
     if not skip_load_to_model_and_opt:
         if len(model) == 1:
             model[0].load_state_dict(state_dict['model'], strict=strict)
@@ -1314,18 +1315,20 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
                 model[i].load_state_dict(state_dict['model%d' % i], strict=strict)
 
     # Expand the embedding size to make the model multimodal (TODO: replace model[0].vocab_size with the tokenizer vocab size)
-    if args.image_vocab_size is not None:
-        if args.image_vocab_size + 131072 != model[0].vocab_size:
-            if model[0].vocab_size < args.image_vocab_size + model[0].vocab_size:
-                old_vocab_size = model[0].vocab_size
-                print_rank_0(f"Expanding model vocab size from {model[0].vocab_size} to {args.image_vocab_size + model[0].vocab_size}")
-                model[0].vocab_size = args.image_vocab_size + model[0].vocab_size
-                extend_vocab_and_load_weights(model, state_dict, old_vocab_size, mpu)
+    if args.extend_model_vocab and args.image_vocab_size != None:
+        if model[0].vocab_size < args.image_vocab_size + args.original_vocab_size:
+            old_vocab_size = args.original_vocab_size
+            print_rank_0(f"Expanding model vocab size from {model[0].vocab_size} to {args.image_vocab_size + args.original_vocab_size}")
+            model[0].vocab_size = args.image_vocab_size + args.original_vocab_size
+            extend_vocab_and_load_weights(model, state_dict, old_vocab_size, mpu)
 
     # Fix up query/key/value matrix ordering if needed.
     checkpoint_version = get_checkpoint_version()
     print_rank_0(f' checkpoint version {checkpoint_version}')
     fix_query_key_value_ordering(model, checkpoint_version)
+    if args.extend_model_vocab:
+        save_checkpoint(1, model , None, None, 0)
+        sys.exit(0)
 
     # Optimizer.
     if not release and not args.finetune and not args.no_load_optim:
@@ -1425,7 +1428,6 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
         is_local_chkpt = (ckpt_type == CheckpointType.LOCAL)
         ft_integration.on_checkpoint_loaded(is_local_chkpt=is_local_chkpt)
 
-    save_checkpoint(1, model , None, None, 0)
     return iteration, num_floating_point_operations_so_far, tokens_so_far
 
 def extend_vocab_and_load_weights(
