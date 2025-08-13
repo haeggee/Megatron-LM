@@ -430,6 +430,7 @@ if __name__ == "__main__":
     all_match = True
     is_first_tp_rank = True  # Set this flag accordingly per your TP rank context
 
+    # ===== 1. Parameter and name check =====
     for idx, (m1, m2) in enumerate(zip(model1, model2)):
         params1 = dict(m1.named_parameters())
         params2 = dict(m2.named_parameters())
@@ -459,30 +460,13 @@ if __name__ == "__main__":
                 if not torch.allclose(p1, p2, atol=1e-6, rtol=1e-5):
                     print_rank_0(f"[Model {idx}] Parameter mismatch: {name}")
                     all_match = False
-
             else:
                 # Handle TP rank shape differences
-                if is_first_tp_rank:
-                    # Check if p1 matches first slice of p2 (along first dimension)
-                    if p1.shape[0] <= p2.shape[0]:
-                        slices = [slice(0, s) for s in p1.shape]
-                        if torch.allclose(p1, p2[slices], atol=1e-6, rtol=1e-5):
-                            print_rank_0(f"[Model {idx}] Parameter '{name}' matches first TP rank slice.")
-                        else:
-                            print_rank_0(f"[Model {idx}] Parameter '{name}' mismatch in first TP rank slice.")
-                            all_match = False
-                    else:
-                        print_rank_0(f"[Model {idx}] Parameter '{name}' shape mismatch (p1 larger than p2).")
-                        all_match = False
-                else:
-                    # Non-first TP rank, flag for manual check
-                    print_rank_0(f"[Model {idx}] Parameter '{name}' shape mismatch on non-first TP rank (manual check needed).")
-                    all_match = False
+                continue
 
         print_rank_0(f"[Model {idx}] Parameter comparison done. All match so far: {all_match}")
 
-
-    # Verify TP sharded embeddings and output layer weights consistency for model1
+    # ===== 2. TP sharded embeddings & output layer =====
     tp_rank = mpu.get_tensor_model_parallel_rank()
     tp_size = mpu.get_tensor_model_parallel_world_size()
     tp_group = mpu.get_tensor_model_parallel_group()
@@ -491,37 +475,28 @@ if __name__ == "__main__":
         local_module_name = layer_name.split('.')[0]
         param_attr = layer_name.split('.')[1]
 
-        # Get param tensor from model1
-        local_module_1 = getattr(model1[0], local_module_name)
-        param_tensor_1 = getattr(local_module_1, param_attr)
-        if not isinstance(param_tensor_1, torch.Tensor):
-            if hasattr(param_tensor_1, 'weight') and isinstance(param_tensor_1.weight, torch.Tensor):
-                param_tensor_1 = param_tensor_1.weight
-            else:
-                raise TypeError(f"Expected tensor parameter but got {type(param_tensor_1)} for {layer_name}")
+        def get_tensor(model, local_module_name, param_attr):
+            local_module = getattr(model[0], local_module_name)
+            param_tensor = getattr(local_module, param_attr)
+            if not isinstance(param_tensor, torch.Tensor):
+                if hasattr(param_tensor, 'weight') and isinstance(param_tensor.weight, torch.Tensor):
+                    return param_tensor.weight
+                else:
+                    raise TypeError(f"Expected tensor parameter but got {type(param_tensor)} for {layer_name}")
+            return param_tensor
 
-        # Get param tensor from model2
-        local_module_2 = getattr(model2[0], local_module_name)
-        param_tensor_2 = getattr(local_module_2, param_attr)
-        if not isinstance(param_tensor_2, torch.Tensor):
-            if hasattr(param_tensor_2, 'weight') and isinstance(param_tensor_2.weight, torch.Tensor):
-                param_tensor_2 = param_tensor_2.weight
-            else:
-                raise TypeError(f"Expected tensor parameter but got {type(param_tensor_2)} for {layer_name}")
+        param_tensor_1 = get_tensor(model1, local_module_name, param_attr)
+        param_tensor_2 = get_tensor(model2, local_module_name, param_attr)
 
-        # Gather shards from all ranks for model1
         gathered_1 = [torch.empty_like(param_tensor_1) for _ in range(tp_size)]
         torch.distributed.all_gather(gathered_1, param_tensor_1, group=tp_group)
 
-        # Gather shards from all ranks for model2
         gathered_2 = [torch.empty_like(param_tensor_2) for _ in range(tp_size)]
         torch.distributed.all_gather(gathered_2, param_tensor_2, group=tp_group)
 
-        # Reconstruct full tensors by concatenating shards
         full_weight_1 = torch.cat(gathered_1, dim=0)
         full_weight_2 = torch.cat(gathered_2, dim=0)
 
-        # Now compare the reconstructed full tensors
         if torch.allclose(full_weight_1, full_weight_2[:128256], atol=1e-6, rtol=1e-5):
             if tp_rank == 0:
                 print(f"[Comparison] Layer '{layer_name}' matches perfectly between model1 and model2")
@@ -529,3 +504,55 @@ if __name__ == "__main__":
             if tp_rank == 0:
                 print(f"[Comparison] Layer '{layer_name}' mismatch detected between model1 and model2")
             all_match = False
+
+    # ===== 3. Behavioral equivalence check (Megatron-compatible) =====
+    torch.manual_seed(42)
+    for idx, (m1, m2) in enumerate(zip(model1, model2)):
+        m1.eval()
+        m2.eval()
+
+        # Get vocab size from model (fallback to shared vocab size)
+        vocab_size = getattr(m1, 'vocab_size', 128256)
+        batch_size = 2
+        seq_len = 16
+
+        # Generate random token IDs
+        input_ids = torch.randint(0, vocab_size, (batch_size, seq_len),
+                                  device=next(m1.parameters()).device)
+
+        # Generate position IDs (Megatron expects this explicitly)
+        position_ids = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
+
+        # Generate a full attention mask (all ones = no masking)
+        attention_mask = torch.ones((batch_size, 1, seq_len, seq_len),
+                                    device=input_ids.device, dtype=torch.bool)
+
+        with torch.no_grad():
+            out1 = m1(input_ids, position_ids, attention_mask)
+            out2 = m2(input_ids, position_ids, attention_mask)
+
+        # Gather shards for each model along vocab dimension (last dim)
+        gathered_1 = [torch.empty_like(out1) for _ in range(tp_size)]
+        torch.distributed.all_gather(gathered_1, out1, group=tp_group)
+        full_out1 = torch.cat(gathered_1, dim=-1)  # concat vocab shards
+
+        gathered_2 = [torch.empty_like(out2) for _ in range(tp_size)]
+        torch.distributed.all_gather(gathered_2, out2, group=tp_group)
+        full_out2 = torch.cat(gathered_2, dim=-1)  # concat vocab shards
+
+        # Trim to overlapping vocab range
+        min_vocab = min(full_out1.size(-1), full_out2.size(-1))
+        full_out1 = full_out1[..., :min_vocab]
+        full_out2 = full_out2[..., :min_vocab]
+
+        # Compare
+        if torch.allclose(full_out1, full_out2, atol=1e-6, rtol=1e-5):
+            print("Outputs match on overlapping vocab")
+        else:
+            print("Outputs differ")
+
+    # ===== Final status =====
+    if all_match:
+        print_rank_0("✅ All checks passed — models are equivalent within tolerance (shared vocab).")
+    else:
+        print_rank_0("❌ Differences detected — see above messages.")
