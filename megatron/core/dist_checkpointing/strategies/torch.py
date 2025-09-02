@@ -532,6 +532,7 @@ class MCoreLoadPlanner(DefaultLoadPlanner):
         self.shapes_validation_sharded_tensors = shapes_validation_sharded_tensors
         self._intermediate_read_item_and_target: Optional[Tuple[ReadItem, torch.Tensor]] = None
 
+
     def _validate_global_shapes(self, metadata, sharded_tensors):
         for sh_ten in sharded_tensors:
             if sh_ten.key not in metadata.state_dict_metadata:

@@ -1068,6 +1068,7 @@ def load_args_from_checkpoint(
     _set_arg('xielu', force=True)
     _set_arg('layernorm_init', force=True)
     _set_arg('input_embeddings_multiplier', force=True)
+    _set_arg('use_rope_scaling', force=True)
 
     # Model parallelism args.
     if args.use_mp_args_from_checkpoint_args:
@@ -1235,7 +1236,7 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
 
     if args.fix_old_xielu:
        fix_xielu_weights(load_kwargs["sharded_state_dict"])
-    
+
     try:
         state_dict, checkpoint_name, release, ckpt_type = _load_base_checkpoint(
             load_dir, args, rank0=False, checkpointing_context=checkpointing_context,
@@ -1449,6 +1450,7 @@ def load_biencoder_checkpoint(model, only_query_model=False,
         print(' successfully loaded {}'.format(checkpoint_name))
 
     return model
+
 
 def fix_xielu_weights(state_dict: dict[str, torch.Tensor]):
     def filterfn(key: str) -> bool:
