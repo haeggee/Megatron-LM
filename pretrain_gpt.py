@@ -122,8 +122,8 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
             if args.image_vocab_size is not None:
                 args.original_vocab_size = args.padded_vocab_size
                 if not args.extend_model_vocab:
-                    args.padded_vocab_size += args.image_vocab_size
-                print_rank_0(f"Using image vocab size {args.image_vocab_size}")
+                    args.padded_vocab_size += args.padded_image_vocab_size
+                print_rank_0(f"Using image vocab size {args.image_vocab_size}, the padded size is {args.padded_image_vocab_size}")
             model = GPTModel(
                 config=config,
                 transformer_layer_spec=transformer_layer_spec,
