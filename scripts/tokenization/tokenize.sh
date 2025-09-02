@@ -1,11 +1,12 @@
 #!/bin/bash
 
-#SBATCH --account=a-a06
+#SBATCH --account=a-infra01-1
 #SBATCH --time=07:59:59
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=288
-#SBATCH --environment=/iopsstor/scratch/cscs/asolergi/Megatron-LM/container/datatrove.toml # WARN(tj.solergibert) Modify path to your own file
+#SBATCH --partition=normal
+#SBATCH --environment=/capstor/store/cscs/swissai/a06/containers/data-pipeline-pretrain/data-pipeline.toml # WARN(tj.solergibert) Modify path to your own file
 #SBATCH --no-requeue
 
 input_folder=$1
@@ -26,6 +27,9 @@ export HF_HUB_ENABLE_HF_TRANSFER=0
 rm -rf $output_folder
 rm -rf $logging_dir
 mkdir -p $output_folder
+
+pip install datatrove --upgrade --force-reinstall --no-deps
+
 
 echo "START TIME: $(date) | Preprocessing $paths_file with $number_of_tasks tasks per node with the $tokenizer tokenizer. Storing tokenized dataset in $output_folder"
 start_s=`date`

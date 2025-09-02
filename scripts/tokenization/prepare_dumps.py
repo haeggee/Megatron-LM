@@ -99,7 +99,7 @@ def main(args):
         f"Total number of files filtered to tokenize: {len(parquet_files)} ({sum(size_of_parquet_files) / 1e9:.2f} GB)"
     )
 
-    number_of_dumps = args.n_dumps if args.n_dumps else int(sum(size_of_parquet_files) / 150e9) + 1
+    number_of_dumps = args.n_dumps if args.n_dumps else int(sum(size_of_parquet_files) / 15e9) + 1 # original150GB per dump
     if number_of_dumps > len(parquet_files):
         number_of_dumps = len(parquet_files)
 

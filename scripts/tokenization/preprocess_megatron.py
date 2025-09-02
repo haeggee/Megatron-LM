@@ -99,7 +99,7 @@ def main(args):
             ),
         ],
         tasks=n_tasks,
-        workers=args.n_workers,
+        workers=args.n_workers, # 1
         logging_dir=args.logging_dir,
     )
     preprocess_executor.run()
