@@ -170,7 +170,7 @@ def get_batch(data_iterator):
 SPIKY_LOSS_PERC = 0.2
 
 
-def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
+def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, labels: torch.Tensor = None):
     """Loss function.
 
     Args:
@@ -217,10 +217,48 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
     torch.distributed.all_reduce(reporting_loss, group=mpu.get_data_parallel_group())
 
     local_num_tokens = loss[1].clone().detach().to(torch.int)
+
+    # --- Optional: Separate image/text token losses ---
+    stats_dict = {'lm loss': (reporting_loss[0], reporting_loss[1])}
+    if labels is not None:
+        losses_flat = losses.detach().clone().view(-1)
+        labels_flat = labels.transpose(0, 1).contiguous().view(-1)
+
+        img_token_start = getattr(args, "img_token_start", 128256)
+        img_token_end = getattr(args, "img_token_end", 161152)
+
+        image_mask = (labels_flat >= img_token_start) & (labels_flat <= img_token_end)
+        text_mask = ~image_mask
+
+        image_loss_mask = image_mask & (loss_mask > 0)
+        text_loss_mask = text_mask & (loss_mask > 0)
+        
+        image_loss = torch.cat([
+            torch.sum(losses_flat * image_loss_mask.float()).view(1),
+            image_loss_mask.float().sum().view(1)
+        ])
+        text_loss = torch.cat([
+            torch.sum(losses_flat * text_loss_mask.float()).view(1),
+            text_loss_mask.float().sum().view(1)
+        ])
+
+        if args.context_parallel_size > 1:
+            torch.distributed.all_reduce(image_loss, group=mpu.get_context_parallel_group())
+            torch.distributed.all_reduce(text_loss, group=mpu.get_context_parallel_group())
+
+        # Reduce for logging (across DP group)
+        reporting_image_loss = image_loss.clone().detach()
+        reporting_text_loss = text_loss.clone().detach()
+        torch.distributed.all_reduce(reporting_image_loss, group=mpu.get_data_parallel_group())
+        torch.distributed.all_reduce(reporting_text_loss, group=mpu.get_data_parallel_group())
+
+        stats_dict['image_token_loss'] = (reporting_image_loss[0], reporting_image_loss[1])
+        stats_dict['text_token_loss'] = (reporting_text_loss[0], reporting_text_loss[1])
+
     return (
         loss[0] * args.context_parallel_size,
         local_num_tokens,
-        {'lm loss': (reporting_loss[0], reporting_loss[1])},
+        stats_dict,
     )
 
 
@@ -246,7 +284,7 @@ def forward_step(data_iterator, model: GPTModel):
         output_tensor = model(tokens, position_ids, attention_mask,
                               labels=labels)
 
-    return output_tensor, partial(loss_func, loss_mask)
+    return output_tensor, partial(loss_func, loss_mask, labels=labels)
 
 
 def is_dataset_built_on_rank():
