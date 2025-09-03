@@ -1113,14 +1113,6 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
     """
     args = get_args()
     load_dir = getattr(args, load_arg)
-    wrapping_metadata = []
-
-    for m in model:
-        wrapping_metadata.append({
-            "config": m.config,
-            "ddp_config": m.ddp_config,
-            "disable_bucketing": getattr(m, "disable_bucketing", False)
-        })
 
     # Finetuning directories
     pretrained_dir = getattr(args, 'pretrained_checkpoint', None)
@@ -1319,7 +1311,7 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
         if model[0].vocab_size < args.image_vocab_size + args.original_vocab_size:
             old_vocab_size = args.original_vocab_size
             print_rank_0(f"Expanding model vocab size from {model[0].vocab_size} to {args.image_vocab_size + args.original_vocab_size}")
-            model[0].vocab_size = args.image_vocab_size + args.original_vocab_size
+            model[0].vocab_size = args.padded_image_vocab_size + args.original_vocab_size
             extend_vocab_and_load_weights(model, state_dict, old_vocab_size, mpu)
 
     # Fix up query/key/value matrix ordering if needed.
@@ -1468,15 +1460,16 @@ def extend_vocab_and_load_weights(
         weight_type='embedding',
     )
     # Load the pretrained weights into the new output layer
-    load_expanded_weights(
-        model_weight=model[0].output_layer.weight,
-        ckpt_state_dict=state_dict,
-        global_old_vocab_size=old_vocab_size,
-        global_new_vocab_size=model[0].vocab_size,
-        mpu=mpu,
-        weight_key='output_layer.weight',
-        weight_type='output',
-    )
+    if 'output_layer.weight' in state_dict['model']:
+        load_expanded_weights(
+            model_weight=model[0].output_layer.weight,
+            ckpt_state_dict=state_dict,
+            global_old_vocab_size=old_vocab_size,
+            global_new_vocab_size=model[0].vocab_size,
+            mpu=mpu,
+            weight_key='output_layer.weight',
+            weight_type='output',
+        )
 
 def load_expanded_weights(
     model_weight: torch.Tensor,
