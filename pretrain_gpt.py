@@ -102,6 +102,12 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
                     transformer_layer_spec = get_gpt_layer_local_spec(
                         args.num_experts, args.moe_grouped_gemm,
                         args.qk_layernorm, args.multi_latent_attention, args.moe_use_legacy_grouped_gemm)
+        # Logic to handle additional vocab size for multimodal models
+        if args.padded_image_vocab_size is not None:
+            args.original_vocab_size = args.padded_vocab_size - args.padded_image_vocab_size
+            if args.extend_model_vocab:
+                args.padded_vocab_size = args.original_vocab_size
+            print_rank_0(f"Using image vocab size {args.padded_image_vocab_size}")
 
         build_model_context = nullcontext
         build_model_context_args = {}
@@ -119,11 +125,6 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
                 raise RuntimeError("--fp8-param-gather requires `fp8_model_init` from TransformerEngine, but not found.")
 
         with build_model_context(**build_model_context_args):
-            if args.image_vocab_size is not None:
-                args.original_vocab_size = args.padded_vocab_size
-                if not args.extend_model_vocab:
-                    args.padded_vocab_size += args.padded_image_vocab_size
-                print_rank_0(f"Using image vocab size {args.image_vocab_size}, the padded size is {args.padded_image_vocab_size}")
             model = GPTModel(
                 config=config,
                 transformer_layer_spec=transformer_layer_spec,
