@@ -225,8 +225,8 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, labels: torc
         losses_flat = losses.detach().clone().view(-1)
         labels_flat = labels.transpose(0, 1).contiguous().view(-1)
 
-        img_token_start = getattr(args, "img_token_start", 128256)
-        img_token_end = getattr(args, "img_token_end", 161152)
+        img_token_end = args.padded_vocab_size
+        img_token_start = img_token_end - args.padded_image_vocab_size + 1
 
         image_mask = (labels_flat >= img_token_start) & (labels_flat <= img_token_end)
         text_mask = ~image_mask
