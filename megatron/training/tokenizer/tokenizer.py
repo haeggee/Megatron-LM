@@ -100,9 +100,9 @@ def build_tokenizer(args, **kwargs):
         args.padded_vocab_size = _vocab_size_with_padding(tokenizer.vocab_size, args)
     
     # If multimodal, also pad the image vocab size.
-    added_image_tokens = tokenizer._tokenizer.init_kwargs.get("added_image_tokens", None)
-    if added_image_tokens is not None:
-        args.padded_image_vocab_size = _vocab_size_with_padding(added_image_tokens, args)
+    base_vocab_size = tokenizer._tokenizer.init_kwargs.get("base_vocab_size", None)
+    if base_vocab_size is not None:
+        args.base_vocab_size = base_vocab_size
 
     return tokenizer
 

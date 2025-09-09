@@ -1307,10 +1307,10 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
                 model[i].load_state_dict(state_dict['model%d' % i], strict=strict)
 
     # Expand the embedding size to make the model multimodal
-    if args.extend_model_vocab and args.padded_image_vocab_size is not None:
-        print_rank_0(f"Expanding model vocab size from {model[0].vocab_size} to {args.padded_vocab_size + args.padded_image_vocab_size}")
-        model[0].vocab_size = args.padded_image_vocab_size + args.padded_vocab_size
-        extend_vocab_and_load_weights(model, state_dict, args.original_vocab_size, mpu)
+    if model[0].vocab_size != args.total_vocab_size:
+        print_rank_0(f"Expanding model vocab size from {model[0].vocab_size} to {args.total_vocab_size}")
+        model[0].vocab_size = args.total_vocab_size
+        extend_vocab_and_load_weights(model, state_dict, args.base_vocab_size, mpu)
 
     # Fix up query/key/value matrix ordering if needed.
     checkpoint_version = get_checkpoint_version()
