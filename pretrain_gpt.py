@@ -165,7 +165,7 @@ def get_batch(data_iterator):
 SPIKY_LOSS_PERC = 0.2
 
 
-def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
+def loss_func(loss_mask: torch.Tensor, report_loss_mask: torch.Tensor, output_tensor: torch.Tensor):
     """Loss function.
 
     Args:
@@ -179,7 +179,9 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
             the data parallel ranks
     """
     args = get_args()
-
+    
+    assert loss_mask.shape == report_loss_mask.shape if report_loss_mask is not None else True, \
+        f"loss_mask shape {loss_mask.shape} and report_loss_mask shape {report_loss_mask.shape} do not match"
     losses = output_tensor.float()
     loss_mask = loss_mask.view(-1).float()
     total_tokens = loss_mask.sum()
@@ -208,7 +210,15 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
             fatal=False,
         )
     # Reduce loss for logging.
-    reporting_loss = loss.clone().detach()
+    # reporting_loss = loss.clone().detach()
+    if report_loss_mask is not None:
+        report_loss_mask = report_loss_mask.view(-1).float()
+        reporting_loss = torch.cat([
+            torch.sum(losses.view(-1) * report_loss_mask).view(1),
+            report_loss_mask.sum().view(1)
+        ])
+    else:
+        reporting_loss = loss.clone().detach()
     torch.distributed.all_reduce(reporting_loss, group=mpu.get_data_parallel_group())
 
     local_num_tokens = loss[1].clone().detach().to(torch.int)
@@ -233,7 +243,7 @@ def forward_step(data_iterator, model: GPTModel):
     timers('batch-generator', log_level=2).start()
     global stimer
     with stimer(bdata=True):
-        tokens, labels, loss_mask, attention_mask, position_ids = get_batch(
+        tokens, labels, loss_mask, report_loss_mask, attention_mask, position_ids = get_batch(
             data_iterator)
     timers('batch-generator').stop()
 
@@ -241,8 +251,7 @@ def forward_step(data_iterator, model: GPTModel):
         output_tensor = model(tokens, position_ids, attention_mask,
                               labels=labels)
 
-    return output_tensor, partial(loss_func, loss_mask)
-
+    return output_tensor, partial(loss_func, loss_mask, report_loss_mask)
 
 def is_dataset_built_on_rank():
     return (
@@ -257,6 +266,8 @@ def core_gpt_dataset_config_from_args(args):
     blend: Optional[Tuple[List[str], Optional[List[float]]]]
     blend_per_split: Optional[List[Optional[Tuple[List[str], Optional[List[float]]]]]]
     blend, blend_per_split = get_blend_and_blend_per_split(args)
+
+    print("masking_meta_data:",args.masking_meta_data)
 
     return GPTDatasetConfig(
         random_seed=args.seed,
@@ -277,6 +288,7 @@ def core_gpt_dataset_config_from_args(args):
         goldfish_k=args.goldfish_k,
         goldfish_h=args.goldfish_h,
         masking_meta_data=args.masking_meta_data,
+        meta_data_appending=args.meta_data_appending
     )
 
 

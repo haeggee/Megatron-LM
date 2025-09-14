@@ -50,6 +50,9 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
     masking_meta_data: bool = True
     """Option to mask out meta data tokens for loss calculation"""
 
+    meta_data_appending: bool = False
+    """Applies masking to the metadata only for loss monitoring and not for optimization"""
+
     create_attention_mask: bool = True
     """Option to enable the attention masks generation. Can be disabled if attention kernel
        generates masks by itself.
@@ -253,7 +256,7 @@ class GPTDataset(MegatronDataset):
             )
 
             loss_mask[goldfish_labels == self._goldfish_token_id] = 0.0
-
+        
         if self.config.masking_meta_data:
             meta_masks = apply_meta_data_mask(
                 labels,
@@ -261,27 +264,33 @@ class GPTDataset(MegatronDataset):
                 self._eoc_token_id,
             )
             loss_mask[meta_masks == self._boc_token_id] = 0.0
+        
+        report_loss_mask = None
+        if self.config.meta_data_appending:
+                report_loss_mask = loss_mask.clone()
+                report_loss_mask[meta_masks == self._boc_token_id] = 0.0
+            else:
+                loss_mask[meta_masks == self._boc_token_id] = 0.0
 
 
         # Batch padding sequence so we mask the loss
         if idx is None:
             loss_mask = torch.zeros_like(loss_mask)
 
+        return_dict = {
+            "tokens": tokens,
+            "labels": labels,
+            "loss_mask": loss_mask,
+            "position_ids": position_ids,
+        }
+
+        if report_loss_mask is not None:
+            return_dict["report_loss_mask"] = report_loss_mask
+
         if self.config.create_attention_mask:
-            return {
-                "tokens": tokens,
-                "labels": labels,
-                "attention_mask": attention_mask,
-                "loss_mask": loss_mask,
-                "position_ids": position_ids,
-            }
-        else:
-            return {
-                "tokens": tokens,
-                "labels": labels,
-                "loss_mask": loss_mask,
-                "position_ids": position_ids,
-            }
+            return_dict["attention_mask"] = attention_mask
+
+        return return_dict
 
     def _query_document_sample_shuffle_indices(
         self, idx: int
