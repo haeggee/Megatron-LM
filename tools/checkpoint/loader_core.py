@@ -435,7 +435,7 @@ def _load_checkpoint(queue, args):
             tokenizer=tok,
             goldfish_loss=False,
             masking_meta_data=True,
-            meta_data_appending=args.meta_data_appending,
+            meta_data_appending=False,
         )
         datasets = BlendedMegatronDatasetBuilder(
             MockGPTDataset, [1000, None, None], lambda: True, config
