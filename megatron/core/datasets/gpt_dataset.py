@@ -269,8 +269,8 @@ class GPTDataset(MegatronDataset):
         if self.config.meta_data_appending:
                 report_loss_mask = loss_mask.clone()
                 report_loss_mask[meta_masks == self._boc_token_id] = 0.0
-            else:
-                loss_mask[meta_masks == self._boc_token_id] = 0.0
+        else:
+            loss_mask[meta_masks == self._boc_token_id] = 0.0
 
 
         # Batch padding sequence so we mask the loss
