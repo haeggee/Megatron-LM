@@ -257,20 +257,25 @@ class GPTDataset(MegatronDataset):
 
             loss_mask[goldfish_labels == self._goldfish_token_id] = 0.0
         
+        report_loss_mask = None
         if self.config.masking_meta_data:
             meta_masks = apply_meta_data_mask(
                 labels,
                 self._boc_token_id,
                 self._eoc_token_id,
             )
-            loss_mask[meta_masks == self._boc_token_id] = 0.0
+            # loss_mask[meta_masks == self._boc_token_id] = 0.0
         
-        report_loss_mask = None
-        if self.config.meta_data_appending:
+        
+            if self.config.meta_data_appending:
                 report_loss_mask = loss_mask.clone()
                 report_loss_mask[meta_masks == self._boc_token_id] = 0.0
-        else:
-            loss_mask[meta_masks == self._boc_token_id] = 0.0
+                loss_mask[labels == self._boc_token_id] = 0.0
+                loss_mask[labels == self._eoc_token_id] = 0.0
+
+            else:
+                loss_mask[meta_masks == self._boc_token_id] = 0.0
+
 
 
         # Batch padding sequence so we mask the loss
