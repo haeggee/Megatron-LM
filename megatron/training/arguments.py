@@ -1162,9 +1162,6 @@ def _add_network_size_args(parser):
     group.add_argument("--layernorm-init", default=None, type=float,
                        help="Initialization value for layernorms")
     
-    group.add_argument("--image-vocab-size", type=int, default=None,
-                       help="Vocabulary size for image tokens. If set, the model will use "
-                       "image tokens in addition to text tokens. This is used for multimodal models.")
     return parser
 
 
