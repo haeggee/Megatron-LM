@@ -1306,9 +1306,9 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
                 model[i].load_state_dict(state_dict['model%d' % i], strict=strict)
 
     # Expand the embedding size to make the model multimodal
-    if model[0].vocab_size != args.total_vocab_size:
-        print_rank_0(f"Expanding model vocab size from {model[0].vocab_size} to {args.total_vocab_size}")
-        model[0].vocab_size = args.total_vocab_size
+    if model[0].vocab_size != args.total_multimodal_vocab_size:
+        print_rank_0(f"Expanding model vocab size from {model[0].vocab_size} to {args.total_multimodal_vocab_size}")
+        model[0].vocab_size = args.total_multimodal_vocab_size
         extend_vocab_and_load_weights(model, state_dict, args.base_vocab_size, mpu)
 
     # Fix up query/key/value matrix ordering if needed.

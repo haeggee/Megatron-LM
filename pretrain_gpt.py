@@ -102,11 +102,12 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
                     transformer_layer_spec = get_gpt_layer_local_spec(
                         args.num_experts, args.moe_grouped_gemm,
                         args.qk_layernorm, args.multi_latent_attention, args.moe_use_legacy_grouped_gemm)
+
         # Logic to handle additional vocab size for multimodal models
-        if args.base_vocab_size != args.padded_vocab_size:
-            args.total_vocab_size = args.padded_vocab_size
+        if hasattr(args, "base_vocab_size") and args.base_vocab_size != args.padded_vocab_size:
+            args.total_multimodal_vocab_size = args.padded_vocab_size
             if args.extend_model_vocab:
-                args.padded_vocab_size = args.base_vocab_size
+                args.padded_vocab_size = args.base_padded_vocab_size
 
         build_model_context = nullcontext
         build_model_context_args = {}
@@ -225,7 +226,7 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, labels: torc
         labels_flat = labels.transpose(0, 1).contiguous().view(-1)
 
         img_token_start = args.base_vocab_size 
-        img_token_end = args.total_vocab_size
+        img_token_end = args.total_multimodal_vocab_size
 
         image_mask = (labels_flat >= img_token_start) & (labels_flat <= img_token_end)
         text_mask = ~image_mask

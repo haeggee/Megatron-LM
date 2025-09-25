@@ -103,6 +103,7 @@ def build_tokenizer(args, **kwargs):
     base_vocab_size = tokenizer._tokenizer.init_kwargs.get("base_vocab_size", None)
     if base_vocab_size is not None:
         args.base_vocab_size = base_vocab_size
+        args.base_padded_vocab_size = _vocab_size_with_padding(base_vocab_size, args)
 
     return tokenizer
 
