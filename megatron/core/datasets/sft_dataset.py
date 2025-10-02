@@ -1,19 +1,22 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, override
 
+import time
+import os
 import logging
 import numpy as np
 import torch
 
-from megatron.core.datasets.gpt_dataset import GPTDatasetConfig, _PAD_TOKEN_ID
+from megatron.core.datasets.gpt_dataset import GPTDatasetConfig, _PAD_TOKEN_ID, GPTDataset, _GOLDFISH_TOKEN_ID
 from megatron.core.datasets.indexed_dataset import IndexedDataset
 from megatron.core.datasets.megatron_dataset import LowLevelDataset, MegatronDataset
 from megatron.core.datasets.utils import Split
 from megatron.core.datasets.utils_s3 import is_s3_path, S3Config
+from megatron.core.utils import log_single_rank
 
 logger = logging.getLogger(__name__)
 
 
-class SFTIndexedDataset(MegatronDataset):
+class SFTIndexedDataset(GPTDataset):
     """
     The dataset used during SFT. Uses Low Level Indexed Dataset to load from pre-tokenized SFT data.
     Each original document/dataset-sample is loaded one by one and padded to fill the sequence length.
@@ -28,15 +31,38 @@ class SFTIndexedDataset(MegatronDataset):
         index_split: Split,
         config: GPTDatasetConfig,
     ) -> None:
-        super().__init__(dataset, dataset_path, indices, num_samples, index_split, config)
-        # TODO[Raphael] Add support for goldfish loss & caching here as well (as in the original GPTDataset)?
+        # Call Megatron Dataset init instead of direct parent, as we initialize index differently
+        MegatronDataset.__init__(self, dataset, dataset_path, indices, num_samples, index_split, config)
+
+        # Set pad token
         try:
             self._pad_token_id = self.config.tokenizer.pad
         except Exception:
             self._pad_token_id = _PAD_TOKEN_ID
-        self.max_seq_len = self.config.sequence_length
-        self.num_samples = self.dataset.sequence_lengths.shape[0]
-        self._eod_token_id = self.config.tokenizer.eod
+
+        # Build shuffle indices
+        self.document_index, self.shuffle_index = self._build_single_document_indices()
+
+        # Initialize caching variables
+        self.masks_and_position_ids_are_cacheable = not any(
+            [
+                self.config.reset_position_ids,
+                self.config.reset_attention_mask,
+                self.config.eod_mask_loss,
+                self.config.goldfish_loss,
+            ]
+        )
+        self.masks_and_position_ids_are_cached = False
+        self.cached_attention_mask = None
+        self.cached_loss_mask = None
+        self.cached_position_ids = None
+
+        # Goldfish loss setup
+        if self.config.goldfish_loss:
+            self._goldfish_k = self.config.goldfish_k
+            self._goldfish_h = self.config.goldfish_h
+            self._goldfish_token_id = _GOLDFISH_TOKEN_ID
+            self._goldfish_hash_table = None
 
     @staticmethod
     def numel_low_level_dataset(low_level_dataset: IndexedDataset) -> int:
@@ -74,113 +100,258 @@ class SFTIndexedDataset(MegatronDataset):
             )
         return IndexedDataset(dataset_path, multimodal=False, mmap=config.mmap_bin_files)
 
-    def __len__(self) -> int:
-        return self.num_samples
+    def _build_single_document_indices(self):
+        """Build document index and shuffle index for single-document sampling
 
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        Returns:
+            Tuple[numpy.ndarray, numpy.ndarray]: The document index and shuffle index
         """
-        Get item from dataset.
-        1) retrieve raw tokens from indexed dataset
-        2) padding added
-        3) apply masking to loss and attention
-        """
+        path_to_cache = self.config.path_to_cache
+        if path_to_cache is None and not self.config.mock:
+            path_to_cache = os.path.join(
+                self.indexed_dataset.path_prefix, "cache", f"{type(self).__name__}_indices"
+            )
 
-        # Load sample (tokens and labels)
-        if idx is None:
-            tokens_raw = self.dataset[0]
+        if path_to_cache:
+            base = f"{self.unique_description_hash}-{type(self).__name__}-{self.index_split.name}"
+            get_path_to = lambda affix: os.path.join(path_to_cache, f"{base}-{affix}")
+            path_to_description = get_path_to("description.txt")
+            path_to_document_index = get_path_to("document_index.npy")
+            path_to_shuffle_index = get_path_to("shuffle_index.npy")
+            cache_hit = all(
+                map(
+                    os.path.isfile,
+                    [path_to_description, path_to_document_index, path_to_shuffle_index],
+                )
+            )
         else:
-            tokens_raw = self.dataset[int(idx % self.num_samples)]
-        tokens_raw = torch.from_numpy(tokens_raw).long()
+            cache_hit = False
 
-        if self.config.add_extra_token_to_sequence:
-            tokens = tokens_raw[:-1].contiguous()
-            labels = tokens_raw[1:].contiguous()
-        else:
-            tokens = tokens_raw
-            labels = torch.roll(tokens_raw, shifts=-1, dims=0)
-            labels[-1] = self._pad_token_id
+        if not path_to_cache or (
+                not cache_hit
+                and (not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0)
+        ):
+            log_single_rank(
+                logger,
+                logging.INFO,
+                f"Build and save the {type(self).__name__} {self.index_split.name} indices",
+            )
 
-        # TODO[Raphael]: can we assume that eod token is already in data if needed ?
-        #force_eod_length = int(tokenizer.force_eod)
+            t_beg = time.time()
 
-        if len(tokens) > self.max_seq_len:
-            logger.warning(f"Tokens exceed max_seq_len: {len(tokens)}!! Cut off tokens!")
-            tokens = tokens[: self.max_seq_len] # - force_eod_length]
-            labels = labels[: self.max_seq_len] # - force_eod_length]
+            numpy_random_state = np.random.RandomState(self.config.random_seed)
 
-        # Add padding
-        padding_len = self.max_seq_len - len(tokens)
-        assert padding_len >= 0
-        #filler = [tokenizer.eod] * force_eod_length + [self._pad_token_id] * (padding_len + 1)
-        filler = [self._pad_token_id] * padding_len
+            # Each document maps to exactly one sample
+            if self.num_samples_requested is None:
+                # Use all documents once
+                num_samples = len(self.indexed_indices)
+                num_epochs = 1
+            else:
+                # Calculate how many epochs needed
+                num_samples = self.num_samples_requested
+                docs_per_epoch = len(self.indexed_indices)
+                num_epochs = (num_samples + docs_per_epoch - 1) // docs_per_epoch
 
-        tokens = np.array(tokens.tolist() + filler, dtype=np.int64)
-        labels = np.array(labels.tolist() + filler, dtype=np.int64)
+            # Build document index by repeating indices for each epoch
+            document_index = np.tile(self.indexed_indices, num_epochs).astype(np.int32)
 
-        tokens = torch.tensor(tokens)
-        labels = torch.tensor(labels)
+            # Shuffle all documents
+            numpy_random_state.shuffle(document_index)
 
-        tokens = tokens[:-1].contiguous()
-        target = labels[1:].contiguous()
+            # Truncate to exact number of samples if specified
+            if self.num_samples_requested is not None:
+                document_index = document_index[:self.num_samples_requested]
 
-        # create attn & loss mask
-        loss_mask, position_ids, attention_mask = self._get_ltor_masks_and_position_ids(
-            target, self.max_seq_len, self._pad_token_id, self.config.eod_mask_loss, self._eod_token_id
+            # Build shuffle index (identity mapping since we already shuffled documents)
+            shuffle_index = np.arange(len(document_index), dtype=np.int32)
+
+            if path_to_cache:
+                os.makedirs(path_to_cache, exist_ok=True)
+                with open(path_to_description, "wt") as writer:
+                    writer.write(self.unique_description)
+                np.save(path_to_document_index, document_index, allow_pickle=True)
+                np.save(path_to_shuffle_index, shuffle_index, allow_pickle=True)
+            else:
+                log_single_rank(
+                    logger,
+                    logging.WARNING,
+                    f"Unable to save {type(self).__name__} indexes because path_to_cache is None",
+                )
+
+            t_end = time.time()
+            log_single_rank(logger, logging.DEBUG, f"\t> time elapsed: {t_end - t_beg:4f} seconds")
+            log_single_rank(logger, logging.INFO, f"> total number of samples: {len(document_index)}")
+            log_single_rank(logger, logging.INFO, f"> total number of epochs: {num_epochs}")
+
+            return document_index, shuffle_index
+
+        # Load from cache
+        log_single_rank(
+            logger, logging.INFO, f"Load the {type(self).__name__} {self.index_split.name} indices"
         )
 
-        # For padded sequences, ensure the embedding layer can map the token ID
+        t_beg = time.time()
+        document_index = np.load(path_to_document_index, allow_pickle=True, mmap_mode='r')
+        t_end = time.time()
+        log_single_rank(logger, logging.DEBUG, f"\t> document index load time: {t_end - t_beg:4f} seconds")
+
+        t_beg = time.time()
+        shuffle_index = np.load(path_to_shuffle_index, allow_pickle=True, mmap_mode='r')
+        t_end = time.time()
+        log_single_rank(logger, logging.DEBUG, f"\t> shuffle index load time: {t_end - t_beg:4f} seconds")
+
+        log_single_rank(logger, logging.INFO, f"> total number of samples: {len(document_index)}")
+
+        return document_index, shuffle_index
+
+    def __len__(self) -> int:
+        return self.document_index.shape[0] - 1
+
+    def __getitem__(self, idx: Optional[int]) -> Dict[str, torch.Tensor]:
+        """Get a single sample from the dataset
+
+        Args:
+            idx (Optional[int]): The index into the dataset
+
+        Returns:
+            Dict[str, torch.Tensor]: The sample information wrapped in a dictionary
+        """
+        if idx is None:
+            # Batch padding sequence
+            text = np.array(
+                [self._pad_token_id] * (self.config.sequence_length + self.config.add_extra_token_to_sequence),
+                dtype=np.int64)
+        else:
+            # Get the shuffled document index
+            doc_idx = self.shuffle_index[idx]
+            actual_doc_id = self.document_index[doc_idx]
+
+            # Get the entire document
+            document = self.indexed_dataset.get(actual_doc_id)
+
+            # Truncate or pad to sequence_length
+            target_length = self.config.sequence_length + self.config.add_extra_token_to_sequence
+
+            if len(document) >= target_length:
+                # Truncate
+                logger.warning(f"Document {actual_doc_id} is longer than model sequence length {target_length} and gets trunc")
+                text = document[:target_length]
+            else:
+                # Pad
+                padding_length = target_length - len(document)
+                text = np.concatenate([document, np.full(padding_length, self._pad_token_id, dtype=np.int64)])
+
+        text = torch.from_numpy(text).long()
+
+        # Create tokens and labels
+        if self.config.add_extra_token_to_sequence:
+            tokens = text[:-1].contiguous()
+            labels = text[1:].contiguous()
+        else:
+            tokens = text
+            labels = torch.roll(text, shifts=-1, dims=0)
+            labels[-1] = self._pad_token_id
+
+        # Generate or use cached masks and position ids
+        if (
+                not self.masks_and_position_ids_are_cacheable
+                or not self.masks_and_position_ids_are_cached
+        ):
+            attention_mask, loss_mask, position_ids = self._get_ltor_masks_and_position_ids(
+                tokens,
+                self.config.tokenizer.eod,
+                self.config.reset_position_ids,
+                self.config.reset_attention_mask,
+                self.config.eod_mask_loss,
+                self.config.create_attention_mask,
+            )
+            if self.masks_and_position_ids_are_cacheable:
+                self.cached_attention_mask = attention_mask
+                self.cached_loss_mask = loss_mask
+                self.cached_position_ids = position_ids
+                self.masks_and_position_ids_are_cached = True
+        else:
+            attention_mask = self.cached_attention_mask
+            loss_mask = self.cached_loss_mask
+            position_ids = self.cached_position_ids
+
+        # Mask loss for padded tokens
+        loss_mask[labels == self._pad_token_id] = 0.0
+
+        # Map pad tokens to valid embedding indices
         tokens[tokens == self._pad_token_id] = 0
         labels[labels == self._pad_token_id] = 0
 
+        # Apply goldfish loss masking if enabled
+        if self.config.goldfish_loss:
+            if self._goldfish_hash_table is None:
+                self._goldfish_hash_table = self._create_hash_table(device=labels.device)
 
+            goldfish_labels = self.apply_goldfish(
+                labels,
+                goldfish_token_id=self._goldfish_token_id,
+                k=self._goldfish_k,
+                goldfish_hash_table=self._goldfish_hash_table,
+                goldfish_context_width=self._goldfish_h,
+            )
+            loss_mask[goldfish_labels == self._goldfish_token_id] = 0.0
+
+        # Mask loss for batch padding sequences
+        if idx is None:
+            loss_mask = torch.zeros_like(loss_mask)
+
+        # Return sample dict
         if self.config.create_attention_mask:
-            ret = {
-                'tokens': tokens,
-                'labels': target,
-                'attention_mask': attention_mask,
-                'loss_mask': loss_mask,
-                'position_ids': position_ids,
+            return {
+                "tokens": tokens,
+                "labels": labels,
+                "attention_mask": attention_mask,
+                "loss_mask": loss_mask,
+                "position_ids": position_ids,
             }
         else:
-            ret = {
-                'tokens': tokens,
-                'labels': target,
-                'loss_mask': loss_mask,
-                'position_ids': position_ids,
+            return {
+                "tokens": tokens,
+                "labels": labels,
+                "loss_mask": loss_mask,
+                "position_ids": position_ids,
             }
 
-        return ret
-
-    def _get_ltor_masks_and_position_ids(self, labels, max_seq_len, pad_token_id, do_mask_eod, eod_token_id):
+    @override
+    def _get_ltor_masks_and_position_ids(self, tokens,
+                tokenizer_eod_id,
+                reset_position_ids,
+                reset_attention_mask,
+                eod_mask_loss,
+                create_attention_mask):
         """Build masks and position id for left to right model for SFT
             1. find user messages in conversation list
-            2. mask prompts and paddings
+            2. mask prompts
         """
-        assert not self.config.reset_position_ids and not self.config.reset_attention_mask
+        assert not reset_position_ids and not reset_attention_mask
 
         # Position ids.
-        position_ids = torch.arange(max_seq_len, dtype=torch.long)
+        position_ids = torch.arange(self.config.sequence_length, dtype=torch.long)
 
         # Loss mask.
-        loss_mask = torch.ones(max_seq_len, dtype=torch.float)
-        loss_mask[labels == pad_token_id] = 0.0  # mask paddings
+        loss_mask = torch.ones(self.config.sequence_length, dtype=torch.float)
 
         # TODO[Raphael]: find prompts and mask them
 
         # Mask eod if wanted
-        if do_mask_eod:
-            loss_mask[labels == eod_token_id] = 0.0
+        if eod_mask_loss:
+            loss_mask[tokens == tokenizer_eod_id] = 0.0
 
         # loss mask on batch padding
         if idx is None:
-            loss_mask = torch.zeros_like(labels)
+            loss_mask = torch.zeros_like(tokens)
 
-        if self.config.create_attention_mask:
+        if create_attention_mask:
             attention_mask = torch.tril(
-                torch.ones((max_seq_len, max_seq_len), device=labels.device)
+                torch.ones((self.config.sequence_length, self.config.sequence_length), device=tokens.device)
             )
             # Mask padding tokens in attention mask:
-            no_padding_mask = (labels != pad_token_id).float() # 1=real, 0=padding
+            no_padding_mask = (tokens != self._pad_token_id).float() # 1=real, 0=padding
             attention_mask = attention_mask * no_padding_mask.unsqueeze(0)
             # Convert attention mask to binary:
             attention_mask = attention_mask.unsqueeze(0)
