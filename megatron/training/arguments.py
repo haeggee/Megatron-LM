@@ -1586,6 +1586,8 @@ def _add_training_args(parser):
     group.add_argument('--disable-tp-comm-split-rs', action='store_false',
                        help='Disables the Reduce-Scatter overlap with fprop GEMM.',
                        dest='tp_comm_split_rs')
+    group.add_argument('--sft', action='store_true', help='Perform SFT training. Will use the SFTDataset to load pre-tokenized'
+                                                          ' data sample by sample, with padding and prompt-masking.')
 
     return parser
 
