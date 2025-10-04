@@ -5,6 +5,7 @@ import os
 import logging
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from megatron.core.datasets.gpt_dataset import GPTDatasetConfig, _PAD_TOKEN_ID, GPTDataset, _GOLDFISH_TOKEN_ID
 from megatron.core.datasets.indexed_dataset import IndexedDataset
@@ -34,11 +35,16 @@ class SFTIndexedDataset(GPTDataset):
         # Call Megatron Dataset init instead of direct parent, as we initialize index differently
         MegatronDataset.__init__(self, dataset, dataset_path, indices, num_samples, index_split, config)
 
+        self.tokenizer = config.tokenizer
         # Set pad token
         try:
             self._pad_token_id = self.config.tokenizer.pad
         except Exception:
             self._pad_token_id = _PAD_TOKEN_ID
+
+        # TODO: Pass sequences dynamically
+        self._sft_user_begin_sequence = self.tokenizer.tokenize('<|start_header_id|>assistant<|end_header_id|>\n\n')
+        self._sft_turn_end_sequence = self.tokenizer.tokenize('<|eot_id|>')
 
         # Build shuffle indices
         self.document_index, self.shuffle_index = self._build_single_document_indices()
@@ -336,7 +342,41 @@ class SFTIndexedDataset(GPTDataset):
         # Loss mask.
         loss_mask = torch.ones(self.config.sequence_length, dtype=torch.float)
 
-        # TODO[Raphael]: find prompts and mask them
+        # Mask user sequences for loss
+        begin_seq = torch.tensor(self._sft_user_begin_sequence, dtype=tokens.dtype, device=tokens.device)
+        end_seq = torch.tensor(self._sft_turn_end_sequence, dtype=tokens.dtype, device=tokens.device)
+
+        begin_len = len(begin_seq)
+        end_len = len(end_seq)
+
+        if begin_len > 0 and len(tokens) >= begin_len:
+            # Vectorized pattern matching using unfold
+            if begin_len == 1:
+                matches_begin = (tokens == begin_seq[0])
+            else:
+                # Create sliding windows
+                windows = tokens.unfold(0, begin_len, 1)
+                # Compare all windows at once
+                matches_begin = (windows == begin_seq).all(dim=1)
+                # Pad to original length
+                matches_begin = F.pad(matches_begin, (0, begin_len - 1), value=False)
+
+            if end_len > 0:
+                if end_len == 1:
+                    matches_end = (tokens == end_seq[0])
+                else:
+                    windows = tokens.unfold(0, end_len, 1)
+                    matches_end = (windows == end_seq).all(dim=1)
+                    matches_end = F.pad(matches_end, (0, end_len - 1), value=False)
+
+                begin_indices = torch.where(matches_begin)[0]
+                end_indices = torch.where(matches_end)[0]
+
+                # Vectorized masking
+                for begin_idx in begin_indices:
+                    next_ends = end_indices[end_indices > begin_idx]
+                    end = next_ends[0].item() + end_len if len(next_ends) > 0 else len(loss_mask)
+                    loss_mask[begin_idx.item():end] = 0.0
 
         # Mask eod if wanted
         if eod_mask_loss:
