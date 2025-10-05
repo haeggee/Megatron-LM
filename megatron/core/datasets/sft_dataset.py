@@ -41,8 +41,8 @@ class SFTIndexedDataset(GPTDataset):
             self._pad_token_id = _PAD_TOKEN_ID
 
         # TODO: Pass sequences dynamically
-        self._sft_user_begin_sequence = self.tokenizer.tokenize('<|start_header_id|>user<|end_header_id|>\n\n')
-        self._sft_turn_end_sequence = self.tokenizer.tokenize('<|eot_id|>')
+        self._sft_user_begin_sequence = self.tokenizer.tokenize('<|start_header_id|>user<|end_header_id|>', add_special_tokens=False)
+        self._sft_turn_end_sequence = self.tokenizer.tokenize('<|eot_id|>', add_special_tokens=False)
 
         # Build shuffle indices
         self.document_index = self._build_single_document_indices()
@@ -168,7 +168,7 @@ class SFTIndexedDataset(GPTDataset):
         return document_index
 
     def __len__(self) -> int:
-        return self.document_index.shape[0] - 1
+        return len(self.document_index)
 
     def __getitem__(self, idx: Optional[int]) -> Dict[str, torch.Tensor]:
         """Get a single sample from the dataset. 
@@ -235,6 +235,19 @@ class SFTIndexedDataset(GPTDataset):
 
         # Mask loss for padded tokens (this also masks batch padding if idx is None)
         loss_mask[labels == self._pad_token_id] = 0.0
+
+        # DEBUG: Log how many tokens are actually being trained on
+        #num_unmasked = loss_mask.sum().item()
+        #total_tokens = loss_mask.numel()
+        #if idx is not None and idx % 100 == 0:  # Log every 100 samples
+        #    logger.warning(f"Sample {idx}: {num_unmasked}/{total_tokens} tokens unmasked "
+        #                 f"({100*num_unmasked/total_tokens:.1f}%), "
+        #                 f"doc_length={len(torch.from_numpy(document))}, "
+        #                 f"num_pad_tokens={(labels == self._pad_token_id).sum().item()}")
+        #    user_begin_seq = torch.tensor(self._sft_user_begin_sequence, dtype=tokens.dtype, device=tokens.device)
+        #    logger.warning(f"Sample {idx}: Looking for user_begin pattern: {user_begin_seq.tolist()}")
+        #    logger.warning(f"Sample {idx}: Token sequence sample: {tokens[:100].tolist()}")
+        #    logger.warning(f"Sample {idx}: Loss mask sample: {loss_mask[:100].tolist()}")
 
         # Map pad tokens to valid embedding indices
         tokens[tokens == self._pad_token_id] = 0
@@ -336,13 +349,13 @@ class SFTIndexedDataset(GPTDataset):
                 torch.ones((self.config.sequence_length, self.config.sequence_length), device=tokens.device)
             )
             # Mask padding tokens in attention mask:
-            no_padding_mask = (tokens != self._pad_token_id).float() # 1=real, 0=padding
+            #no_padding_mask = (tokens != self._pad_token_id).float() # 1=real, 0=padding
             
             # Mask both rows (queries from padding) and columns (keys to padding)
             # Row masking: padding tokens shouldn't attend to anything
-            attention_mask = attention_mask * no_padding_mask.unsqueeze(1)
+            #attention_mask = attention_mask * no_padding_mask.unsqueeze(1)
             # Column masking: nothing should attend to padding tokens
-            attention_mask = attention_mask * no_padding_mask.unsqueeze(0)
+            #attention_mask = attention_mask * no_padding_mask.unsqueeze(0)
             
             # Convert attention mask to binary:
             attention_mask = attention_mask.unsqueeze(0)
