@@ -27,13 +27,13 @@ class SFTIndexedDataset(GPTDataset):
         self,
         dataset: LowLevelDataset,
         dataset_path: Optional[str],
-        indices: np.ndarray,
+        indexed_indices: np.ndarray,
         num_samples: Optional[int],
         index_split: Split,
         config: GPTDatasetConfig,
     ) -> None:
         # Call Megatron Dataset init instead of direct parent, as we initialize index differently
-        MegatronDataset.__init__(self, dataset, dataset_path, indices, num_samples, index_split, config)
+        MegatronDataset.__init__(self, dataset, dataset_path, indexed_indices, num_samples, index_split, config)
 
         self.tokenizer = config.tokenizer
         # Set pad token
@@ -43,11 +43,11 @@ class SFTIndexedDataset(GPTDataset):
             self._pad_token_id = _PAD_TOKEN_ID
 
         # TODO: Pass sequences dynamically
-        self._sft_user_begin_sequence = self.tokenizer.tokenize('<|start_header_id|>assistant<|end_header_id|>\n\n')
+        self._sft_user_begin_sequence = self.tokenizer.tokenize('<|start_header_id|>user<|end_header_id|>\n\n')
         self._sft_turn_end_sequence = self.tokenizer.tokenize('<|eot_id|>')
 
         # Build shuffle indices
-        self.document_index, self.shuffle_index = self._build_single_document_indices()
+        self.document_index = self._build_single_document_indices()
 
         # Initialize caching variables
         self.masks_and_position_ids_are_cacheable = not any(
@@ -70,44 +70,11 @@ class SFTIndexedDataset(GPTDataset):
             self._goldfish_token_id = _GOLDFISH_TOKEN_ID
             self._goldfish_hash_table = None
 
-    @staticmethod
-    def numel_low_level_dataset(low_level_dataset: IndexedDataset) -> int:
-        """Abstract method implementation
-
-        For GPT, the underlying IndexedDataset should be split by sequence, as opposed to, say,
-        BERT, which should be split by document
-
-        Args:
-            low_level_dataset (IndexedDataset): The underlying IndexedDataset
-
-        Returns:
-            int: The number of unique elements in the underlying IndexedDataset
-        """
-        return low_level_dataset.sequence_lengths.shape[0]
-
-    @staticmethod
-    def build_low_level_dataset(dataset_path: str, config: GPTDatasetConfig) -> IndexedDataset:
-        """Abstract method implementation
-
-        Args:
-            dataset_path (str): The real path prefix to the IndexedDataset .bin and .idx files
-
-            config (GPTDatasetConfig): The config
-
-        Returns:
-            IndexedDataset: The underlying IndexedDataset
-        """
-        if is_s3_path(dataset_path):
-            return IndexedDataset(
-                dataset_path,
-                multimodal=False,
-                mmap=config.mmap_bin_files,
-                s3_config=S3Config(path_to_idx_cache=config.s3_cache_path),
-            )
-        return IndexedDataset(dataset_path, multimodal=False, mmap=config.mmap_bin_files)
 
     def _build_single_document_indices(self):
-        """Build document index and shuffle index for single-document sampling
+        """
+        Build document index and shuffle index for single-document sampling. Only one document is used per sample.
+
 
         Returns:
             Tuple[numpy.ndarray, numpy.ndarray]: The document index and shuffle index
@@ -115,7 +82,7 @@ class SFTIndexedDataset(GPTDataset):
         path_to_cache = self.config.path_to_cache
         if path_to_cache is None and not self.config.mock:
             path_to_cache = os.path.join(
-                self.indexed_dataset.path_prefix, "cache", f"{type(self).__name__}_indices"
+                self.dataset.path_prefix, "cache", f"{type(self).__name__}_indices"
             )
 
         if path_to_cache:
@@ -123,16 +90,19 @@ class SFTIndexedDataset(GPTDataset):
             get_path_to = lambda affix: os.path.join(path_to_cache, f"{base}-{affix}")
             path_to_description = get_path_to("description.txt")
             path_to_document_index = get_path_to("document_index.npy")
-            path_to_shuffle_index = get_path_to("shuffle_index.npy")
             cache_hit = all(
                 map(
                     os.path.isfile,
-                    [path_to_description, path_to_document_index, path_to_shuffle_index],
+                    [
+                        path_to_description,
+                        path_to_document_index,
+                    ],
                 )
             )
         else:
             cache_hit = False
 
+        # if index files not cached, create indices and save to cache
         if not path_to_cache or (
                 not cache_hit
                 and (not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0)
@@ -148,35 +118,31 @@ class SFTIndexedDataset(GPTDataset):
             numpy_random_state = np.random.RandomState(self.config.random_seed)
 
             # Each document maps to exactly one sample
-            if self.num_samples_requested is None:
+            if self.num_samples is None:
                 # Use all documents once
-                num_samples = len(self.indexed_indices)
+                num_samples = len(self.indices)
                 num_epochs = 1
             else:
                 # Calculate how many epochs needed
-                num_samples = self.num_samples_requested
-                docs_per_epoch = len(self.indexed_indices)
+                num_samples = self.num_samples
+                docs_per_epoch = len(self.indices)
                 num_epochs = (num_samples + docs_per_epoch - 1) // docs_per_epoch
 
             # Build document index by repeating indices for each epoch
-            document_index = np.tile(self.indexed_indices, num_epochs).astype(np.int32)
+            document_index = np.tile(self.indices, num_epochs).astype(np.int32)
 
             # Shuffle all documents
             numpy_random_state.shuffle(document_index)
 
-            # Truncate to exact number of samples if specified
-            if self.num_samples_requested is not None:
-                document_index = document_index[:self.num_samples_requested]
-
-            # Build shuffle index (identity mapping since we already shuffled documents)
-            shuffle_index = np.arange(len(document_index), dtype=np.int32)
+            # Truncate to exact number of samples if specified (ex. If last epoch is partial)
+            if self.num_samples is not None:
+                document_index = document_index[:self.num_samples]
 
             if path_to_cache:
                 os.makedirs(path_to_cache, exist_ok=True)
                 with open(path_to_description, "wt") as writer:
                     writer.write(self.unique_description)
                 np.save(path_to_document_index, document_index, allow_pickle=True)
-                np.save(path_to_shuffle_index, shuffle_index, allow_pickle=True)
             else:
                 log_single_rank(
                     logger,
@@ -189,7 +155,7 @@ class SFTIndexedDataset(GPTDataset):
             log_single_rank(logger, logging.INFO, f"> total number of samples: {len(document_index)}")
             log_single_rank(logger, logging.INFO, f"> total number of epochs: {num_epochs}")
 
-            return document_index, shuffle_index
+            return document_index
 
         # Load from cache
         log_single_rank(
@@ -201,20 +167,14 @@ class SFTIndexedDataset(GPTDataset):
         t_end = time.time()
         log_single_rank(logger, logging.DEBUG, f"\t> document index load time: {t_end - t_beg:4f} seconds")
 
-        t_beg = time.time()
-        shuffle_index = np.load(path_to_shuffle_index, allow_pickle=True, mmap_mode='r')
-        t_end = time.time()
-        log_single_rank(logger, logging.DEBUG, f"\t> shuffle index load time: {t_end - t_beg:4f} seconds")
-
-        log_single_rank(logger, logging.INFO, f"> total number of samples: {len(document_index)}")
-
-        return document_index, shuffle_index
+        return document_index
 
     def __len__(self) -> int:
         return self.document_index.shape[0] - 1
 
     def __getitem__(self, idx: Optional[int]) -> Dict[str, torch.Tensor]:
-        """Get a single sample from the dataset
+        """Get a single sample from the dataset. 
+        Each sample is a single document padded to sequence length. OR truncated if too long.
 
         Args:
             idx (Optional[int]): The index into the dataset
@@ -228,22 +188,16 @@ class SFTIndexedDataset(GPTDataset):
                 [self._pad_token_id] * (self.config.sequence_length + self.config.add_extra_token_to_sequence),
                 dtype=np.int64)
         else:
-            # Get the shuffled document index
-            doc_idx = self.shuffle_index[idx]
-            actual_doc_id = self.document_index[doc_idx]
-
-            # Get the entire document
-            document = self.indexed_dataset.get(actual_doc_id)
+            # Get document. index is already shuffled
+            actual_doc_id = self.document_index[idx]
+            document = self.dataset.get(actual_doc_id)
 
             # Truncate or pad to sequence_length
             target_length = self.config.sequence_length + self.config.add_extra_token_to_sequence
-
             if len(document) >= target_length:
-                # Truncate
                 logger.warning(f"Document {actual_doc_id} is longer than model sequence length {target_length} and gets trunc")
                 text = document[:target_length]
             else:
-                # Pad
                 padding_length = target_length - len(document)
                 text = np.concatenate([document, np.full(padding_length, self._pad_token_id, dtype=np.int64)])
 
@@ -281,7 +235,7 @@ class SFTIndexedDataset(GPTDataset):
             loss_mask = self.cached_loss_mask
             position_ids = self.cached_position_ids
 
-        # Mask loss for padded tokens
+        # Mask loss for padded tokens (this also masks batch padding if idx is None)
         loss_mask[labels == self._pad_token_id] = 0.0
 
         # Map pad tokens to valid embedding indices
@@ -301,10 +255,6 @@ class SFTIndexedDataset(GPTDataset):
                 goldfish_context_width=self._goldfish_h,
             )
             loss_mask[goldfish_labels == self._goldfish_token_id] = 0.0
-
-        # Mask loss for batch padding sequences
-        if idx is None:
-            loss_mask = torch.zeros_like(loss_mask)
 
         # Return sample dict
         if self.config.create_attention_mask:
@@ -382,10 +332,6 @@ class SFTIndexedDataset(GPTDataset):
         if eod_mask_loss:
             loss_mask[tokens == tokenizer_eod_id] = 0.0
 
-        # loss mask on batch padding
-        if idx is None:
-            loss_mask = torch.zeros_like(tokens)
-
         if create_attention_mask:
             attention_mask = torch.tril(
                 torch.ones((self.config.sequence_length, self.config.sequence_length), device=tokens.device)
@@ -399,4 +345,4 @@ class SFTIndexedDataset(GPTDataset):
         else:
             attention_mask = None
 
-        return loss_mask, position_ids, attention_mask
+        return attention_mask, loss_mask, position_ids

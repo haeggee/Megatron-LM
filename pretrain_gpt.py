@@ -9,7 +9,6 @@ import inspect
 
 from typing import List, Optional, Tuple, Union
 
-from megatron.core.datasets.sft_dataset import SFTIndexedDataset
 from megatron.training import get_args
 from megatron.training import print_rank_0
 from megatron.training import get_timers
@@ -337,6 +336,7 @@ def train_valid_test_datasets_provider(train_val_test_num_samples):
 
     # TODO: Add support for SFT dataset
     if args.sft:
+        from megatron.core.datasets.sft_dataset import SFTIndexedDataset
         dataset_type = SFTIndexedDataset
     elif args.mock_data:
         dataset_type = MockGPTDataset
