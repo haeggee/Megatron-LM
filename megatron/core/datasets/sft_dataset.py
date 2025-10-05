@@ -8,10 +8,8 @@ import torch
 import torch.nn.functional as F
 
 from megatron.core.datasets.gpt_dataset import GPTDatasetConfig, _PAD_TOKEN_ID, GPTDataset, _GOLDFISH_TOKEN_ID
-from megatron.core.datasets.indexed_dataset import IndexedDataset
 from megatron.core.datasets.megatron_dataset import LowLevelDataset, MegatronDataset
 from megatron.core.datasets.utils import Split
-from megatron.core.datasets.utils_s3 import is_s3_path, S3Config
 from megatron.core.utils import log_single_rank
 
 logger = logging.getLogger(__name__)
@@ -333,12 +331,19 @@ class SFTIndexedDataset(GPTDataset):
             loss_mask[tokens == tokenizer_eod_id] = 0.0
 
         if create_attention_mask:
+            # Here me mask attention from all padding tokens to all other tokens and vice versa
             attention_mask = torch.tril(
                 torch.ones((self.config.sequence_length, self.config.sequence_length), device=tokens.device)
             )
             # Mask padding tokens in attention mask:
             no_padding_mask = (tokens != self._pad_token_id).float() # 1=real, 0=padding
+            
+            # Mask both rows (queries from padding) and columns (keys to padding)
+            # Row masking: padding tokens shouldn't attend to anything
+            attention_mask = attention_mask * no_padding_mask.unsqueeze(1)
+            # Column masking: nothing should attend to padding tokens
             attention_mask = attention_mask * no_padding_mask.unsqueeze(0)
+            
             # Convert attention mask to binary:
             attention_mask = attention_mask.unsqueeze(0)
             attention_mask = attention_mask < 0.5
