@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, override
+from typing import Dict, Optional, override
 
 import time
 import os
@@ -39,6 +39,11 @@ class SFTIndexedDataset(GPTDataset):
             self._pad_token_id = self.config.tokenizer.pad
         except Exception:
             self._pad_token_id = _PAD_TOKEN_ID
+
+        # End of Document token to add end to truncated samples
+        self._eod_token_id = self.config.tokenizer.eod
+
+        # TODO: Add options to mask all special tokens?
 
         # TODO: Pass sequences dynamically
         self._sft_user_begin_sequence = self.tokenizer.tokenize('<|start_header_id|>user<|end_header_id|>', add_special_tokens=False)
@@ -193,8 +198,10 @@ class SFTIndexedDataset(GPTDataset):
             # Truncate or pad to sequence_length
             target_length = self.config.sequence_length + self.config.add_extra_token_to_sequence
             if len(document) >= target_length:
+                # End truncated document with end-of-document token
                 logger.warning(f"Document {actual_doc_id} is longer than model sequence length {target_length} and gets trunc")
-                text = document[:target_length]
+                trunc_doc = document[:target_length-1]
+                text = np.concatenate([trunc_doc, np.array([self._eod_token_id])])
             else:
                 padding_length = target_length - len(document)
                 text = np.concatenate([document, np.full(padding_length, self._pad_token_id, dtype=np.int64)])
