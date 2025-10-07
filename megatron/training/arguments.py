@@ -1588,6 +1588,11 @@ def _add_training_args(parser):
                        dest='tp_comm_split_rs')
     group.add_argument('--sft', action='store_true', help='Perform SFT training. Will use the SFTDataset to load pre-tokenized'
                                                           ' data sample by sample, with padding and prompt-masking.')
+    group.add_argument('--sft_mask_special_tokens', type=bool, default=True, help="Mask special tokens like BOS, EOS and"
+                                                                                  " Assistant Start tokens. User tokens"
+                                                                                  " are masked overall including end-of-turn"
+                                                                                  " and user-start sequence in any case")
+    group.add_argument('--sft_do_not_mask_image_tokens', action='store_true', help="Do not mask image tokens, even if part of user input")
 
     return parser
 

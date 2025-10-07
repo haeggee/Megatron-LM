@@ -321,6 +321,8 @@ def core_gpt_dataset_config_from_args(args):
         goldfish_loss=args.goldfish_loss,
         goldfish_k=args.goldfish_k,
         goldfish_h=args.goldfish_h,
+        sft_mask_special_tokens=args.sft_mask_special_tokens,
+        sft_do_not_mask_image_tokens=args.sft_do_not_mask_image_tokens
     )
 
 
@@ -334,7 +336,6 @@ def train_valid_test_datasets_provider(train_val_test_num_samples):
 
     config = core_gpt_dataset_config_from_args(args)
 
-    # TODO: Add support for SFT dataset
     if args.sft:
         from megatron.core.datasets.sft_dataset import SFTIndexedDataset
         dataset_type = SFTIndexedDataset

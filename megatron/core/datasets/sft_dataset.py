@@ -1,4 +1,4 @@
-from typing import Dict, Optional, override
+from typing import Dict, Optional
 
 import time
 import os
@@ -36,18 +36,26 @@ class SFTIndexedDataset(GPTDataset):
         self.tokenizer = config.tokenizer
         # Set pad token
         try:
-            self._pad_token_id = self.config.tokenizer.pad
+            self._pad_token_id = self.tokenizer.pad
         except Exception:
             self._pad_token_id = _PAD_TOKEN_ID
 
         # End of Document token to add end to truncated samples
-        self._eod_token_id = self.config.tokenizer.eod
-
-        # TODO: Add options to mask all special tokens?
-
+        self._eod_token_id = self.tokenizer.eod
+        self._bos_token_id = self.tokenizer.bos
         # TODO: Pass sequences dynamically
-        self._sft_user_begin_sequence = self.tokenizer.tokenize('<|start_header_id|>user<|end_header_id|>', add_special_tokens=False)
+        self._sft_user_begin_sequence = self.tokenizer.tokenize('<|start_header_id|>user<|end_header_id|>',
+                                                                add_special_tokens=False)
         self._sft_turn_end_sequence = self.tokenizer.tokenize('<|eot_id|>', add_special_tokens=False)
+        self._sft_assistant_begin_sequence = self.tokenizer.tokenize('<|start_header_id|>assistant<|end_header_id|>',
+                                                                add_special_tokens=False)
+        # Configure token(sequences to remove from loss calculations)
+        self.tokens_to_mask = [] # a list of: token ids or sequences of token ids to mask
+        if self.config.sft_mask_special_tokens:
+            # add tokenizer special tokens like EOS, BOS to be masked
+            self.tokens_to_mask += list(self.tokenizer.special_tokens)
+            self.tokens_to_mask.append(self._sft_user_assistant_sequence)
+        logger.warning(f"Masking the following tokens/token-sequences: {self.tokens_to_mask}")
 
         # Build shuffle indices
         self.document_index = self._build_single_document_indices()
@@ -74,13 +82,12 @@ class SFTIndexedDataset(GPTDataset):
             self._goldfish_hash_table = None
 
 
-    def _build_single_document_indices(self):
+    def _build_single_document_indices(self) -> np.ndarray:
         """
-        Build document index and shuffle index for single-document sampling. Only one document is used per sample.
-
+        Build a document index for single-document sampling. Only one document is used per sample.
 
         Returns:
-            Tuple[numpy.ndarray, numpy.ndarray]: The document index and shuffle index
+            numpy.ndarray: The document index
         """
         path_to_cache = self.config.path_to_cache
         if path_to_cache is None and not self.config.mock:
@@ -176,8 +183,9 @@ class SFTIndexedDataset(GPTDataset):
         return len(self.document_index)
 
     def __getitem__(self, idx: Optional[int]) -> Dict[str, torch.Tensor]:
-        """Get a single sample from the dataset. 
-        Each sample is a single document padded to sequence length. OR truncated if too long.
+        """
+        Get a single sample from the dataset.
+        Each sample is a single document padded to sequence length OR truncated if too long.
 
         Args:
             idx (Optional[int]): The index into the dataset
@@ -224,10 +232,8 @@ class SFTIndexedDataset(GPTDataset):
         ):
             attention_mask, loss_mask, position_ids = self._get_ltor_masks_and_position_ids(
                 tokens,
-                self.config.tokenizer.eod,
                 self.config.reset_position_ids,
                 self.config.reset_attention_mask,
-                self.config.eod_mask_loss,
                 self.config.create_attention_mask,
             )
             if self.masks_and_position_ids_are_cacheable:
@@ -291,64 +297,79 @@ class SFTIndexedDataset(GPTDataset):
                 "position_ids": position_ids,
             }
 
-    @override
     def _get_ltor_masks_and_position_ids(self, tokens,
-                tokenizer_eod_id,
                 reset_position_ids,
                 reset_attention_mask,
-                eod_mask_loss,
                 create_attention_mask):
-        """Build masks and position id for left to right model for SFT
-            1. find user messages in conversation list
-            2. mask prompts
+        """
+        Build masks and position id for SFT data. Possibility to mask arbitrary (also special) token(sequences).
+            1. Find user messages in conversation list
+            2. Mask prompts
         """
         assert not reset_position_ids and not reset_attention_mask
 
-        # Position ids.
         position_ids = torch.arange(self.config.sequence_length, dtype=torch.long)
-
-        # Loss mask.
         loss_mask = torch.ones(self.config.sequence_length, dtype=torch.float)
 
-        # Mask user sequences for loss
+        # 1) Mask user sequences for loss
         begin_seq = torch.tensor(self._sft_user_begin_sequence, dtype=tokens.dtype, device=tokens.device)
         end_seq = torch.tensor(self._sft_turn_end_sequence, dtype=tokens.dtype, device=tokens.device)
 
         begin_len = len(begin_seq)
         end_len = len(end_seq)
 
-        if begin_len > 0 and len(tokens) >= begin_len:
-            # Vectorized pattern matching using unfold
-            if begin_len == 1:
-                matches_begin = (tokens == begin_seq[0])
-            else:
-                # Create sliding windows
-                windows = tokens.unfold(0, begin_len, 1)
-                # Compare all windows at once
-                matches_begin = (windows == begin_seq).all(dim=1)
-                # Pad to original length
-                matches_begin = F.pad(matches_begin, (0, begin_len - 1), value=False)
+        if 0 < begin_len <= len(tokens):
+            matches_begin = get_matching_mask(tokens, begin_seq, only_begin=True)
 
             if end_len > 0:
-                if end_len == 1:
-                    matches_end = (tokens == end_seq[0])
-                else:
-                    windows = tokens.unfold(0, end_len, 1)
-                    matches_end = (windows == end_seq).all(dim=1)
-                    matches_end = F.pad(matches_end, (0, end_len - 1), value=False)
+                matches_end = get_matching_mask(tokens, end_seq, only_begin=True)
 
                 begin_indices = torch.where(matches_begin)[0]
                 end_indices = torch.where(matches_end)[0]
 
                 # Vectorized masking
-                for begin_idx in begin_indices:
-                    next_ends = end_indices[end_indices > begin_idx]
-                    end = next_ends[0].item() + end_len if len(next_ends) > 0 else len(loss_mask)
-                    loss_mask[begin_idx.item():end] = 0.0
+                if len(begin_indices) > 0 and len(end_indices) > 0:
+                    # For each begin, find the next ends (vectorized)
+                    end_matrix = end_indices.unsqueeze(0) > begin_indices.unsqueeze(1)
+                    has_valid_end = end_matrix.any(dim=1)
+                    first_end_idx = end_matrix.int().argmax(dim=1)
 
-        # Mask eod if wanted
-        if eod_mask_loss:
-            loss_mask[tokens == tokenizer_eod_id] = 0.0
+                    # Compute end positions for each begin
+                    end_positions = torch.where(
+                        has_valid_end,
+                        end_indices[first_end_idx] + end_len,
+                        len(loss_mask)
+                    )
+
+                    # Create ranges and mask in one go, Shape: (num_begins, max_range_len)
+                    max_len = (end_positions - begin_indices).max().item()
+                    ranges = torch.arange(max_len, device=tokens.device).unsqueeze(0)
+                    lengths = (end_positions - begin_indices).unsqueeze(1)
+
+                    # Get all indices to mask
+                    mask_positions = begin_indices.unsqueeze(1) + ranges
+                    valid_mask = ranges < lengths
+                    indices_to_mask = mask_positions[valid_mask]
+
+                    loss_mask[indices_to_mask] = 0.0
+                elif len(begin_indices) > 0:
+                    # No end sequences, mask from each begin to the end
+                    max_len = len(loss_mask) - begin_indices.min().item()
+                    ranges = torch.arange(max_len, device=tokens.device).unsqueeze(0)
+                    mask_positions = begin_indices.unsqueeze(1) + ranges
+                    valid = mask_positions < len(loss_mask)
+                    loss_mask[mask_positions[valid]] = 0.0
+
+        # 2) Mask other token(sequences) as configured in init (might contain BOS, EOS, assistant begin)
+        for t in self.tokens_to_mask:
+            t_tensor = torch.tensor(t, dtype=tokens.dtype, device=tokens.device)
+            if len(t_tensor) == 1:
+                mask = (tokens == t_tensor[0])
+            elif len(t_tensor) > 1:
+                mask = get_matching_mask(tokens, t_tensor, only_begin=False)
+            else:
+                raise ValueError(f"Invalid token to mask: {t}")
+            loss_mask[mask] = 0.0
 
         if create_attention_mask:
             # Here me mask attention from all padding tokens to all other tokens and vice versa
@@ -371,3 +392,30 @@ class SFTIndexedDataset(GPTDataset):
             attention_mask = None
 
         return attention_mask, loss_mask, position_ids
+
+
+def get_matching_mask(sequence, query: torch.Tensor, only_begin:bool=True):
+    """
+    Given a sequence and a query, return a mask indicating which positions in the sequence match the query.
+    If the query has len > 1, only_begin arg will determine whether the mask is true only where
+    the query begins in the sequence. Otherwise, full query is masked.
+    """
+    query_len = len(query)
+    # Vectorized pattern matching using unfold
+    if query_len == 1:
+        matches = (sequence == query[0])
+    else:
+        # Create sliding windows
+        windows = sequence.unfold(0, query_len, 1)
+        # Compare all windows at once
+        matches = (windows == query).all(dim=1)
+        # Pad to original length
+        matches = F.pad(matches, (0, query_len - 1), value=False)
+        if not only_begin:
+            matches_float = matches.float().unsqueeze(0).unsqueeze(0)  # (1, 1, N)
+            kernel = torch.ones(1, 1, query_len, device=sequence.device)
+            expanded = F.conv1d(matches_float, kernel, padding=query_len - 1)
+            matches = (expanded.squeeze(0).squeeze(0)[:len(sequence)] > 0)
+    return matches
+
+

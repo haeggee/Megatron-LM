@@ -61,6 +61,12 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
     s3_cache_path: str = None
     """Path for caching indices for s3 dataloading."""
 
+    """
+    SFT Options
+    """
+    sft_mask_special_tokens: bool = True
+    sft_do_not_mask_image_tokens: bool = False
+
     def __post_init__(self) -> None:
         """Do asserts and set fields post init"""
         super().__post_init__()
