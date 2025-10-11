@@ -1043,65 +1043,65 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         for key in self.optimizer_keys
                     }
 
-                        # Build contiguous DP rank shards (for param + optim states).
-                        for model_param, param_range_map in gbuf_range_map["param_map"].items():
-                            tensors = self._get_main_param_and_optimizer_states(model_param)
+                    # Build contiguous DP rank shards (for param + optim states).
+                    for model_param, param_range_map in gbuf_range_map["param_map"].items():
+                        tensors = self._get_main_param_and_optimizer_states(model_param)
 
-                            # Copy states into contiguous shard.
-                            gbuf_local_start = param_range_map["gbuf_local"].start
-                            gbuf_local_end = param_range_map["gbuf_local"].end
-                            for key in local_shards:
-                                local_shards[key][gbuf_local_start:gbuf_local_end].data.copy_(
-                                    tensors[key].detach().cpu()
+                        # Copy states into contiguous shard.
+                        gbuf_local_start = param_range_map["gbuf_local"].start
+                        gbuf_local_end = param_range_map["gbuf_local"].end
+                        for key in local_shards:
+                            local_shards[key][gbuf_local_start:gbuf_local_end].data.copy_(
+                                tensors[key].detach().cpu()
+                            )
+
+                    # Gather contiguous shards on DP rank 0.
+                    for key, send_tensor in local_shards.items():
+
+                        # Gather tensor list.
+                        if data_parallel_rank == 0 or return_on_all_ranks:
+                            device = "cpu" if use_gloo_comm else torch.cuda.current_device()
+                            recv_tensors = [
+                                torch.zeros(
+                                    (gbuf_local_numel,), dtype=torch.float32, device=device
                                 )
+                                for _ in range(data_parallel_world_size)
+                            ]
+                        else:
+                            recv_tensors = None
 
-                        # Gather contiguous shards on DP rank 0.
-                        for key, send_tensor in local_shards.items():
+                        # Gather.
+                        if not use_gloo_comm:
+                            send_tensor = send_tensor.cuda()
+                        if return_on_all_ranks:
+                            torch.distributed.all_gather(
+                                recv_tensors, send_tensor, data_parallel_group
+                            )
+                        else:
+                            torch.distributed.gather(
+                                send_tensor,
+                                recv_tensors,
+                                data_parallel_global_ranks[0],
+                                data_parallel_group,
+                            )
 
-                            # Gather tensor list.
-                            if data_parallel_rank == 0 or return_on_all_ranks:
-                                device = "cpu" if use_gloo_comm else torch.cuda.current_device()
-                                recv_tensors = [
-                                    torch.zeros(
-                                        (gbuf_local_numel,), dtype=torch.float32, device=device
-                                    )
-                                    for _ in range(data_parallel_world_size)
-                                ]
-                            else:
-                                recv_tensors = None
+                        send_tensor = None  # allow mem deallocation
 
-                            # Gather.
+                        # Concatenate.
+                        if data_parallel_rank == 0 or return_on_all_ranks:
                             if not use_gloo_comm:
-                                send_tensor = send_tensor.cuda()
-                            if return_on_all_ranks:
-                                torch.distributed.all_gather(
-                                    recv_tensors, send_tensor, data_parallel_group
-                                )
-                            else:
-                                torch.distributed.gather(
-                                    send_tensor,
-                                    recv_tensors,
-                                    data_parallel_global_ranks[0],
-                                    data_parallel_group,
-                                )
+                                recv_tensors = [t.cpu() for t in recv_tensors]
+                            recv_tensors_concatenated = torch.cat(recv_tensors)
+                            # Copy this bucket's collected all-gather tensors into the right
+                            # place in the tensor for the buffer. The tensor for the buffer
+                            # gets rid of the padding between buckets.
+                            start = offset_in_world_tensors
+                            end = offset_in_world_tensors + gbuf_world_numel_unpadded
+                            world_tensors[key][start:end].copy_(
+                                recv_tensors_concatenated[:gbuf_world_numel_unpadded]
+                            )
 
-                            send_tensor = None  # allow mem deallocation
-
-                            # Concatenate.
-                            if data_parallel_rank == 0 or return_on_all_ranks:
-                                if not use_gloo_comm:
-                                    recv_tensors = [t.cpu() for t in recv_tensors]
-                                recv_tensors_concatenated = torch.cat(recv_tensors)
-                                # Copy this bucket's collected all-gather tensors into the right
-                                # place in the tensor for the buffer. The tensor for the buffer
-                                # gets rid of the padding between buckets.
-                                start = offset_in_world_tensors
-                                end = offset_in_world_tensors + gbuf_world_numel_unpadded
-                                world_tensors[key][start:end].copy_(
-                                    recv_tensors_concatenated[:gbuf_world_numel_unpadded]
-                                )
-
-                        offset_in_world_tensors += gbuf_world_numel_unpadded
+                    offset_in_world_tensors += gbuf_world_numel_unpadded
 
                 # Collect world state.
                 dtype_state[dtype] = world_tensors
