@@ -1,7 +1,7 @@
 ENV_VARS:
   CUDA_DEVICE_MAX_CONNECTIONS: 1
   NVTE_ALLOW_NONDETERMINISTIC_ALGO: 0
-  NCCL_ALGO: Tree
+  NCCL_ALGO: Ring
   CUBLAS_WORKSPACE_CONFIG: :4096:8
 MODEL_ARGS:
   --num-layers: 24
@@ -42,4 +42,5 @@ MODEL_ARGS:
   --bf16: true
   --ckpt-format: torch
   --attention-backend: unfused
+  --legacy-tokenizer: true
 TEST_TYPE: regular

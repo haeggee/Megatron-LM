@@ -10,6 +10,7 @@ from torch import Tensor
 from megatron.core import parallel_state, tensor_parallel
 from megatron.core.fusions.fused_softmax import FusedScaleMaskSoftmax
 from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -42,6 +43,7 @@ class DotProductAttention(MegatronModule):
         attention_dropout: float = None,
         softmax_scale: float = None,
         cp_comm_type: str = None,
+        pg_collection: ProcessGroupCollection = None,
     ):
         super().__init__(config=config)
 
@@ -62,7 +64,14 @@ class DotProductAttention(MegatronModule):
         projection_size = self.config.kv_channels * self.config.num_attention_heads
 
         # Per attention head and per partition values.
-        world_size = parallel_state.get_tensor_model_parallel_world_size()
+        if pg_collection is None:
+            pg_collection = ProcessGroupCollection.use_mpu_process_groups(required_pgs=['tp'])
+        else:
+            assert hasattr(
+                pg_collection, 'tp'
+            ), "DotProductAttention pg_collection must have tp process group"
+
+        world_size = pg_collection.tp.size()
         self.hidden_size_per_partition = divide(projection_size, world_size)
         self.hidden_size_per_attention_head = divide(projection_size, config.num_attention_heads)
         self.num_attention_heads_per_partition = divide(self.config.num_attention_heads, world_size)

@@ -12,4 +12,9 @@ local/
 wandb/
 onelogger.log
 onelogger.err
+.venv
+runs/
+/test_cases/
+**/dist/
 core_nid*
+.idea/

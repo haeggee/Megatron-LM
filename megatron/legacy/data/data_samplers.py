@@ -9,6 +9,7 @@ import numpy as np
 from torch.utils.data import Dataset
 from megatron.training import get_args
 from megatron.core import mpu
+from megatron.core.datasets.utils import Split
 
 
 def build_pretraining_data_loader(dataset, consumed_samples):
@@ -18,14 +19,22 @@ def build_pretraining_data_loader(dataset, consumed_samples):
         return None
     args = get_args()
 
-    ########### DataLoader reset ###########
-    # print(f"[DEBUG] BEFORE Consumed train samples: {consumed_samples}")
-    # consumed_samples = consumed_samples - CONSUMED_SAMPLES_FROM_CHECKPOINT # NOTE(tj.solergibert) To reset dataloader states, offset `consumed_samples` by the consumed samples stored in the checkpoint state dict. Tip: Grab the consumed samples from the training logs  
-    # print(f"[DEBUG] Consumed train samples: {consumed_samples}")
-    # Megatron sampler
-    ########################################
-    
-    if args.dataloader_type == 'single':
+    if hasattr(dataset,'split'):
+        split = dataset.split
+    elif hasattr(dataset,'index_split'):
+        split = dataset.index_split
+    else:
+        split = None
+
+    if split == Split.valid and args.full_validation:
+        batch_sampler = MegatronPretrainingSampler(
+            total_samples=len(dataset),
+            consumed_samples=0,
+            micro_batch_size=args.micro_batch_size,
+            data_parallel_rank=mpu.get_data_parallel_rank(),
+            data_parallel_size=mpu.get_data_parallel_world_size())
+    elif args.dataloader_type == 'single':
+        # Megatron sampler
         batch_sampler = MegatronPretrainingSampler(
             total_samples=len(dataset),
             consumed_samples=consumed_samples,

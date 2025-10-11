@@ -6,8 +6,8 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-from megatron.core.datasets.megatron_tokenizer import MegatronTokenizer
 from megatron.core.datasets.utils import Split, log_single_rank, normalize
+from megatron.core.tokenizers import MegatronTokenizerBase
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,12 @@ class BlendedMegatronDatasetConfig:
     """A set of blends, as defined above, one for each split distribution. Not to be used with
        'blend'. Defauls to None.
     """
+
+    multiple_validation_sets: Optional[bool] = None
+    """Whether the validation split should be treated as multiple seperate datasets."""
+
+    full_validation: Optional[bool] = None
+    """Whether to run a full epoch of validation each time validation occurs."""
 
     split: Optional[str] = None
     """The split string, a comma separated weighting for the dataset splits when drawing samples
@@ -60,8 +66,16 @@ class BlendedMegatronDatasetConfig:
        constructor.
     """
 
-    tokenizer: Optional[MegatronTokenizer] = None
-    """The MegatronTokenizer instance. Required for datasets that do online tokenization."""
+    tokenizer: Optional[MegatronTokenizerBase] = None
+    """The MegatronTokenizerBase instance. Required for datasets that do online tokenization."""
+
+    mid_level_dataset_surplus: float = 0.005
+    """The sample surplus to build for the mid-level datasets(s). Defaults arbitrarily to 0.005.
+       This value is irrelevant for single source data blends. This value may need to be increased
+       if the top level dataset oversamples the mid level dataset(s). This value may be set to 0.0
+       in future if the top level dataset is constrained to not oversample the mid level
+       datasets(s).
+    """
 
     def __post_init__(self) -> None:
         """Do asserts and set fields post init"""

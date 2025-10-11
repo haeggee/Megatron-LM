@@ -19,6 +19,11 @@ class ModelParallelConfig:
     tensor_model_parallel_size: int = 1
     """Intra-layer model parallelism. Splits tensors across GPU ranks."""
 
+    pipeline_model_parallel_comm_backend: Optional[str] = None
+    """Configuring backend option of pipeline parallel communication (e.g., nccl, ucc)
+       If None, the default backend will be used.
+    """
+
     pipeline_model_parallel_size: int = 1
     """Inter-layer model parallelism. Splits transformer layers across GPU ranks."""
 
@@ -212,6 +217,11 @@ class ModelParallelConfig:
        Defaults to False.
     """
 
+    cross_entropy_fusion_impl: str = 'native'
+    """If 'native', MCore based CE loss fusion is used, if 'te', Parallel CE loss
+       from Transformer Engine library is used. Defaults to 'native'.
+    """
+
     tp_comm_overlap_disable_qkv: bool = False
     """
        If true, the AllGather -> Gemm overlap for QKV gets disabled
@@ -226,6 +236,14 @@ class ModelParallelConfig:
     """
        Set the bootstrapping backend out of 'nccl', 'mpi', and 'gloo'
     """
+
+    overlap_moe_expert_parallel_comm: bool = False
+    """Overlap EP A2A communications with independent computations of different micro-batches
+    in 1f1b phase of pipelining or non-pipelining schedule.
+    """
+
+    delay_wgrad_compute: bool = False
+    """Delay the weight gradient computation to improve batch-level communication overlapping"""
 
     ###################
     # Pipeline Parallel
@@ -276,11 +294,6 @@ class ModelParallelConfig:
        Defaults to 0, which means all micro-batches are deferred.
     """
 
-    pipeline_model_parallel_split_rank: Optional[int] = None
-    """If int, rank where encoder and decoder should be split in cases where the model has both an
-       encoder and decoder (e.g., T5). Ignored if None.
-    """
-
     overlap_p2p_comm_warmup_flush: bool = False
     """If true, overlap communication and computation in warm up and flush phase.
        Only valid when overlap_p2p_comm is True and batch_p2p_comm is False. 
@@ -323,6 +336,9 @@ class ModelParallelConfig:
 
     cpu_offloading_weights: bool = True
     """If True, offloads the weights to CPU."""
+
+    cpu_offloading_double_buffering: bool = False
+    """If True, enables double buffering across layers while reloading activations from CPU."""
 
     ###################
     # Timing
@@ -371,8 +387,8 @@ class ModelParallelConfig:
 
         if self.expert_model_parallel_size > 1 and self.tensor_model_parallel_size > 1:
             if self.sequence_parallel is False:
-                raise ValueError(
-                    "When using expert parallelism and tensor parallelism, "
+                warnings.warn(
+                    "When using expert parallelism and tensor parallelism for training, "
                     "sequence parallelism must be used"
                 )
 
