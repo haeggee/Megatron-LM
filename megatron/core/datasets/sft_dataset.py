@@ -241,7 +241,7 @@ class SFTIndexedDataset(GPTDataset):
                 or not self.masks_and_position_ids_are_cached
         ):
             attention_mask, loss_mask, position_ids = self._get_ltor_masks_and_position_ids(
-                tokens,
+                labels,
                 self.config.reset_position_ids,
                 self.config.reset_attention_mask,
                 self.config.create_attention_mask,
@@ -329,10 +329,10 @@ class SFTIndexedDataset(GPTDataset):
                 "position_ids": position_ids,
             }
 
-    def _get_ltor_masks_and_position_ids(self, tokens,
-                reset_position_ids,
-                reset_attention_mask,
-                create_attention_mask):
+    def _get_ltor_masks_and_position_ids(self, data,
+                                         reset_position_ids,
+                                         reset_attention_mask,
+                                         create_attention_mask):
         """
         Build masks and position id for SFT data. Possibility to mask arbitrary (also special) token(sequences).
             1. Find user messages in conversation list
@@ -344,38 +344,38 @@ class SFTIndexedDataset(GPTDataset):
         loss_mask = torch.ones(self.config.sequence_length, dtype=torch.float)
 
         # 1) Mask user sequences for loss
-        begin_seq = torch.tensor(self._sft_user_begin_sequence, dtype=tokens.dtype, device=tokens.device)
-        end_seq = torch.tensor(self._sft_turn_end_sequence, dtype=tokens.dtype, device=tokens.device)
+        begin_seq = torch.tensor(self._sft_user_begin_sequence, dtype=data.dtype, device=data.device)
+        end_seq = torch.tensor(self._sft_turn_end_sequence, dtype=data.dtype, device=data.device)
 
-        user_seq_mask = get_matching_mask_by_start_end(tokens, begin_seq, end_seq)
+        user_seq_mask = get_matching_mask_by_start_end(data, begin_seq, end_seq)
         loss_mask[user_seq_mask] = 0.0
 
         # 2) Mask other token(sequences) as configured in init (might contain BOS, EOS, assistant begin)
         for t in self.tokens_to_mask:
-            t_tensor = torch.tensor(t, dtype=tokens.dtype, device=tokens.device)
+            t_tensor = torch.tensor(t, dtype=data.dtype, device=data.device)
             if len(t_tensor) == 1:
-                mask = (tokens == t_tensor[0])
+                mask = (data == t_tensor[0])
             elif len(t_tensor) > 1:
-                mask = get_matching_mask(tokens, t_tensor, only_begin=False)
+                mask = get_matching_mask(data, t_tensor, only_begin=False)
             else:
                 raise ValueError(f"Invalid token to mask: {t}")
             loss_mask[mask] = 0.0
 
         # 3) Unmask Image tokens if configured
         if self.config.sft_do_not_mask_image_tokens:
-            img_begin_tensor = torch.tensor(self._img_begin_sequence, dtype=tokens.dtype, device=tokens.device)
-            img_end_tensor = torch.tensor(self._img_end_sequence, dtype=tokens.dtype, device=tokens.device)
-            img_seq_mask = get_matching_mask_by_start_end(tokens, img_begin_tensor, img_end_tensor)
+            img_begin_tensor = torch.tensor(self._img_begin_sequence, dtype=data.dtype, device=data.device)
+            img_end_tensor = torch.tensor(self._img_end_sequence, dtype=data.dtype, device=data.device)
+            img_seq_mask = get_matching_mask_by_start_end(data, img_begin_tensor, img_end_tensor)
             loss_mask[img_seq_mask] = 1.0
 
         # 4) Create attention mask, excluding padding tokens from attention
         if create_attention_mask:
             # Here me mask attention from all padding tokens to all other tokens and vice versa
             attention_mask = torch.tril(
-                torch.ones((self.config.sequence_length, self.config.sequence_length), device=tokens.device)
+                torch.ones((self.config.sequence_length, self.config.sequence_length), device=data.device)
             )
             # Mask padding tokens in attention mask:
-            no_padding_mask = (tokens != self._pad_token_id).float() # 1=real, 0=padding
+            no_padding_mask = (data != self._pad_token_id).float() # 1=real, 0=padding
             
             # Mask both rows (queries from padding) and columns (keys to padding)
             # Row masking: padding tokens shouldn't attend to anything
@@ -417,20 +417,20 @@ def get_matching_mask(sequence, query: torch.Tensor, only_begin:bool=True):
     return matches
 
 
-def get_matching_mask_by_start_end(tokens, begin_seq: torch.Tensor, end_seq: torch.Tensor):
+def get_matching_mask_by_start_end(sequence, begin_seq: torch.Tensor, end_seq: torch.Tensor):
     """
     Given a sequence and a start and end query, return a mask indicating which positions in the sequence
     are between the start and end queries (inclusive).
     """
-    mask = torch.zeros(len(tokens), dtype=torch.bool, device=tokens.device)
+    mask = torch.zeros(len(sequence), dtype=torch.bool, device=sequence.device)
     begin_len = len(begin_seq)
     end_len = len(end_seq)
 
-    if 0 < begin_len <= len(tokens):
-        matches_begin = get_matching_mask(tokens, begin_seq, only_begin=True)
+    if 0 < begin_len <= len(sequence):
+        matches_begin = get_matching_mask(sequence, begin_seq, only_begin=True)
 
         if end_len > 0:
-            matches_end = get_matching_mask(tokens, end_seq, only_begin=True)
+            matches_end = get_matching_mask(sequence, end_seq, only_begin=True)
 
             begin_indices = torch.where(matches_begin)[0]
             end_indices = torch.where(matches_end)[0]
@@ -451,7 +451,7 @@ def get_matching_mask_by_start_end(tokens, begin_seq: torch.Tensor, end_seq: tor
 
                 # Create ranges and mask in one go, Shape: (num_begins, max_range_len)
                 max_len = (end_positions - begin_indices).max().item()
-                ranges = torch.arange(max_len, device=tokens.device).unsqueeze(0)
+                ranges = torch.arange(max_len, device=sequence.device).unsqueeze(0)
                 lengths = (end_positions - begin_indices).unsqueeze(1)
 
                 # Get all indices to mask
@@ -463,7 +463,7 @@ def get_matching_mask_by_start_end(tokens, begin_seq: torch.Tensor, end_seq: tor
             elif len(begin_indices) > 0:
                 # No end sequences, mask from each begin to the end
                 max_len = len(mask) - begin_indices.min().item()
-                ranges = torch.arange(max_len, device=tokens.device).unsqueeze(0)
+                ranges = torch.arange(max_len, device=sequence.device).unsqueeze(0)
                 mask_positions = begin_indices.unsqueeze(1) + ranges
                 valid = mask_positions < len(mask)
                 mask[mask_positions[valid]] = True
