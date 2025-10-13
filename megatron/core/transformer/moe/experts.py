@@ -794,7 +794,14 @@ class TEGroupedMLP(MegatronModule):
         if self.config.use_te_activation_func and not (submodules.activation_func is None):
             self.activation_func = build_module(submodules.activation_func, config=self.config)
         else:
-            self.activation_func = self.config.activation_func
+            if self.config.activation_func == XIELU:
+                self.activation_func = XIELU(config=self.config)
+            elif self.config.activation_func == XIPReLU:
+                self.activation_func = XIPReLU(config=self.config)
+            elif self.config.activation_func == XIPReLUP:
+                self.activation_func = XIPReLUP(config=self.config)
+            else:
+                self.activation_func = self.config.activation_func
 
         # TODO(Hepteract): pass pg_collection to submodule after refactoring Linear modules
         self.linear_fc2 = build_module(
