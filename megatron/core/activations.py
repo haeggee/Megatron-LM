@@ -57,7 +57,6 @@ def sss(x):
     return 0.5 * (torch.nn.functional.softsign(x) + 1)
 
 
-# drop in replacement for sigmoid in GLU settings and multiplicative gating with SiLU
 class SSS(MegatronModule):
     def __init__(self, config=None):
         super().__init__(config=config)
@@ -67,11 +66,23 @@ class SSS(MegatronModule):
 
 
 @jit_fuser
+def ssslu(x):
+    return (0.5 * (torch.nn.functional.softsign(x) + 1)) * x
+
+
+class SSSLU(MegatronModule):
+    def __init__(self, config=None):
+        super().__init__(config=config)
+
+    def forward(self, x):
+        return ssslu(x)
+
+
+@jit_fuser
 def xsss(x, alpha):
     return alpha * torch.nn.functional.softsign(x) + 0.5
 
 
-# drop in replacement for sigmoid in SiLU and multiplicative gating with sigmoid
 class XSSS(MegatronModule):
     def __init__(self, config=None, alpha_init=0.8, dtype=torch.bfloat16):
         super().__init__(config=config)
@@ -80,6 +91,21 @@ class XSSS(MegatronModule):
 
     def forward(self, x):
         return xsss(x, self.alpha)
+
+
+@jit_fuser
+def xssslu(x, alpha):
+    return (alpha * torch.nn.functional.softsign(x) + 0.5) * x
+
+
+class XSSSLU(MegatronModule):
+    def __init__(self, config=None, alpha_init=0.8, dtype=torch.bfloat16):
+        super().__init__(config=config)
+        self.config = config
+        self.alpha = nn.Parameter(torch.tensor(alpha_init, dtype=dtype).unsqueeze(0))
+
+    def forward(self, x):
+        return xssslu(x, self.alpha)
 
 
 @jit_fuser
