@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 from megatron.core import parallel_state, tensor_parallel
-from megatron.core.activations import squared_relu, XIELU, XIPReLU, XIPReLUP
+from megatron.core.activations import squared_relu, XIELU, XSSSLUR2
 from megatron.core.dist_checkpointing import ShardedTensor
 from megatron.core.dist_checkpointing.mapping import (
     LocalNonpersistentObject,
@@ -130,10 +130,8 @@ class GroupedMLP(MegatronModule):
         else:
             if self.config.activation_func == XIELU:
                 self.activation_func = XIELU(config=self.config)
-            elif self.config.activation_func == XIPReLU:
-                self.activation_func = XIPReLU(config=self.config)
-            elif self.config.activation_func == XIPReLUP:
-                self.activation_func = XIPReLUP(config=self.config)
+            elif self.config.activation_func == XSSSLUR2:
+                self.activation_func = XSSSLUR2(config=self.config)
             else:
                 self.activation_func = self.config.activation_func
         self.activation_recompute = (
@@ -796,10 +794,8 @@ class TEGroupedMLP(MegatronModule):
         else:
             if self.config.activation_func == XIELU:
                 self.activation_func = XIELU(config=self.config)
-            elif self.config.activation_func == XIPReLU:
-                self.activation_func = XIPReLU(config=self.config)
-            elif self.config.activation_func == XIPReLUP:
-                self.activation_func = XIPReLUP(config=self.config)
+            elif self.config.activation_func == XSSSLUR2:
+                self.activation_func = XSSSLUR2(config=self.config)
             else:
                 self.activation_func = self.config.activation_func
 
