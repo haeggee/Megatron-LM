@@ -1593,6 +1593,7 @@ def _add_training_args(parser):
                                                                                   " are masked overall including end-of-turn"
                                                                                   " and user-start sequence in any case")
     group.add_argument('--sft_do_not_mask_image_tokens', action='store_true', help="Do not mask image tokens, even if part of user input")
+    group.add_argument('--sft_debug', action='store_true', help='Store and print debug data and information from the SFT dataset')
 
     return parser
 

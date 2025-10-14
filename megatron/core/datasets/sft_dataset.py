@@ -35,7 +35,8 @@ class SFTIndexedDataset(GPTDataset):
         # Call Megatron Dataset init instead of direct parent, as we initialize index differently
         MegatronDataset.__init__(self, dataset, dataset_path, indexed_indices, num_samples, index_split, config)
 
-        self.debug_writer = DebugDataWriter(output_dir="/users/rkreft/debug_data")  # Initialize once, outside the loop
+        if self.config.sft_debug:
+            self.debug_writer = DebugDataWriter(output_dir="/users/rkreft/debug_data")  # Initialize once, outside the loop
 
         self.tokenizer = config.tokenizer
         # Set pad token
@@ -57,10 +58,10 @@ class SFTIndexedDataset(GPTDataset):
         self._img_begin_sequence = self.tokenizer.tokenize('<|img_start|>', add_special_tokens=False)
         self._img_end_sequence = self.tokenizer.tokenize('<|img_end|>', add_special_tokens=False)
 
-        # Configure token(sequences to remove from loss calculations)
-        self.tokens_to_mask = [] # a list of: token ids or sequences of token ids to mask
+        # Configure token (sequences) to remove from loss calculation
+        self.tokens_to_mask = []
         if self.config.sft_mask_special_tokens:
-            # add tokenizer special tokens like EOS, BOS to be masked
+            # add tokenizer special tokens like EOS, BOS and assistant begin to be masked. Never mask End of turn.
             self.tokens_to_mask.append([self._eod_token_id])
             self.tokens_to_mask.append([self._bos_token_id])
             self.tokens_to_mask.append(self._sft_assistant_begin_sequence)
@@ -75,20 +76,12 @@ class SFTIndexedDataset(GPTDataset):
                 self.config.reset_position_ids,
                 self.config.reset_attention_mask,
                 self.config.eod_mask_loss,
-                self.config.goldfish_loss,
             ]
         )
         self.masks_and_position_ids_are_cached = False
         self.cached_attention_mask = None
         self.cached_loss_mask = None
         self.cached_position_ids = None
-
-        # Goldfish loss setup
-        if self.config.goldfish_loss:
-            self._goldfish_k = self.config.goldfish_k
-            self._goldfish_h = self.config.goldfish_h
-            self._goldfish_token_id = _GOLDFISH_TOKEN_ID
-            self._goldfish_hash_table = None
 
 
     def _build_single_document_indices(self) -> np.ndarray:
@@ -221,8 +214,8 @@ class SFTIndexedDataset(GPTDataset):
                 text = np.concatenate([trunc_doc, np.array([self._eod_token_id])])
             else:
                 padding_length = target_length - len(document)
-                # Pad on left side with pad token
-                text = np.concatenate([np.full(padding_length, self._pad_token_id, dtype=np.int64), document])
+                # Pad on right side with pad token
+                text = np.concatenate([document, np.full(padding_length, self._pad_token_id, dtype=np.int64)])
 
         text = torch.from_numpy(text).long()
 
@@ -241,10 +234,7 @@ class SFTIndexedDataset(GPTDataset):
                 or not self.masks_and_position_ids_are_cached
         ):
             attention_mask, loss_mask, position_ids = self._get_ltor_masks_and_position_ids(
-                labels,
-                self.config.reset_position_ids,
-                self.config.reset_attention_mask,
-                self.config.create_attention_mask,
+                labels
             )
             if self.masks_and_position_ids_are_cacheable:
                 self.cached_attention_mask = attention_mask
@@ -259,11 +249,11 @@ class SFTIndexedDataset(GPTDataset):
         # Mask loss for padded tokens (this also masks batch padding if idx is None)
         loss_mask[labels == self._pad_token_id] = 0.0
 
-        # DEBUG: Log how many tokens are actually being trained on
-        num_unmasked = loss_mask.sum().item()
-        total_tokens = loss_mask.numel()
+        # DEBUG: if activated, log every 100 samples
+        if self.config.sft_debug and idx is not None and idx % 100 == 0:  # Log every 100 samples
+            num_unmasked = loss_mask.sum().item()
+            total_tokens = loss_mask.numel()
 
-        if False and idx is not None and idx % 100 == 0:  # Log every 100 samples
             logger.warning(f"Sample {idx} - DOC {actual_doc_id}: {num_unmasked}/{total_tokens} tokens unmasked "
                             f"({100*num_unmasked/total_tokens:.1f}%), "
                             f"doc_length={len(torch.from_numpy(document))}, "
@@ -298,20 +288,6 @@ class SFTIndexedDataset(GPTDataset):
         tokens[tokens == self._pad_token_id] = 0
         labels[labels == self._pad_token_id] = 0
 
-        # Apply goldfish loss masking if enabled
-        if self.config.goldfish_loss:
-            if self._goldfish_hash_table is None:
-                self._goldfish_hash_table = self._create_hash_table(device=labels.device)
-
-            goldfish_labels = self.apply_goldfish(
-                labels,
-                goldfish_token_id=self._goldfish_token_id,
-                k=self._goldfish_k,
-                goldfish_hash_table=self._goldfish_hash_table,
-                goldfish_context_width=self._goldfish_h,
-            )
-            loss_mask[goldfish_labels == self._goldfish_token_id] = 0.0
-
         # Return sample dict
         if self.config.create_attention_mask:
             return {
@@ -329,16 +305,15 @@ class SFTIndexedDataset(GPTDataset):
                 "position_ids": position_ids,
             }
 
-    def _get_ltor_masks_and_position_ids(self, data,
-                                         reset_position_ids,
-                                         reset_attention_mask,
-                                         create_attention_mask):
+    def _get_ltor_masks_and_position_ids(self, data):
         """
         Build masks and position id for SFT data. Possibility to mask arbitrary (also special) token(sequences).
-            1. Find user messages in conversation list
-            2. Mask prompts
+            1. Can mask full user prompts including or not including the images in the user prompt
+            2. Can mask arbitrary token sequences (e.g. assistant begin, assistant end, BOS, EOS)
+        Both options can be Configured in the init.
+        Finally, creates an attention mask if configured. The attention mask will exclude padding tokens from attention.
         """
-        assert not reset_position_ids and not reset_attention_mask
+        assert not self.config.reset_position_ids and not self.config.reset_attention_mask
 
         position_ids = torch.arange(self.config.sequence_length, dtype=torch.long)
         loss_mask = torch.ones(self.config.sequence_length, dtype=torch.float)
@@ -369,7 +344,7 @@ class SFTIndexedDataset(GPTDataset):
             loss_mask[img_seq_mask] = 1.0
 
         # 4) Create attention mask, excluding padding tokens from attention
-        if create_attention_mask:
+        if self.config.create_attention_mask:
             # Here me mask attention from all padding tokens to all other tokens and vice versa
             attention_mask = torch.tril(
                 torch.ones((self.config.sequence_length, self.config.sequence_length), device=data.device)
