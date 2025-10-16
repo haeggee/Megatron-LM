@@ -9,7 +9,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from megatron.core.datasets.gpt_dataset import GPTDatasetConfig, _PAD_TOKEN_ID, GPTDataset, _GOLDFISH_TOKEN_ID
+from megatron.core.datasets.gpt_dataset import GPTDatasetConfig, _PAD_TOKEN_ID, GPTDataset
 from megatron.core.datasets.megatron_dataset import LowLevelDataset, MegatronDataset
 from megatron.core.datasets.utils import Split
 from megatron.core.utils import log_single_rank
@@ -37,6 +37,10 @@ class SFTIndexedDataset(GPTDataset):
 
         if self.config.sft_debug:
             self.debug_writer = DebugDataWriter(output_dir="/users/rkreft/debug_data")  # Initialize once, outside the loop
+
+        # Set and log plw weight
+        self.sft_plw_value = config.sft_plw
+        log_single_rank(logger, logging.INFO, f"SFT PLW: {self.sft_plw_value}", )
 
         self.tokenizer = config.tokenizer
         # Set pad token
@@ -70,18 +74,7 @@ class SFTIndexedDataset(GPTDataset):
         # Build shuffle indices
         self.document_index = self._build_single_document_indices()
 
-        # Initialize caching variables
-        self.masks_and_position_ids_are_cacheable = not any(
-            [
-                self.config.reset_position_ids,
-                self.config.reset_attention_mask,
-                self.config.eod_mask_loss,
-            ]
-        )
-        self.masks_and_position_ids_are_cached = False
-        self.cached_attention_mask = None
-        self.cached_loss_mask = None
-        self.cached_position_ids = None
+        # TODO: might add caching of masks and ids later again when implement sample packing?
 
 
     def _build_single_document_indices(self) -> np.ndarray:
@@ -228,23 +221,10 @@ class SFTIndexedDataset(GPTDataset):
             labels = torch.roll(text, shifts=-1, dims=0)
             labels[-1] = self._pad_token_id
 
-        # Generate or use cached masks and position ids
-        if (
-                not self.masks_and_position_ids_are_cacheable
-                or not self.masks_and_position_ids_are_cached
-        ):
-            attention_mask, loss_mask, position_ids = self._get_ltor_masks_and_position_ids(
-                labels
-            )
-            if self.masks_and_position_ids_are_cacheable:
-                self.cached_attention_mask = attention_mask
-                self.cached_loss_mask = loss_mask
-                self.cached_position_ids = position_ids
-                self.masks_and_position_ids_are_cached = True
-        else:
-            attention_mask = self.cached_attention_mask
-            loss_mask = self.cached_loss_mask
-            position_ids = self.cached_position_ids
+        # Generate mask and position ids
+        attention_mask, loss_mask, position_ids = self._get_ltor_masks_and_position_ids(
+            labels
+        )
 
         # Mask loss for padded tokens (this also masks batch padding if idx is None)
         loss_mask[labels == self._pad_token_id] = 0.0

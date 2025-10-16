@@ -1594,7 +1594,7 @@ def _add_training_args(parser):
                                                                                   " and user-start sequence in any case")
     group.add_argument('--sft_do_not_mask_image_tokens', action='store_true', help="Do not mask image tokens, even if part of user input")
     group.add_argument('--sft_debug', action='store_true', help='Store and print debug data and information from the SFT dataset')
-
+    group.add_argument('--sft_plw', type=float, default=0, help="Prompt loss weight to apply to user input tokens in general. Default is 0 (no loss calculated on img tokens)")
     return parser
 
 

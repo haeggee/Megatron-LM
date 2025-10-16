@@ -67,6 +67,7 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
     sft_mask_special_tokens: bool = True # Mask EOD, BOD and assistant sequence begin tokens, NOT end of turn
     sft_do_not_mask_image_tokens: bool = False # always keep image tokens unmasked
     sft_debug: bool = False # debug prints
+    sft_plw: float = 0.0 # prompt loss weight used
 
     def __post_init__(self) -> None:
         """Do asserts and set fields post init"""
