@@ -52,24 +52,24 @@ class SFTIndexedDataset(GPTDataset):
         # End of Document token to add end to truncated samples TODO: currently works with HF tokenizers only
         self._eod_token_id = self.tokenizer.eod
         self._bos_token_id = self.tokenizer.bos
-        # TODO: Pass sequences dynamically
-        self._sft_user_begin_sequence = self.tokenizer.tokenize('<|start_header_id|>user<|end_header_id|>',
-                                                                add_special_tokens=False)
-        self._sft_turn_end_sequence = self.tokenizer.tokenize('<|eot_id|>', add_special_tokens=False)
-        self._sft_assistant_begin_sequence = self.tokenizer.tokenize('<|start_header_id|>assistant<|end_header_id|>',
-                                                                add_special_tokens=False)
-        # TODO: Make multimodality optional - configurable or just leave this as long as there is only one option?
-        self._img_begin_sequence = self.tokenizer.tokenize('<|img_start|>', add_special_tokens=False)
-        self._img_end_sequence = self.tokenizer.tokenize('<|img_end|>', add_special_tokens=False)
+
+        # Load pre-computed sequences from tokenizer config and convert to tensors
+        # These are pre-tokenized in the tokenizer_config.json by add_emu3_tokens_llama3_vision_instruct.py
+        self._sft_user_begin_sequence = torch.tensor(self.tokenizer.sft_user_begin_sequence, dtype=torch.long)
+        self._sft_turn_end_sequence = torch.tensor(self.tokenizer.sft_eot_token, dtype=torch.long)
+        self._sft_assistant_begin_sequence = torch.tensor(self.tokenizer.sft_assistant_begin_sequence, dtype=torch.long)
+        self._img_begin_sequence = torch.tensor(self.tokenizer.img_begin_token, dtype=torch.long)
+        self._img_end_sequence = torch.tensor(self.tokenizer.img_end_token, dtype=torch.long)
 
         # Configure token (sequences) to remove from loss calculation
+        # Pre-compute as tensors for efficiency
         self.tokens_to_mask = []
         if self.config.sft_mask_special_tokens:
             # add tokenizer special tokens like EOS, BOS and assistant begin to be masked. Never mask End of turn.
-            self.tokens_to_mask.append([self._eod_token_id])
-            self.tokens_to_mask.append([self._bos_token_id])
-            self.tokens_to_mask.append(self._sft_assistant_begin_sequence)
-        log_single_rank(logger, logging.WARNING, f"Masking the following tokens/token-sequences: {self.tokens_to_mask}", )
+            self.tokens_to_mask.append(torch.tensor([self._eod_token_id], dtype=torch.long))
+            self.tokens_to_mask.append(torch.tensor([self._bos_token_id], dtype=torch.long))
+            self.tokens_to_mask.append(self._sft_assistant_begin_sequence)  # already a tensor
+        log_single_rank(logger, logging.WARNING, f"Masking the following tokens/token-sequences: {[t.tolist() for t in self.tokens_to_mask]}", )
 
         # Build shuffle indices
         self.document_index = self._build_single_document_indices()
@@ -299,15 +299,16 @@ class SFTIndexedDataset(GPTDataset):
         loss_mask = torch.ones(self.config.sequence_length, dtype=torch.float)
 
         # 1) Mask user sequences for loss
-        begin_seq = torch.tensor(self._sft_user_begin_sequence, dtype=data.dtype, device=data.device)
-        end_seq = torch.tensor(self._sft_turn_end_sequence, dtype=data.dtype, device=data.device)
+        begin_seq = self._sft_user_begin_sequence.to(dtype=data.dtype, device=data.device)
+        end_seq = self._sft_turn_end_sequence.to(dtype=data.dtype, device=data.device)
 
         user_seq_mask = get_matching_mask_by_start_end(data, begin_seq, end_seq)
         loss_mask[user_seq_mask] = 0.0
 
         # 2) Mask other token(sequences) as configured in init (might contain BOS, EOS, assistant begin)
         for t in self.tokens_to_mask:
-            t_tensor = torch.tensor(t, dtype=data.dtype, device=data.device)
+            # Use pre-computed tensor, just move to correct device/dtype
+            t_tensor = t.to(dtype=data.dtype, device=data.device)
             if len(t_tensor) == 1:
                 mask = (data == t_tensor[0])
             elif len(t_tensor) > 1:
@@ -318,8 +319,9 @@ class SFTIndexedDataset(GPTDataset):
 
         # 3) Unmask Image tokens if configured
         if self.config.sft_do_not_mask_image_tokens:
-            img_begin_tensor = torch.tensor(self._img_begin_sequence, dtype=data.dtype, device=data.device)
-            img_end_tensor = torch.tensor(self._img_end_sequence, dtype=data.dtype, device=data.device)
+            # Use pre-computed tensors, just move to correct device/dtype
+            img_begin_tensor = self._img_begin_sequence.to(dtype=data.dtype, device=data.device)
+            img_end_tensor = self._img_end_sequence.to(dtype=data.dtype, device=data.device)
             img_seq_mask = get_matching_mask_by_start_end(data, img_begin_tensor, img_end_tensor)
             loss_mask[img_seq_mask] = 1.0
 
