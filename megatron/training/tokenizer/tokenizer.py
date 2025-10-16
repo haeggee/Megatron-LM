@@ -180,10 +180,35 @@ class _HuggingFaceTokenizer(MegatronTokenizer):
     @property
     def eod(self):
         return self._tokenizer.eos_token_id
-    
+
     @property
     def bos(self):
         return self._tokenizer.bos_token_id
+
+    @property
+    def sft_user_begin_sequence(self):
+        """Get pre-tokenized user begin sequence from tokenizer config."""
+        return self._tokenizer.init_kwargs.get('sft_user_begin_sequence', None)
+
+    @property
+    def sft_assistant_begin_sequence(self):
+        """Get pre-tokenized assistant begin sequence from tokenizer config."""
+        return self._tokenizer.init_kwargs.get('sft_assistant_begin_sequence', None)
+
+    @property
+    def sft_eot_token(self):
+        """Get pre-tokenized end-of-turn token from tokenizer config."""
+        return self._tokenizer.init_kwargs.get('sft_eot_token', None)
+
+    @property
+    def img_begin_token(self):
+        """Get pre-tokenized image begin token from tokenizer config."""
+        return self._tokenizer.init_kwargs.get('img_begin_token', None)
+
+    @property
+    def img_end_token(self):
+        """Get pre-tokenized image end token from tokenizer config."""
+        return self._tokenizer.init_kwargs.get('img_end_token', None)
 
 
 class _BertWordPieceTokenizer(MegatronTokenizer):
