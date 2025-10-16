@@ -62,13 +62,13 @@ class SFTIndexedDataset(GPTDataset):
         self._img_end_sequence = torch.tensor(self.tokenizer.img_end_token, dtype=torch.long)
 
         # Configure token (sequences) to remove from loss calculation
-        # Pre-compute as tensors for efficiency
         self.tokens_to_mask = []
         if self.config.sft_mask_special_tokens:
             # add tokenizer special tokens like EOS, BOS and assistant begin to be masked. Never mask End of turn.
             self.tokens_to_mask.append(torch.tensor([self._eod_token_id], dtype=torch.long))
             self.tokens_to_mask.append(torch.tensor([self._bos_token_id], dtype=torch.long))
             self.tokens_to_mask.append(self._sft_assistant_begin_sequence)  # already a tensor
+            self.tokens_to_mask.append(self._sft_user_begin_sequence)
         log_single_rank(logger, logging.WARNING, f"Masking the following tokens/token-sequences: {[t.tolist() for t in self.tokens_to_mask]}", )
 
         # Build shuffle indices
@@ -221,7 +221,7 @@ class SFTIndexedDataset(GPTDataset):
             labels = torch.roll(text, shifts=-1, dims=0)
             labels[-1] = self._pad_token_id
 
-        # Generate mask and position ids
+        # Generate mask and position ids. If PLW activated, loss mask will have partial weight for user input tokens
         attention_mask, loss_mask, position_ids = self._get_ltor_masks_and_position_ids(
             labels
         )
@@ -303,9 +303,9 @@ class SFTIndexedDataset(GPTDataset):
         end_seq = self._sft_turn_end_sequence.to(dtype=data.dtype, device=data.device)
 
         user_seq_mask = get_matching_mask_by_start_end(data, begin_seq, end_seq)
-        loss_mask[user_seq_mask] = 0.0
+        loss_mask[user_seq_mask] = self.sft_plw_value # value is 0 by default for full masking
 
-        # 2) Mask other token(sequences) as configured in init (might contain BOS, EOS, assistant begin)
+        # 2) Mask other token(sequences) fully(set weight to 0) as configured in init (might contain BOS, EOS, assistant begin)
         for t in self.tokens_to_mask:
             # Use pre-computed tensor, just move to correct device/dtype
             t_tensor = t.to(dtype=data.dtype, device=data.device)
