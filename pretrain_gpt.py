@@ -322,7 +322,8 @@ def core_gpt_dataset_config_from_args(args):
         goldfish_k=args.goldfish_k,
         goldfish_h=args.goldfish_h,
         sft_mask_special_tokens=args.sft_mask_special_tokens,
-        sft_do_not_mask_image_tokens=args.sft_do_not_mask_image_tokens
+        sft_do_not_mask_image_tokens=args.sft_do_not_mask_image_tokens,
+        sft_plw=args.sft_plw
     )
 
 
