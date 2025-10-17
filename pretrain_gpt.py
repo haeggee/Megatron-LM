@@ -220,7 +220,7 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, labels: torc
 
     local_num_tokens = loss[1].clone().detach().to(torch.int)
 
-    # --- Optional: Separate image/text token losses ---
+    # --- Optional: Separate image/text token losses and separate assistant loss in SFT---
     stats_dict = {'lm loss': (reporting_loss[0], reporting_loss[1])}
     if labels is not None:
         losses_flat = losses.detach().clone().view(-1)
@@ -256,6 +256,20 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, labels: torc
 
         stats_dict['image_token_loss'] = (reporting_image_loss[0], reporting_image_loss[1])
         stats_dict['text_token_loss'] = (reporting_text_loss[0], reporting_text_loss[1])
+
+        # Log separate assistant loss for sft training when plw < 1 is used
+        if args.sft and args.sft_plw < 1:
+            # log separate assistant loss for sft training when plw < 1 is used
+            assistant_loss_mask = loss_mask == 1 # assistant responses are always fully included in the loss
+            assistant_loss = torch.cat([
+                torch.sum(losses_flat * assistant_loss_mask.float()).view(1),
+                assistant_loss_mask.float().sum().view(1)
+            ])
+            if args.context_parallel_size > 1:
+                torch.distributed.all_reduce(assistant_loss, group=mpu.get_context_parallel_group())
+            reporting_assistant_loss = assistant_loss.clone().detach()
+            torch.distributed.all_reduce(reporting_assistant_loss, group=mpu.get_data_parallel_group())
+            stats_dict['assistant_loss'] = (reporting_assistant_loss[0], reporting_assistant_loss[1])
 
     return (
         loss[0] * args.context_parallel_size,
