@@ -297,7 +297,6 @@ class SFTIndexedDataset(GPTDataset):
         Finally, creates an attention mask if configured. The attention mask will exclude padding tokens from attention.
         Also creates an assistant_mask to identify assistant response tokens for separate loss tracking.
         """
-        assert not self.config.reset_position_ids and not self.config.reset_attention_mask
 
         position_ids = torch.arange(self.config.sequence_length, dtype=torch.long)
         loss_mask = torch.ones(self.config.sequence_length, dtype=torch.float)

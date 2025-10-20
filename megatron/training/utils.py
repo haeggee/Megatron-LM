@@ -441,7 +441,8 @@ def get_batch_on_this_tp_rank(data_iterator):
            'labels': data["labels"].cuda(non_blocking = True),
            'loss_mask': data["loss_mask"].cuda(non_blocking = True),
            'attention_mask': None if "attention_mask" not in data else data["attention_mask"].cuda(non_blocking = True),
-           'position_ids': data["position_ids"].cuda(non_blocking = True)
+           'position_ids': data["position_ids"].cuda(non_blocking = True),
+           'assistant_mask': None if "assistant_mask" not in data else data["assistant_mask"].cuda(non_blocking = True),
        }
 
        if args.pipeline_model_parallel_size == 1:
@@ -450,6 +451,7 @@ def get_batch_on_this_tp_rank(data_iterator):
            _broadcast(batch['loss_mask'])
            _broadcast(batch['attention_mask'])
            _broadcast(batch['position_ids'])
+           _broadcast(batch['assistant_mask'])
 
        elif mpu.is_pipeline_first_stage():
            _broadcast(batch['tokens'])
@@ -460,12 +462,14 @@ def get_batch_on_this_tp_rank(data_iterator):
            _broadcast(batch['labels'])
            _broadcast(batch['loss_mask'])
            _broadcast(batch['attention_mask'])
+           _broadcast(batch['assistant_mask'])
 
     else:
 
        tokens=torch.empty((args.micro_batch_size,args.seq_length), dtype = torch.int64 , device = torch.cuda.current_device())
        labels=torch.empty((args.micro_batch_size,args.seq_length), dtype = torch.int64 , device = torch.cuda.current_device())
        loss_mask=torch.empty((args.micro_batch_size,args.seq_length), dtype = torch.float32 , device = torch.cuda.current_device())
+       assistant_mask=None
        if args.create_attention_mask_in_dataloader:
            attention_mask=torch.empty(
                 (args.micro_batch_size,1,args.seq_length,args.seq_length), dtype = torch.bool , device = torch.cuda.current_device()
@@ -480,6 +484,7 @@ def get_batch_on_this_tp_rank(data_iterator):
            _broadcast(loss_mask)
            _broadcast(attention_mask)
            _broadcast(position_ids)
+           _broadcast(assistant_mask)
 
        elif mpu.is_pipeline_first_stage():
            labels=None
@@ -496,13 +501,15 @@ def get_batch_on_this_tp_rank(data_iterator):
            _broadcast(labels)
            _broadcast(loss_mask)
            _broadcast(attention_mask)
+           _broadcast(assistant_mask)
 
        batch = {
            'tokens': tokens,
            'labels': labels,
            'loss_mask': loss_mask,
            'attention_mask': attention_mask,
-           'position_ids': position_ids
+           'position_ids': position_ids,
+           'assistant_mask': assistant_mask,
        }
 
     return batch
