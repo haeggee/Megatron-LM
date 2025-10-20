@@ -222,12 +222,13 @@ class SFTIndexedDataset(GPTDataset):
             labels[-1] = self._pad_token_id
 
         # Generate mask and position ids. If PLW activated, loss mask will have partial weight for user input tokens
-        attention_mask, loss_mask, position_ids = self._get_ltor_masks_and_position_ids(
+        attention_mask, loss_mask, position_ids, assistant_mask = self._get_ltor_masks_and_position_ids(
             labels
         )
 
         # Mask loss for padded tokens (this also masks batch padding if idx is None)
         loss_mask[labels == self._pad_token_id] = 0.0
+        assistant_mask[labels == self._pad_token_id] = 0.0
 
         # DEBUG: if activated, log every 100 samples
         if self.config.sft_debug and idx is not None and idx % 100 == 0:  # Log every 100 samples
@@ -276,6 +277,7 @@ class SFTIndexedDataset(GPTDataset):
                 "attention_mask": attention_mask,
                 "loss_mask": loss_mask,
                 "position_ids": position_ids,
+                "assistant_mask": assistant_mask,
             }
         else:
             return {
@@ -283,6 +285,7 @@ class SFTIndexedDataset(GPTDataset):
                 "labels": labels,
                 "loss_mask": loss_mask,
                 "position_ids": position_ids,
+                "assistant_mask": assistant_mask,
             }
 
     def _get_ltor_masks_and_position_ids(self, data):
@@ -292,6 +295,7 @@ class SFTIndexedDataset(GPTDataset):
             2. Can mask arbitrary token sequences (e.g. assistant begin, assistant end, BOS, EOS)
         Both options can be Configured in the init.
         Finally, creates an attention mask if configured. The attention mask will exclude padding tokens from attention.
+        Also creates an assistant_mask to identify assistant response tokens for separate loss tracking.
         """
         assert not self.config.reset_position_ids and not self.config.reset_attention_mask
 
@@ -305,6 +309,9 @@ class SFTIndexedDataset(GPTDataset):
         user_seq_mask = get_matching_mask_by_start_end(data, begin_seq, end_seq)
         loss_mask[user_seq_mask] = self.sft_plw_value # value is 0 by default for full masking
 
+        # 1b) Create assistant mask: everything that is not user sequences
+        assistant_mask = (~user_seq_mask).float()
+
         # 2) Mask other token(sequences) fully(set weight to 0) as configured in init (might contain BOS, EOS, assistant begin)
         for t in self.tokens_to_mask:
             # Use pre-computed tensor, just move to correct device/dtype
@@ -316,6 +323,8 @@ class SFTIndexedDataset(GPTDataset):
             else:
                 raise ValueError(f"Invalid token to mask: {t}")
             loss_mask[mask] = 0.0
+            # Also mask special tokens from assistant_mask
+            assistant_mask[mask] = 0.0
 
         # 3) Unmask Image tokens if configured
         if self.config.sft_do_not_mask_image_tokens:
@@ -333,20 +342,20 @@ class SFTIndexedDataset(GPTDataset):
             )
             # Mask padding tokens in attention mask:
             no_padding_mask = (data != self._pad_token_id).float() # 1=real, 0=padding
-            
+
             # Mask both rows (queries from padding) and columns (keys to padding)
             # Row masking: padding tokens shouldn't attend to anything
             attention_mask = attention_mask * no_padding_mask.unsqueeze(1)
             # Column masking: nothing should attend to padding tokens
             attention_mask = attention_mask * no_padding_mask.unsqueeze(0)
-            
+
             # Convert attention mask to binary:
             attention_mask = attention_mask.unsqueeze(0)
             attention_mask = attention_mask < 0.5
         else:
             attention_mask = None
 
-        return attention_mask, loss_mask, position_ids
+        return attention_mask, loss_mask, position_ids, assistant_mask
 
 
 def get_matching_mask(sequence, query: torch.Tensor, only_begin:bool=True):

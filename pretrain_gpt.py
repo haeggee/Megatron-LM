@@ -157,7 +157,7 @@ def get_batch(data_iterator):
 
     # TODO: this is pretty hacky, find a better way
     if (not mpu.is_pipeline_first_stage()) and (not mpu.is_pipeline_last_stage()):
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     # get batches based on the TP rank you are on
     batch = get_batch_on_this_tp_rank(data_iterator)
@@ -172,12 +172,14 @@ def get_batch(data_iterator):
 SPIKY_LOSS_PERC = 0.2
 
 
-def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, labels: torch.Tensor = None):
+def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, labels: torch.Tensor = None, assistant_mask: torch.Tensor = None):
     """Loss function.
 
     Args:
         loss_mask (torch.Tensor): Used to mask out some portions of the loss
         output_tensor (torch.Tensor): The tensor with the losses
+        labels (torch.Tensor): The labels for image/text loss separation (optional)
+        assistant_mask (torch.Tensor): Mask identifying assistant tokens for SFT (optional)
 
     Returns:
         the loss scalar for this micro-batch
@@ -257,13 +259,13 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, labels: torc
         stats_dict['image_token_loss'] = (reporting_image_loss[0], reporting_image_loss[1])
         stats_dict['text_token_loss'] = (reporting_text_loss[0], reporting_text_loss[1])
 
-        # Log separate assistant loss for sft training when plw < 1 is used
-        if args.sft and args.sft_plw < 1:
-            # log separate assistant loss for sft training when plw < 1 is used
-            assistant_loss_mask = loss_mask == 1 # assistant responses are always fully included in the loss
+        # Log separate assistant loss for SFT training
+        if args.sft and assistant_mask is not None:
+            # Use assistant_mask to identify assistant response tokens
+            assistant_mask_flat = assistant_mask.view(-1).float()
             assistant_loss = torch.cat([
-                torch.sum(losses_flat * assistant_loss_mask.float()).view(1),
-                assistant_loss_mask.float().sum().view(1)
+                torch.sum(losses_flat * assistant_mask_flat).view(1),
+                assistant_mask_flat.sum().view(1)
             ])
             if args.context_parallel_size > 1:
                 torch.distributed.all_reduce(assistant_loss, group=mpu.get_context_parallel_group())
@@ -292,7 +294,7 @@ def forward_step(data_iterator, model: GPTModel):
     timers('batch-generator', log_level=2).start()
     global stimer
     with stimer(bdata=True):
-        tokens, labels, loss_mask, attention_mask, position_ids = get_batch(
+        tokens, labels, loss_mask, attention_mask, position_ids, assistant_mask = get_batch(
             data_iterator)
     timers('batch-generator').stop()
 
@@ -300,7 +302,7 @@ def forward_step(data_iterator, model: GPTModel):
         output_tensor = model(tokens, position_ids, attention_mask,
                               labels=labels)
 
-    return output_tensor, partial(loss_func, loss_mask, labels=labels)
+    return output_tensor, partial(loss_func, loss_mask, labels=labels, assistant_mask=assistant_mask)
 
 
 def is_dataset_built_on_rank():

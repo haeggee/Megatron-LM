@@ -264,6 +264,7 @@ class GPTDataset(MegatronDataset):
                 "attention_mask": attention_mask,
                 "loss_mask": loss_mask,
                 "position_ids": position_ids,
+                "assistant_mask": None,  # Not used for standard GPT training
             }
         else:
             return {
@@ -271,6 +272,7 @@ class GPTDataset(MegatronDataset):
                 "labels": labels,
                 "loss_mask": loss_mask,
                 "position_ids": position_ids,
+                "assistant_mask": None,  # Not used for standard GPT training
             }
 
     def _query_document_sample_shuffle_indices(
