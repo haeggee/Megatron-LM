@@ -1,11 +1,13 @@
-MEGATRON_LM_DIR=/iopsstor/scratch/cscs/dfan/Megatron-LM-eval
+MEGATRON_LM_DIR=/iopsstor/scratch/cscs/dfan/copies/Megatron-LM-convert
 TORCH_NODIST_PATH=$(mktemp -d -p $SCRATCH/.tmp)
 # CHECKPOINT_PATH=/iopsstor/scratch/cscs/dfan/Megatron-LM/logs/Meg-Runs/robotstxt_ablation_runs/apertus-1b-21n-4096sl-504gbsz-fw-edu-robots-filtered/checkpoints/ 
 # CHECKPOINT_PATH=/iopsstor/scratch/cscs/dfan/Megatron-LM/logs/Meg-Runs/robotstxt_ablation_runs/apertus-1b-21n-4096sl-504gbsz-fw-edu-robots-kept/checkpoints/
-CHECKPOINT_PATH=/iopsstor/scratch/cscs/dfan/Megatron-LM/logs/Meg-Runs/robotstxt-1b-cooldown/apertus3-1b-21-nodes-100bt-NewsDomains/checkpoints
+CHECKPOINT_PATH=/iopsstor/scratch/cscs/dfan/copies/Megatron-LM-debug/logs/Meg-Runs/meta_data_conditioning_masking_out/apertus-1b-21n-4096sl-504gbsz-fw-edu-url_suffix_v2/checkpoints
 ITERATIONS=$(cat $CHECKPOINT_PATH/latest_checkpointed_iteration.txt)
-HF_CKPT_PATH=/iopsstor/scratch/cscs/dfan/hf-checkpoints/robotstxt-filtered-plus-News
-TOKENIZER=alehc/swissai-tokenizer
+MODEL_NAME=url_suffix_correct
+HF_SAVE_DIR=/iopsstor/scratch/cscs/$USER/Meg-Checkpoints/hf-checkpoints
+HF_CKPT_PATH=$HF_SAVE_DIR/$MODEL_NAME
+TOKENIZER=dyfan/swissai-tokenizer-wcontext
 REPOS_PATH=$(mktemp -d -p $SCRATCH/.tmp)
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
