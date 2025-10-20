@@ -5,8 +5,8 @@ DEF_MEGATRON_PATH=$(dirname $(dirname $( cd -- "$(dirname "$0")" >/dev/null 2>&1
 DEF_LOGS_ROOT=$PWD/eval-logs
 # DEF_CONTAINER_PATH=/capstor/store/cscs/swissai/a06/containers/NGC-PyTorch/ngc_pt_jan.toml
 DEF_CONTAINER_PATH=/iopsstor/scratch/cscs/dfan/ngc_pt_jan.toml
-DEF_ACCOUNT=a-a06
-DEF_TOKENIZER=alehc/swissai-tokenizer
+DEF_ACCOUNT=a-infra01-1
+DEF_TOKENIZER=dyfan/swissai-tokenizer-wcontext
 
 ITERATIONS=(latest)
 TASKS=scripts/evaluation/swissai_eval
@@ -47,6 +47,7 @@ usage () {
 	echo "  --wandb-project"
 	echo "  --wandb-entity"
 	echo "  --wandb-id"
+	echo "  --lm-eval-branch: Branch of lm-eval-harness to use (default=main)."
 	echo ""
 	echo "Variables:"
 	echo "  MEGATRON_PATH: Megatron root (default=$DEF_MEGATRON_PATH)."
@@ -124,6 +125,8 @@ while [[ $# -gt 0 ]]; do
 			WANDB_ENTITY=$2; shift 2;;
 		--wandb-id)
 			WANDB_ID=$2; shift 2;;
+		--lm-eval-branch)
+			LM_EVAL_BRANCH=$2; shift 2;;
 
 		--tp)
 			if [ -z ${TP+x} ]; then  # check if undef to ignore --tp if --size is set.
@@ -310,6 +313,7 @@ cat > $SBATCH_PATH <<- EOM
 #SBATCH --time=02:00:00
 #SBATCH --exclusive
 #SBATCH --dependency=singleton
+#SBATCH --exclude=nid[006569,006601,006609,006622-006623,006628-006629,006632,006638,006651,006653-006655,006658-006662,006664-006665,006669-006671,006674-006677,006571,006636,006640,006642,006644,006673,006740,006772,006798,006804,006855,006857-006858,006860,006866,006877,006885-006886,006894-006895,007338,006574-006575,006577-006578,006585-006590,006592,006598,006603-006606,006608,006611-006614]
 
 # Step 0: Some useful logs.
 export MASTER_ADDR=\$(hostname)
@@ -342,10 +346,11 @@ srun -l --unbuffered numactl --membind=0-3 bash -c "
 	git checkout swissai-model
 	python -m pip install -e .
 	cd ..
-	git clone git@github.com:fan1dy/lm-evaluation-harness.git
-	git checkout std-5shot
-	# git clone https://github.com/AleHD/lm-evaluation-harness.git
+	echo $LM_EVAL_BRANCH
+	git clone https://github.com/fan1dy/lm-evaluation-harness.git
 	cd lm-evaluation-harness
+	git checkout $LM_EVAL_BRANCH
+	# git clone https://github.com/AleHD/lm-evaluation-harness.git
 	python -m pip install -e .[api]
 
 	$CMD_LOOP
