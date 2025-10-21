@@ -1595,6 +1595,14 @@ def _add_training_args(parser):
     group.add_argument('--sft_do_not_mask_image_tokens', action='store_true', help="Do not mask image tokens, even if part of user input")
     group.add_argument('--sft_debug', action='store_true', help='Store and print debug data and information from the SFT dataset')
     group.add_argument('--sft_plw', type=float, default=0, help="Prompt loss weight to apply to user input tokens in general. Default is 0 (no loss calculated on img tokens)")
+    group.add_argument('--sft-pack-samples', action='store_true',
+                       help='Enable document packing for SFT. Packs whole documents into sequences '
+                       'until next document does not fit. Automatically enables position ID reset '
+                       'and cross-document attention masking.')
+    group.add_argument('--dummy-data-packing', action='store_true',
+                       help='Build sample index for packed SFT data, print the number of resulting '
+                       'samples, and exit. Use this to determine how many training steps are available '
+                       'with the current dataset and packing configuration.')
     return parser
 
 
