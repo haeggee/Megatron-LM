@@ -250,7 +250,6 @@ py::array_t<DocIdx> build_sample_idx_packed_whole_docs(
     const py::array_t<int32_t>& sizes_,
     const py::array_t<DocIdx>& doc_idx_,
     int32_t seq_length,
-    bool drop_last_partial_sequence,
     int32_t add_extra_token_to_sequence) {
     /* Build the sample index for SFT with whole-document packing.
      * Pack whole documents into sequences until the next document doesn't fit.
@@ -298,7 +297,6 @@ py::array_t<DocIdx> build_sample_idx_packed_whole_docs(
             if (doc_length <= remaining_seq_length) {
                 // Document fits - include it
                 remaining_seq_length -= doc_length;
-                total_tokens_seen += doc_length;
                 doc_idx_index++;
                 documents_in_sample++;
             } else {
