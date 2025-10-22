@@ -7,6 +7,7 @@ first phase of packed SFT training where you need to determine the actual
 number of packed samples without loading the full model.
 
 IMPORTANT REQUIREMENTS:
+    - SEED MUST MATCH your intended training run (determines packing)
     - Parallelism settings (TP/PP/EP) MUST match your actual training run
     - World size can be smaller (minimal DP) but TP/PP/EP must be identical
     - Model architecture params are only needed for validation (not used in packing)
@@ -122,27 +123,12 @@ def build_train_valid_test_datasets(train_val_test_num_samples):
 
     print_rank_0("> finished creating GPT datasets ...")
 
-    # Print stats and exit
-    if args.sft and args.sft_pack_samples:
-        print_rank_0("=" * 80)
-        print_rank_0("SFT DATASET PACKING - Sample counts calculated")
-        print_rank_0("=" * 80)
-        print_rank_0(f"Training dataset: {len(train_ds)} packed samples available")
-        if valid_ds:
-            print_rank_0(f"Validation dataset: {len(valid_ds)} packed samples available")
-        if test_ds:
-            print_rank_0(f"Test dataset: {len(test_ds)} packed samples available")
-        print_rank_0("=" * 80)
-        print_rank_0("Use these values to configure --train-samples for your training run.")
-        print_rank_0("Exiting now.")
-        sys.exit(0)
-    else:
-        print_rank_0("ERROR: This script requires both --sft and --sft-pack-samples flags")
-        sys.exit(1)
-
 
 def get_train_val_test_num_samples():
-    """Calculate the number of samples for train/val/test datasets."""
+    """
+    Calculate the number of samples for train/val/test datasets.
+    The numbers here are not important for sample packing calculation but needed for init.
+    """
     args = get_args()
 
     # From training.py build_train_valid_test_datasets function
@@ -161,11 +147,6 @@ def get_train_val_test_num_samples():
         eval_iters * args.global_batch_size,
         test_iters * args.global_batch_size
     ]
-
-    print_rank_0(' > datasets target sizes (minimum size):')
-    print_rank_0('    train:      {}'.format(train_val_test_num_samples[0]))
-    print_rank_0('    validation: {}'.format(train_val_test_num_samples[1]))
-    print_rank_0('    test:       {}'.format(train_val_test_num_samples[2]))
 
     return train_val_test_num_samples
 
@@ -201,6 +182,10 @@ def main():
     print_rank_0("This script will build the dataset index and report packed sample counts")
     print_rank_0("=" * 80)
     print_rank_0("")
+    print_rank_0("IMPORTANT: SEED must match your intended training run! It determines packing and thus num of samples.")
+    print_rank_0(f"  Seed: {args.seed}")
+    print_rank_0("=" * 80)
+    print_rank_0("")
     print_rank_0("IMPORTANT: Parallelism settings (TP/PP/EP) should match your training run!")
     print_rank_0(f"  Tensor Parallel: {args.tensor_model_parallel_size}")
     print_rank_0(f"  Pipeline Parallel: {args.pipeline_model_parallel_size}")
@@ -221,11 +206,8 @@ def main():
     # Calculate train/val/test sample counts
     train_val_test_num_samples = get_train_val_test_num_samples()
 
-    # Build datasets (this will trigger the packing process and exit)
+    # Build datasets (this will trigger the packing process)
     build_train_valid_test_datasets(train_val_test_num_samples)
-
-    # This shouldn't be reached
-    print_rank_0("Dataset initialization completed")
 
 
 if __name__ == "__main__":
