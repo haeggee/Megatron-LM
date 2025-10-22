@@ -373,27 +373,6 @@ def train_valid_test_datasets_provider(train_val_test_num_samples):
 
     print_rank_0("> finished creating GPT datasets ...")
 
-    # If dummy data packing mode, print stats and exit
-    if args.dummy_data_packing:
-        if args.sft and args.sft_pack_samples:
-            print_rank_0("=" * 80)
-            print_rank_0("DUMMY DATA PACKING MODE - Dataset statistics calculated")
-            print_rank_0("=" * 80)
-            print_rank_0(f"Training dataset: {len(train_ds)} packed samples available")
-            if valid_ds:
-                print_rank_0(f"Validation dataset: {len(valid_ds)} packed samples available")
-            if test_ds:
-                print_rank_0(f"Test dataset: {len(test_ds)} packed samples available")
-            print_rank_0("=" * 80)
-            print_rank_0("Use these values to configure --train-samples for your training run.")
-            print_rank_0("Exiting now.")
-            import sys
-            sys.exit(0)
-        else:
-            print_rank_0("ERROR: --dummy-data-packing requires both --sft and --sft-pack-samples")
-            import sys
-            sys.exit(1)
-
     return train_ds, valid_ds, test_ds
 
 

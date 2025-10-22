@@ -1599,10 +1599,6 @@ def _add_training_args(parser):
                        help='Enable document packing for SFT. Packs whole documents into sequences '
                        'until next document does not fit. Automatically enables position ID reset '
                        'and cross-document attention masking.')
-    group.add_argument('--dummy-data-packing', action='store_true',
-                       help='Build sample index for packed SFT data, print the number of resulting '
-                       'samples, and exit. Use this to determine how many training steps are available '
-                       'with the current dataset and packing configuration.')
     return parser
 
 
