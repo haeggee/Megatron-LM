@@ -83,6 +83,38 @@ class SFTIndexedDataset(GPTDataset):
             self.document_index = self._build_single_document_indices()
             self._using_packed_samples = False
 
+    def _log_packing_statistics(self, document_index, sample_index, from_cache=False):
+        """
+        Log statistics about packed samples.
+
+        Args:
+            document_index: Array of document IDs
+            sample_index: Array of sample boundaries
+            from_cache: Whether the indices were loaded from cache
+        """
+        num_samples_available = sample_index.shape[0] - 1
+        sequence_length = self.config.sequence_length
+        num_tokens_per_epoch = int(np.sum(self.dataset.sequence_lengths[self.indices]))
+        total_tokens_in_samples = num_samples_available * sequence_length
+        avg_tokens_per_sample = num_tokens_per_epoch / num_samples_available if num_samples_available > 0 else 0
+        avg_documents_per_sample = len(document_index) / num_samples_available if num_samples_available > 0 else 0
+
+        # Log packing statistics
+        cache_suffix = " (loaded from cache)" if from_cache else ""
+        log_single_rank(logger, logging.INFO, f"> ===== SFT Packing Statistics{cache_suffix} =====")
+        log_single_rank(logger, logging.INFO, f"> Total documents in epoch: {len(document_index)}")
+        log_single_rank(logger, logging.INFO, f"> Total tokens in documents: {num_tokens_per_epoch:,}")
+        log_single_rank(logger, logging.INFO, f"> Sequence length: {sequence_length}")
+        log_single_rank(logger, logging.INFO, f"> Number of packed samples: {num_samples_available:,}")
+        log_single_rank(logger, logging.INFO, f"> Total tokens in samples: {total_tokens_in_samples:,}")
+        log_single_rank(logger, logging.INFO, f"> Average tokens per sample: {avg_tokens_per_sample:.1f}")
+        log_single_rank(logger, logging.INFO, f"> Average documents per sample: {avg_documents_per_sample:.2f}")
+        log_single_rank(logger, logging.INFO, f"> Token utilization: {100 * num_tokens_per_epoch / total_tokens_in_samples:.2f}%")
+        if from_cache:
+            log_single_rank(logger, logging.INFO, f"> ========================================================")
+        else:
+            log_single_rank(logger, logging.INFO, f"> ===================================")
+
     def _build_packing_document_to_sample_indices(self):
         """
         Build indices for packed document sampling. Packs whole documents into sequences without splitting.
@@ -173,22 +205,8 @@ class SFTIndexedDataset(GPTDataset):
 
             num_samples_available = sample_index.shape[0] - 1
 
-            # Calculate statistics for logging
-            total_tokens_in_samples = num_samples_available * sequence_length
-            avg_tokens_per_sample = num_tokens_per_epoch / num_samples_available if num_samples_available > 0 else 0
-            avg_documents_per_sample = len(document_index) / num_samples_available if num_samples_available > 0 else 0
-
             # Log packing statistics
-            log_single_rank(logger, logging.INFO, f"> ===== SFT Packing Statistics =====")
-            log_single_rank(logger, logging.INFO, f"> Total documents in epoch: {len(document_index)}")
-            log_single_rank(logger, logging.INFO, f"> Total tokens in documents: {num_tokens_per_epoch:,}")
-            log_single_rank(logger, logging.INFO, f"> Sequence length: {sequence_length}")
-            log_single_rank(logger, logging.INFO, f"> Number of packed samples: {num_samples_available:,}")
-            log_single_rank(logger, logging.INFO, f"> Total tokens in samples: {total_tokens_in_samples:,}")
-            log_single_rank(logger, logging.INFO, f"> Average tokens per sample: {avg_tokens_per_sample:.1f}")
-            log_single_rank(logger, logging.INFO, f"> Average documents per sample: {avg_documents_per_sample:.2f}")
-            log_single_rank(logger, logging.INFO, f"> Token utilization: {100 * num_tokens_per_epoch / total_tokens_in_samples:.2f}%")
-            log_single_rank(logger, logging.INFO, f"> ===================================")
+            self._log_packing_statistics(document_index, sample_index, from_cache=False)
 
             # Validate: if num_samples requested exceeds what's available, abort
             if self.num_samples is not None and self.num_samples > num_samples_available:
@@ -251,7 +269,9 @@ class SFTIndexedDataset(GPTDataset):
         log_single_rank(logger, logging.DEBUG, f"\t> time elapsed: {t_end - t_beg:4f} seconds")
 
         num_samples_available = sample_index.shape[0] - 1
-        log_single_rank(logger, logging.INFO, f"> total number of packed samples: {num_samples_available:,}")
+
+        # Log packing statistics
+        self._log_packing_statistics(document_index, sample_index, from_cache=True)
 
         # Validate again when loading from cache
         if self.num_samples is not None and self.num_samples > num_samples_available:
