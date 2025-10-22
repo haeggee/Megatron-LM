@@ -322,7 +322,7 @@ py::array_t<DocIdx> build_sample_idx_packed_whole_docs(
     // Convert to numpy array [num_samples + 1, 2]
     size_t num_samples = sample_starts.size();
     auto result = py::array_t<DocIdx>({num_samples, size_t(2)});
-    auto r = result.mutable_unchecked<2>();
+    auto r = result.template mutable_unchecked<2>();
 
     for (size_t i = 0; i < num_samples; ++i) {
         r(i, 0) = sample_starts[i].first;   // document_idx_index

@@ -168,7 +168,6 @@ class SFTIndexedDataset(GPTDataset):
                 sequence_lengths_for_cpp,
                 document_index,
                 sequence_length,
-                drop_last_partial_sequence=True,
                 add_extra_token_to_sequence=self.config.add_extra_token_to_sequence,
             )
 
