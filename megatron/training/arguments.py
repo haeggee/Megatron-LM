@@ -1706,6 +1706,9 @@ def _add_checkpointing_args(parser):
                        help='Output directory to save checkpoints to.')
     group.add_argument('--save-interval', '--persistent-save-interval', type=int, default=None,
                        help='Number of iterations between persistent checkpoint saves.')
+    group.add_argument('--final-checkpoint', action='store_true', default=False,
+                       help='Save a checkpoint after the final training iteration, even if it does not '
+                       'align with the save-interval. Useful to ensure a final checkpoint is always stored.')
     group.add_argument('--no-save-optim', action='store_true', default=None,
                        help='Do not save current optimizer.')
     group.add_argument('--no-save-rng', action='store_true', default=None,

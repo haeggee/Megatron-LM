@@ -1704,6 +1704,23 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         sys.exit(exit_code)
 
     torch.distributed.barrier()
+
+    # Save final checkpoint if requested and we haven't just saved at this iteration
+    if iteration >= args.train_iters and args.final_checkpoint and args.save:
+        # Check if we need to save (avoid duplicate if already saved at this iteration)
+        should_save_final = True
+        if args.save_interval and iteration % args.save_interval == 0:
+            should_save_final = False
+        if args.non_persistent_save_interval and iteration % args.non_persistent_save_interval == 0:
+            should_save_final = False
+
+        if should_save_final:
+            print_rank_0(f'Saving final checkpoint at iteration {iteration}')
+            save_checkpoint_and_time(iteration, model, optimizer,
+                                     opt_param_scheduler,
+                                     num_floating_point_operations_so_far,
+                                     checkpointing_context, train_data_iterator=train_data_iterator)
+
     if iteration >= args.train_iters and is_rank0():
         print(f"Training finished after {iteration} iterations; Canceling pending scheduled jobs.")
         Path(args.exit_trigger).touch()
