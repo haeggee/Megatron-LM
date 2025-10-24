@@ -213,10 +213,8 @@ class SFTIndexedDataset(GPTDataset):
                 error_msg = (
                     f"ERROR: Requested {self.num_samples} training samples but only "
                     f"{num_samples_available} packed samples available from dataset. "
-                    f"With SFT packing, only one epoch is used. Either:\n"
-                    f"  1. Reduce --train-samples to {num_samples_available} or less, OR\n"
-                    f"  2. Add more documents to your dataset, OR\n"
-                    f"  3. Increase --seq-length to fit more documents per sample"
+                    f"This would lead to crashed training in the end." 
+                    "To mitigate this multi-epoch support would have to be supported!"
                 )
                 log_single_rank(logger, logging.ERROR, error_msg)
                 raise ValueError(error_msg)
@@ -278,7 +276,8 @@ class SFTIndexedDataset(GPTDataset):
             error_msg = (
                 f"ERROR: Requested {self.num_samples} training samples but only "
                 f"{num_samples_available} packed samples available from dataset. "
-                f"Reduce --train-samples to {num_samples_available} or less."
+                f"This would lead to crashed training in the end." 
+                "To mitigate this multi-epoch support would have to be supported!"
             )
             log_single_rank(logger, logging.ERROR, error_msg)
             raise ValueError(error_msg)
@@ -398,8 +397,8 @@ class SFTIndexedDataset(GPTDataset):
         shuffled_idx = self.shuffle_index[idx]
 
         # Get sample boundaries from sample_index
-        doc_index_beg, doc_index_beg_offset = self.sample_index[shuffled_idx]
-        doc_index_end, doc_index_end_offset = self.sample_index[shuffled_idx + 1]
+        doc_index_beg, _ = self.sample_index[shuffled_idx]
+        doc_index_end, _ = self.sample_index[shuffled_idx + 1]
 
         # Target length
         target_length = self.config.sequence_length + self.config.add_extra_token_to_sequence
@@ -585,7 +584,7 @@ class SFTIndexedDataset(GPTDataset):
         position_ids = torch.arange(self.config.sequence_length, dtype=torch.long)
         loss_mask = torch.ones(self.config.sequence_length, dtype=torch.float)
 
-        # For packed samples: reset position IDs at document boundaries (EOD tokens)
+        # 0) For packed samples: reset position IDs at document boundaries (EOD tokens)
         if self._using_packed_samples:
             eod_indices = torch.where(data == self._eod_token_id)[0]
             if len(eod_indices) > 0:
@@ -593,7 +592,8 @@ class SFTIndexedDataset(GPTDataset):
                 for eod_idx in eod_indices:
                     if eod_idx + 1 < len(position_ids):
                         # Subtract the position value at EOD+1 from all subsequent positions
-                        position_ids[(eod_idx + 1):] -= (position_ids[eod_idx + 1])
+                        to_subtract = position_ids[eod_idx].clone() + 1
+                        position_ids[(eod_idx + 1):] -= to_subtract
 
         # 1) Mask user sequences for loss
         begin_seq = self._sft_user_begin_sequence.to(dtype=data.dtype, device=data.device)
