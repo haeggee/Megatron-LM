@@ -87,7 +87,8 @@ def core_gpt_dataset_config_from_args(args):
         sft_mask_special_tokens=args.sft_mask_special_tokens,
         sft_do_not_mask_image_tokens=args.sft_do_not_mask_image_tokens,
         sft_plw=args.sft_plw,
-        sft_pack_samples=args.sft_pack_samples
+        sft_pack_samples=args.sft_pack_samples,
+        skip_margin_samples=args.data_skip_margin_samples
     )
 
 
