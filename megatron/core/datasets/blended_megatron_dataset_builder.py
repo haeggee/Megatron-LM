@@ -214,8 +214,11 @@ class BlendedMegatronDatasetBuilder(object):
                 # The number of samples we plan to use per dataset
                 sizes_per_dataset_target = _get_size_per_split_per_dataset(weights, self.sizes)
                 # The number of samples we plan to build per dataset
+                # Skip margin if requested (useful for fixed-size datasets like SFT packed)
+                # Otherwise use margin=0.5% to ensure we have enough samples
+                margin = 0.0 if self.config.skip_margin_samples else 0.5
                 sizes_per_dataset_buffer = _get_size_per_split_per_dataset(
-                    weights, self.sizes, margin=0.5
+                    weights, self.sizes, margin=margin
                 )
 
             # Build each dataset in parallel
@@ -297,8 +300,11 @@ class BlendedMegatronDatasetBuilder(object):
                             weights, sizes_spoof
                         )
                         # The number of samples we plan to build per dataset
+                        # Skip margin if requested (useful for fixed-size datasets like SFT packed)
+                        # Otherwise use margin=0.5% to ensure we have enough samples
+                        margin = 0.0 if self.config.skip_margin_samples else 0.5
                         sizes_per_dataset_buffer = _get_size_per_split_per_dataset(
-                            weights, sizes_spoof, margin=0.5
+                            weights, sizes_spoof, margin=margin
                         )
 
                     # Build each dataset in parallel

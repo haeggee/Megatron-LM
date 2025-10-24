@@ -63,6 +63,11 @@ class BlendedMegatronDatasetConfig:
     tokenizer: Optional[MegatronTokenizer] = None
     """The MegatronTokenizer instance. Required for datasets that do online tokenization."""
 
+    skip_margin_samples: bool = False
+    """Whether to skip the 0.5% margin when calculating dataset sizes. When True, requests
+       exactly the number of samples needed without buffer. Useful for datasets with fixed
+       size (e.g., SFT packed datasets) where samples cannot be regenerated."""
+
     def __post_init__(self) -> None:
         """Do asserts and set fields post init"""
         if self.blend_per_split is not None and any(self.blend_per_split):

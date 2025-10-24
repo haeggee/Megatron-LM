@@ -2068,6 +2068,11 @@ def _add_data_args(parser):
                        'json file with `train`, `valid, `test` keys')
     group.add_argument('--data-cache-path', default=None,
                        help='Path to a directory to hold cached index files.')
+    group.add_argument('--data-skip-margin-samples', action='store_true',
+                       help='Skip the 0.5%% margin when calculating dataset sizes. '
+                       'When enabled, requests exactly the number of samples needed '
+                       'without buffer. Use this for datasets with fixed size (e.g., '
+                       'SFT packed datasets) where samples cannot be regenerated.')
     group.add_argument('--no-mmap-bin-files', action='store_false',
                        help='Disable mmap-ing of .bin files.',
                        dest='mmap_bin_files')
