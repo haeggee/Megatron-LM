@@ -1716,6 +1716,10 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
 
         if should_save_final:
             print_rank_0(f'Saving final checkpoint at iteration {iteration}')
+            # Re-enable hooks before saving if they were disabled, so save_checkpoint_and_time
+            # can properly manage them (it expects hooks to be enabled if overlap_param_gather is True)
+            if pre_hook_enabled and args.use_distributed_optimizer and args.overlap_param_gather:
+                enable_forward_pre_hook(model)
             save_checkpoint_and_time(iteration, model, optimizer,
                                      opt_param_scheduler,
                                      num_floating_point_operations_so_far,
