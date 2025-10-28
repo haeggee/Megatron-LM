@@ -64,7 +64,7 @@ def build_sample_idx(
         )
     return sample_idx
 
-
+@DeprecationWarning
 def build_sample_idx_packed_whole_docs_python(
     sizes: numpy.ndarray,
     document_indices: numpy.ndarray,
@@ -72,6 +72,9 @@ def build_sample_idx_packed_whole_docs_python(
     add_extra_token_to_sequence: bool = True,
 ):
     """Build the 2-D sample index for SFT with whole-document packing (Pure Python version)
+
+    DEPRECATED: This function is kept for reference and testing only.
+    Use build_sample_idx_packed_whole_docs() instead, which uses the optimized C++ implementation.
 
     Packs whole documents into sequences until the next document doesn't fit. Never splits
     documents across sequences.
@@ -164,7 +167,7 @@ def build_sample_idx_packed_whole_docs(
     Packs whole documents into sequences until the next document doesn't fit. Never splits
     documents across sequences.
 
-    Currently uses Python implementation. C++ version is available but not used.
+    Uses the optimized C++ implementation from helpers.cpp for better performance.
 
     Args:
         sizes (numpy.ndarray): The 1-D array of document lengths
@@ -179,29 +182,29 @@ def build_sample_idx_packed_whole_docs(
     Returns:
         numpy.ndarray: The 2-D sample index where offset column is always 0 (whole documents only)
     """
-    # Use Python implementation
-    return build_sample_idx_packed_whole_docs_python(
-        sizes,
-        document_indices,
-        sequence_length,
-        add_extra_token_to_sequence,
-    )
+    # Use C++ implementation for better performance
+    sample_idx_max = max(document_indices.shape[0], sizes.max())
+    if sample_idx_max <= numpy.iinfo(numpy.int32).max:
+        sample_idx = build_sample_idx_packed_whole_docs_int32(
+            sizes,
+            document_indices,
+            sequence_length,
+            1 if add_extra_token_to_sequence else 0,
+        )
+        assert sample_idx.min() >= 0 and sample_idx.max() <= sample_idx_max
+    else:
+        sample_idx = build_sample_idx_packed_whole_docs_int64(
+            sizes,
+            document_indices,
+            sequence_length,
+            1 if add_extra_token_to_sequence else 0,
+        )
+    return sample_idx
 
-    # C++ implementation (kept for reference, not currently used):
-    # sample_idx_max = max(document_indices.shape[0], sizes.max())
-    # if sample_idx_max <= numpy.iinfo(numpy.int32).max:
-    #     sample_idx = build_sample_idx_packed_whole_docs_int32(
-    #         sizes,
-    #         document_indices,
-    #         sequence_length,
-    #         1 if add_extra_token_to_sequence else 0,
-    #     )
-    #     assert sample_idx.min() >= 0 and sample_idx.max() <= sample_idx_max
-    # else:
-    #     sample_idx = build_sample_idx_packed_whole_docs_int64(
-    #         sizes,
-    #         document_indices,
-    #         sequence_length,
-    #         1 if add_extra_token_to_sequence else 0,
-    #     )
-    # return sample_idx
+    # Python implementation (kept for reference/testing):
+    # return build_sample_idx_packed_whole_docs_python(
+    #     sizes,
+    #     document_indices,
+    #     sequence_length,
+    #     add_extra_token_to_sequence,
+    # )
