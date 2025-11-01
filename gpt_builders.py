@@ -107,6 +107,11 @@ def _get_transformer_layer_spec(use_te, config):
     """
     args = get_args()
     if use_te:
+        if args.normalization == "SeeDNorm":
+            raise ValueError(
+                "SeeDNorm is not supported with Transformer Engine backend. "
+                "Set --transformer-impl local to use SeeDNorm."
+            )
         return get_gpt_layer_with_transformer_engine_spec(
             args.num_experts,
             args.moe_grouped_gemm,

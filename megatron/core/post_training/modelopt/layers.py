@@ -73,6 +73,11 @@ class Norm:
                 zero_centered_gamma=config.layernorm_zero_centered_gamma,
                 **_get_extra_te_kwargs(config),
             )
+        elif config.normalization == "SeeDNorm":
+            raise NotImplementedError(
+                "Transformer-Engine backend does not support SeeDNorm. "
+                "Use --transformer-impl local to enable SeeDNorm."
+            )
         else:
             raise Exception("Only LayerNorm and RMSNorm are curently supported")
 

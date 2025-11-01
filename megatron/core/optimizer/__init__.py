@@ -108,7 +108,16 @@ def _get_param_groups(
                     or (default_skip_embedding_weight_decay and "embedding" in name)
                 )
 
-            if any(keyword in name for keyword in ["alpha"]):
+            if hasattr(param, "apply_weight_decay"):
+                no_wd = not bool(getattr(param, "apply_weight_decay"))
+            elif hasattr(param, "skip_weight_decay"):
+                no_wd = bool(getattr(param, "skip_weight_decay"))
+
+            if (
+                any(keyword in name for keyword in ["alpha"])
+                and not hasattr(param, "apply_weight_decay")
+                and not hasattr(param, "skip_weight_decay")
+            ):
                 no_wd = True
 
             if scale_lr_cond is not None:

@@ -1,9 +1,17 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+from typing import Callable, Union
+
 import torch
+import torch.nn.functional as F
 
 from megatron.core.jit import jit_fuser
 from megatron.core.transformer import TransformerConfig
 from megatron.core.utils import is_torch_min_version
+
+_SEEDNORM_ACTIVATIONS = {
+    "tanh": torch.tanh,
+    "softsign": F.softsign,
+}
 
 
 class WrappedTorchNorm:
@@ -34,6 +42,15 @@ class WrappedTorchNorm:
         assert (
             not config.memory_efficient_layer_norm
         ), f"memory_efficient_layer_norm not supported by torch LayerNorm"
+
+        if config.normalization == "SeeDNorm":
+            return SeeDNorm(
+                hidden_size=hidden_size,
+                eps=eps,
+                init=getattr(config, "seednorm_init", 1.0),
+                sequence_parallel=config.sequence_parallel,
+                activation=getattr(config, "seednorm_activation", "tanh"),
+            )
 
         if config.normalization == "LayerNorm":
             norm_cls = torch.nn.LayerNorm
@@ -94,3 +111,65 @@ class L2Norm(torch.nn.Module):
             torch.Tensor: L2-normalized tensor with the same dtype as input.
         """
         return self._norm(x)
+
+class SeeDNorm(torch.nn.Module):
+    """SeeDNorm implementation following the SeeDNorm pseudocode."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+        init: float = 1.0,
+        sequence_parallel: bool = False,
+        activation: Union[str, Callable[[torch.Tensor], torch.Tensor]] = "tanh",
+        **kwargs,
+    ):
+        super().__init__()
+        if isinstance(hidden_size, torch.Size):
+            normalized_shape = hidden_size
+        elif isinstance(hidden_size, (tuple, list)):
+            normalized_shape = torch.Size(hidden_size)
+        else:
+            normalized_shape = torch.Size((hidden_size,))
+
+        # Determine activation function
+        if isinstance(activation, str):
+            if activation not in _SEEDNORM_ACTIVATIONS:
+                raise ValueError(
+                    f"Unsupported SeeDNorm activation '{activation}'. "
+                    f"Supported values: {list(_SEEDNORM_ACTIVATIONS.keys())}"
+                )
+            self._activation = _SEEDNORM_ACTIVATIONS[activation]
+            self.activation_name = activation
+        elif callable(activation):
+            self._activation = activation
+            self.activation_name = getattr(activation, "__name__", "custom_activation")
+        else:
+            raise TypeError("activation must be a string identifier or a callable.")
+
+        self.eps = eps
+        self.alpha = torch.nn.Parameter(torch.ones(normalized_shape) * init)
+        self.beta = torch.nn.Parameter(torch.zeros(normalized_shape))
+        self.gamma = torch.nn.Parameter(torch.ones(normalized_shape))
+
+        setattr(self.alpha, "sequence_parallel", sequence_parallel)
+        setattr(self.alpha, "apply_weight_decay", True)
+        setattr(self.beta, "sequence_parallel", sequence_parallel)
+        setattr(self.beta, "apply_weight_decay", True)
+        setattr(self.gamma, "sequence_parallel", sequence_parallel)
+
+    @jit_fuser
+    def _seed_norm(self, x: torch.Tensor) -> torch.Tensor:
+        x_float = x.float()
+        beta = self.beta.float()
+        alpha = self.alpha.float()
+        gamma = self.gamma.float()
+
+        rescale = self._activation(torch.matmul(x_float, beta))
+        inv_rms = torch.rsqrt(x_float.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        x_norm = x_float * inv_rms
+        dynamic_scale = rescale.unsqueeze(-1) * alpha
+        return ((dynamic_scale + gamma) * x_norm).type_as(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self._seed_norm(x)
