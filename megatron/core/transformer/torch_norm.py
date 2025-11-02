@@ -31,9 +31,10 @@ class WrappedTorchNorm:
         zero_centered_gamma: bool = False,
         normalization: str = "LayerNorm",
     ):
-        assert (
-            not config.layernorm_zero_centered_gamma
-        ), f"zero_centered_gamma not supported by torch LayerNorm"
+        if config.normalization != "SeeDNorm":
+            assert (
+                not config.layernorm_zero_centered_gamma
+            ), "layernorm_zero_centered_gamma requires SeeDNorm with the torch backend"
 
         assert not config.persist_layer_norm, f"persist_layer_norm not supported by torch LayerNorm"
 
@@ -50,6 +51,7 @@ class WrappedTorchNorm:
                 init=getattr(config, "seednorm_init", 1.0),
                 sequence_parallel=config.sequence_parallel,
                 activation=getattr(config, "seednorm_activation", "tanh"),
+                zero_centered_gamma=config.layernorm_zero_centered_gamma,
             )
 
         if config.normalization == "LayerNorm":
@@ -122,6 +124,7 @@ class SeeDNorm(torch.nn.Module):
         init: float = 1.0,
         sequence_parallel: bool = False,
         activation: Union[str, Callable[[torch.Tensor], torch.Tensor]] = "tanh",
+        zero_centered_gamma: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -148,9 +151,15 @@ class SeeDNorm(torch.nn.Module):
             raise TypeError("activation must be a string identifier or a callable.")
 
         self.eps = eps
+        self.zero_centered_gamma = zero_centered_gamma
         self.alpha = torch.nn.Parameter(torch.ones(normalized_shape) * init)
         self.beta = torch.nn.Parameter(torch.zeros(normalized_shape))
-        self.gamma = torch.nn.Parameter(torch.ones(normalized_shape))
+        gamma_init = (
+            torch.zeros(normalized_shape)
+            if zero_centered_gamma
+            else torch.ones(normalized_shape)
+        )
+        self.gamma = torch.nn.Parameter(gamma_init)
 
         setattr(self.alpha, "sequence_parallel", sequence_parallel)
         setattr(self.alpha, "apply_weight_decay", True)
@@ -164,6 +173,8 @@ class SeeDNorm(torch.nn.Module):
         beta = self.beta.float()
         alpha = self.alpha.float()
         gamma = self.gamma.float()
+        if self.zero_centered_gamma:
+            gamma = gamma + 1.0
 
         rescale = self._activation(torch.matmul(x_float, beta))
         inv_rms = torch.rsqrt(x_float.pow(2).mean(dim=-1, keepdim=True) + self.eps)

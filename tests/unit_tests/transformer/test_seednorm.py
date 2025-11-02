@@ -15,6 +15,8 @@ def _manual_seednorm(x: torch.Tensor, module: SeeDNorm, activation: str) -> torc
     beta = module.beta
     alpha = module.alpha
     gamma = module.gamma
+    if getattr(module, "zero_centered_gamma", False):
+        gamma = gamma + torch.ones_like(gamma)
     eps = module.eps
 
     rescale = act_fn(torch.matmul(x, beta))
@@ -61,3 +63,19 @@ def test_seednorm_weight_decay_flags():
     assert getattr(module.alpha, "apply_weight_decay")
     assert getattr(module.beta, "apply_weight_decay")
     assert not hasattr(module.gamma, "apply_weight_decay")
+
+def test_seednorm_supports_zero_centered_gamma():
+    torch.manual_seed(2)
+    hidden_size = 6
+    module = SeeDNorm(hidden_size=hidden_size, activation="tanh", zero_centered_gamma=True).double()
+    x = torch.randn(2, hidden_size, dtype=torch.float64, requires_grad=True)
+
+    out = module(x)
+    ref = _manual_seednorm(x, module, activation="tanh")
+
+    torch.testing.assert_close(out, ref, rtol=1e-6, atol=1e-6)
+
+    out.sum().backward()
+    assert x.grad is not None
+    assert not torch.isnan(x.grad).any()
+    assert torch.allclose(module.gamma.detach(), torch.zeros_like(module.gamma.detach()))
