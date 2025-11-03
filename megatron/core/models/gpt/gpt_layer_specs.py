@@ -229,8 +229,8 @@ def get_gpt_layer_local_spec(
         backend = KitchenSpecProvider(fallback=LocalSpecProvider())
     else:
         backend = LocalSpecProvider()
-    # Adjust for RMS norm style normalizations (RMSNorm, SeeDNorm).
-    if normalization in ("RMSNorm", "SeeDNorm"):
+    # Adjust for RMS norm.
+    if normalization == "RMSNorm":
         layer_norm = backend.layer_norm(rms_norm=True, for_qk=False)
         qk_norm = backend.layer_norm(rms_norm=True, for_qk=True)
     else:
