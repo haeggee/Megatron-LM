@@ -168,7 +168,13 @@ class TransformerConfig(ModelParallelConfig):
     the numbers inside the tuple; -1 is special value meaning "infinite window size"."""
 
     normalization: str = "LayerNorm"
-    """Which norm to use for normalization layers, valid options are `LayerNorm` and `RMSNorm`."""
+    """Which norm to use for normalization layers, valid options are `LayerNorm`, `RMSNorm`, and `SeeDNorm`."""
+
+    seednorm_init: Optional[float] = 1.0
+    """Initialization value for SeeDNorm normalization layers."""
+
+    seednorm_activation: Optional[str] = "tanh"
+    """Activation function for SeeDNorm normalization layers."""
 
     qk_layernorm: bool = False
     """Whether to apply `normalization` type of normalization to the query and key embeddings."""
