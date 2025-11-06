@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 import time
 import os
@@ -84,6 +84,13 @@ class SFTIndexedDataset(GPTDataset):
             # Use simple single-document indexing
             self.document_index = self._build_single_document_indices()
             self._using_packed_samples = False
+
+    @staticmethod
+    def _key_config_attributes() -> List[str]:
+        """
+        Extend key attributes from Megatron dataset, to include vital sft config attributes.
+        """
+        return ["random_seed", "sequence_length", "split", "split_matrix", "tokenizer", "sft_pack_samples"]
 
     def _log_packing_statistics(self, document_index, sample_index, from_cache=False):
         """
