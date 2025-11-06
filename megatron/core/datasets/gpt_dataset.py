@@ -65,10 +65,10 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
     SFT Options
     """
     sft_mask_special_tokens: bool = True # Mask EOD, BOD and assistant sequence begin tokens, NOT end of turn
-    sft_do_not_mask_image_tokens: bool = False # always keep image tokens unmasked
-    sft_debug: bool = False # debug prints
+    sft_debug: bool = False # store data samples for debugging
     sft_plw: float = 0.0 # prompt loss weight used
     sft_pack_samples: bool = False # Enable packing multiple whole documents per sequence for SFT
+    sft_equalize_sample_loss: bool = False # loss between samples will be equal
 
     def __post_init__(self) -> None:
         """Do asserts and set fields post init"""

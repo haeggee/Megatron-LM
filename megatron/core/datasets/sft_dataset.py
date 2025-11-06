@@ -3,6 +3,7 @@ from typing import Dict, Optional
 import time
 import os
 import logging
+
 import numpy as np
 import json
 from pathlib import Path
@@ -22,6 +23,7 @@ class SFTIndexedDataset(GPTDataset):
     The dataset used during SFT. Uses Low Level Indexed Dataset to load from pre-tokenized SFT data.
     Each original document/dataset-sample is loaded one by one and padded to fill the sequence length.
     """
+    APPROX_NUM_PACKED_DOCS_PER_SEQ = 1.4
 
     def __init__(
         self,
@@ -177,14 +179,13 @@ class SFTIndexedDataset(GPTDataset):
             t_beg = time.time()
 
             sequence_length = self.config.sequence_length
-            num_tokens_per_epoch = int(np.sum(self.dataset.sequence_lengths[self.indices]))
+            num_epochs = self._get_num_epochs_packed()
 
             # SFT packing: use only ONE epoch (no document replication)
             numpy_random_state = np.random.RandomState(self.config.random_seed)
 
-            # Build document index: shuffled documents for ONE epoch only
-            document_index = self.indices.copy().astype(np.int32)
-            numpy_random_state.shuffle(document_index)
+            # Copy of base document indices (num_epochs times). Shuffled within each copy.
+            document_index = _build_document_index_packed(num_epochs, self.indices.copy().astype(np.int32), numpy_random_state)
 
             # Build the sample index using whole-document packing
             assert document_index.dtype == np.int32
@@ -213,17 +214,16 @@ class SFTIndexedDataset(GPTDataset):
                 error_msg = (
                     f"ERROR: Requested {self.num_samples} training samples but only "
                     f"{num_samples_available} packed samples available from dataset. "
-                    f"This would lead to crashed training in the end." 
-                    "To mitigate this multi-epoch support would have to be supported!"
                 )
                 log_single_rank(logger, logging.ERROR, error_msg)
                 raise ValueError(error_msg)
 
-            # Build the shuffle index (random permutation for sample order during training)
+            # Build the shuffle index (sample level)
             shuffle_index = _build_shuffle_index(
                 sample_index.shape[0] - 1, sample_index.shape[0] - 1, numpy_random_state
             )
 
+            # Store to cache
             if path_to_cache:
                 os.makedirs(path_to_cache, exist_ok=True)
                 with open(path_to_description, "wt") as writer:
@@ -271,7 +271,7 @@ class SFTIndexedDataset(GPTDataset):
         # Log packing statistics
         self._log_packing_statistics(document_index, sample_index, from_cache=True)
 
-        # Validate again when loading from cache
+        # Validate enough samples are available when loading from cache
         if self.num_samples is not None and self.num_samples > num_samples_available:
             error_msg = (
                 f"ERROR: Requested {self.num_samples} training samples but only "
@@ -283,6 +283,16 @@ class SFTIndexedDataset(GPTDataset):
             raise ValueError(error_msg)
 
         return document_index, sample_index, shuffle_index
+
+    def _get_num_epochs_packed(self) -> int:
+        """
+        Calculate approximative upperbound of number of epochs based on requested samples and number of tokens per epoch.
+        Assume a constant sample packing efficiency: ex. On avg 1.5 docs per sequence.
+        """
+        n_docs = self.numel_low_level_dataset(self.dataset)
+        approx_sample_per_epoch = n_docs / self.APPROX_NUM_PACKED_DOCS_PER_SEQ
+        num_epochs = int(np.ceil(self.num_samples / approx_sample_per_epoch))
+        return num_epochs
 
     def _build_single_document_indices(self) -> np.ndarray:
         """
@@ -569,10 +579,10 @@ class SFTIndexedDataset(GPTDataset):
     def _get_ltor_masks_and_position_ids(self, data):
         """
         Build masks and position id for SFT data. Possibility to mask arbitrary (also special) token(sequences).
-            1. Can mask full user prompts including or not including the images in the user prompt
+            1. Can mask full user prompts or with prompt-loss-weight (plw)
             2. Can mask arbitrary token sequences (e.g. assistant begin, assistant end, BOS, EOS)
-        Both options can be Configured in the init.
-        Finally, creates an attention mask if configured. The attention mask will exclude padding tokens from attention.
+            3. Creates attention mask if configured. The attention mask will exclude padding tokens from attention.
+            4. Can equalize sample loss for packed and non-packed sequences
 
         For packed samples (when sft_pack_samples=True):
             - Position IDs are reset at each EOD token (document boundary)
@@ -584,9 +594,12 @@ class SFTIndexedDataset(GPTDataset):
         position_ids = torch.arange(self.config.sequence_length, dtype=torch.long)
         loss_mask = torch.ones(self.config.sequence_length, dtype=torch.float)
 
+        # only compute eod indices if necessary
+        if self._using_packed_samples or self.config.sft_equalize_sample_loss:
+            eod_indices = torch.where(data == self._eod_token_id)[0]
+
         # 0) For packed samples: reset position IDs at document boundaries (EOD tokens)
         if self._using_packed_samples:
-            eod_indices = torch.where(data == self._eod_token_id)[0]
             if len(eod_indices) > 0:
                 # Reset position IDs after each EOD token
                 for eod_idx in eod_indices:
@@ -616,27 +629,15 @@ class SFTIndexedDataset(GPTDataset):
             else:
                 raise ValueError(f"Invalid token to mask: {t}")
             loss_mask[mask] = 0.0
-            # Also mask special tokens from assistant_mask
             assistant_mask[mask] = 0.0
 
-        # 3) Unmask Image tokens if configured
-        if self.config.sft_do_not_mask_image_tokens:
-            # Use pre-computed tensors, just move to correct device/dtype
-            img_begin_tensor = self._img_begin_sequence.to(dtype=data.dtype, device=data.device)
-            img_end_tensor = self._img_end_sequence.to(dtype=data.dtype, device=data.device)
-            img_seq_mask = get_matching_mask_by_start_end(data, img_begin_tensor, img_end_tensor)
-            loss_mask[img_seq_mask] = 1.0
-
-        # 4) Create attention mask, excluding padding tokens from attention
+        # 3) Create attention mask: mask attention from/to padding tokens
         if self.config.create_attention_mask:
-            # Here me mask attention from all padding tokens to all other tokens and vice versa
             attention_mask = torch.tril(
                 torch.ones((self.config.sequence_length, self.config.sequence_length), device=data.device)
             )
-            # Mask padding tokens in attention mask:
             no_padding_mask = (data != self._pad_token_id).float() # 1=real, 0=padding
 
-            # Mask both rows (queries from padding) and columns (keys to padding)
             # Row masking: padding tokens shouldn't attend to anything
             attention_mask = attention_mask * no_padding_mask.unsqueeze(1)
             # Column masking: nothing should attend to padding tokens
@@ -644,9 +645,7 @@ class SFTIndexedDataset(GPTDataset):
 
             # For packed samples: block cross-document attention at EOD boundaries
             if self._using_packed_samples:
-                eod_indices = torch.where(data == self._eod_token_id)[0]
                 if len(eod_indices) > 0:
-                    # Block attention from tokens after EOD to tokens before and including EOD
                     for eod_idx in eod_indices:
                         if eod_idx + 1 < self.config.sequence_length:
                             # Zero out attention from all tokens after EOD to all tokens up to and including EOD
@@ -657,6 +656,33 @@ class SFTIndexedDataset(GPTDataset):
             attention_mask = attention_mask < 0.5
         else:
             attention_mask = None
+
+        # 4) Equalize sample loss
+        if self.config.sft_equalize_sample_loss:
+            if len(eod_indices) > 0:
+                # Process each sample segment (between EOD tokens)
+                start_idx = 0
+                for eod_idx in eod_indices:
+                    segment_mask = loss_mask[start_idx:eod_idx+1]
+                    segment_loss_sum = segment_mask.sum()
+
+                    # Normalize so total sample contribution = 1.0
+                    if segment_loss_sum > 0:
+                        loss_mask[start_idx:eod_idx+1] = segment_mask / segment_loss_sum
+
+                    start_idx = eod_idx + 1
+
+                # Handle the last segment (from last EOD to end of sequence, can be truncated or padding)
+                if start_idx < len(loss_mask):
+                    segment_mask = loss_mask[start_idx:]
+                    segment_loss_sum = segment_mask.sum()
+                    if segment_loss_sum > 0:
+                        loss_mask[start_idx:] = segment_mask / segment_loss_sum
+            else:
+                # No EOD tokens found - treat entire sequence as one sample
+                total_sum = loss_mask.sum()
+                if total_sum > 0:
+                    loss_mask = loss_mask / total_sum
 
         return attention_mask, loss_mask, position_ids, assistant_mask
 
@@ -737,6 +763,25 @@ def get_matching_mask_by_start_end(sequence, begin_seq: torch.Tensor, end_seq: t
                 valid = mask_positions < len(mask)
                 mask[mask_positions[valid]] = True
     return mask
+
+
+def _build_document_index_packed(num_epochs: int,
+                                 documents: np.ndarray,
+                                 numpy_random_state: np.random.RandomState
+) -> np.ndarray:
+    """
+    Build document-index with size: num_epochs * len(documents)
+    Shuffle within each epoch of documents independently.
+    """
+    document_index = np.mgrid[0:num_epochs, 0: len(documents)][1]
+    document_index[:] = documents
+    document_index = document_index.astype(np.int32)
+
+    for epoch in range(num_epochs):
+        numpy_random_state.shuffle(document_index[epoch])
+
+    document_index = document_index.reshape(-1)
+    return document_index
 
 
 class DebugDataWriter:
