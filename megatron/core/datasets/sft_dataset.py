@@ -146,6 +146,11 @@ class SFTIndexedDataset(GPTDataset):
             )
 
         if path_to_cache:
+            log_single_rank(
+                logger,
+                logging.WARNING,
+                f"path_to_cache exists! Search for indices in: {path_to_cache}",
+            )
             base = f"{self.unique_description_hash}-{type(self).__name__}-{self.index_split.name}-packed"
             get_path_to = lambda affix: os.path.join(path_to_cache, f"{base}-{affix}")
             path_to_description = get_path_to("description.txt")
@@ -173,19 +178,17 @@ class SFTIndexedDataset(GPTDataset):
             log_single_rank(
                 logger,
                 logging.INFO,
-                f"Build and save the {type(self).__name__} {self.index_split.name} packed indices",
+                f"No cached indices! Build and save the {type(self).__name__} {self.index_split.name} packed indices",
             )
 
             t_beg = time.time()
 
             sequence_length = self.config.sequence_length
             num_epochs = self._get_num_epochs_packed()
-
-            # SFT packing: use only ONE epoch (no document replication)
             numpy_random_state = np.random.RandomState(self.config.random_seed)
 
             # Copy of base document indices (num_epochs times). Shuffled within each copy.
-            document_index = _build_document_index_packed(num_epochs, self.indices.copy().astype(np.int32), numpy_random_state)
+            document_index = _build_document_index(num_epochs, self.indices.copy().astype(np.int32), numpy_random_state)
 
             # Build the sample index using whole-document packing
             assert document_index.dtype == np.int32
@@ -206,7 +209,6 @@ class SFTIndexedDataset(GPTDataset):
 
             num_samples_available = sample_index.shape[0] - 1
 
-            # Log packing statistics
             self._log_packing_statistics(document_index, sample_index, from_cache=False)
 
             # Validate: if num_samples requested exceeds what's available, abort
@@ -309,6 +311,11 @@ class SFTIndexedDataset(GPTDataset):
             )
 
         if path_to_cache:
+            log_single_rank(
+                logger,
+                logging.WARNING,
+                f"path_to_cache exists! Search for indices in: {path_to_cache}",
+            )
             base = f"{self.unique_description_hash}-{type(self).__name__}-{self.index_split.name}"
             get_path_to = lambda affix: os.path.join(path_to_cache, f"{base}-{affix}")
             path_to_description = get_path_to("description.txt")
@@ -351,11 +358,8 @@ class SFTIndexedDataset(GPTDataset):
                 docs_per_epoch = len(self.indices)
                 num_epochs = (num_samples + docs_per_epoch - 1) // docs_per_epoch
 
-            # Build document index by repeating indices for each epoch
-            document_index = np.tile(self.indices, num_epochs).astype(np.int32)
-
-            # Shuffle all documents
-            numpy_random_state.shuffle(document_index)
+            # Build document index by repeating indices for each epoch (shuffle per epoch)
+            document_index = _build_document_index(num_epochs, self.indices.copy().astype(np.int32), numpy_random_state)
 
             # Truncate to exact number of samples if specified (ex. If last epoch is partial)
             if self.num_samples is not None:
@@ -765,7 +769,7 @@ def get_matching_mask_by_start_end(sequence, begin_seq: torch.Tensor, end_seq: t
     return mask
 
 
-def _build_document_index_packed(num_epochs: int,
+def _build_document_index(num_epochs: int,
                                  documents: np.ndarray,
                                  numpy_random_state: np.random.RandomState
 ) -> np.ndarray:
