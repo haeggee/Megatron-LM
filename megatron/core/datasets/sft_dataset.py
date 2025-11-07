@@ -525,10 +525,6 @@ class SFTIndexedDataset(GPTDataset):
             labels
         )
 
-        # Mask loss for padded tokens (this also masks batch padding if idx is None)
-        loss_mask[labels == self._pad_token_id] = 0.0
-        assistant_mask[labels == self._pad_token_id] = 0.0
-
         # DEBUG: if activated, log every 100 samples
         if self.config.sft_debug and idx is not None and idx % 100 == 0:  # Log every 100 samples
             num_unmasked = loss_mask.sum().item()
@@ -668,7 +664,11 @@ class SFTIndexedDataset(GPTDataset):
         else:
             attention_mask = None
 
-        # 4) Equalize sample loss
+        # 4) Mask padding tokens (must be done BEFORE equalization to ensure correct normalization)
+        loss_mask[data == self._pad_token_id] = 0.0
+        assistant_mask[data == self._pad_token_id] = 0.0
+
+        # 5) Equalize sample loss
         if self.config.sft_equalize_sample_loss:
             if len(eod_indices) > 0:
                 # Process each sample segment (between EOD tokens)
