@@ -884,7 +884,8 @@ def train_step(forward_step_func, data_iterator,
                     # and so the denominator is 1.
                     numerator += val
                     denominator += 1
-            loss_reduced[key] = numerator / denominator
+            # Avoid division by zero (e.g., when all tokens of a type are masked)
+            loss_reduced[key] = numerator / denominator if denominator > 0 else numerator
         return loss_reduced, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
     return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
 
@@ -1844,7 +1845,8 @@ def evaluate(forward_step_func,
 
     for key in total_loss_dict:
         numerator, denominator = total_loss_dict[key]
-        total_loss_dict[key] = numerator / denominator
+        # Avoid division by zero (e.g., when all tokens of a type are masked)
+        total_loss_dict[key] = numerator / denominator if denominator > 0 else numerator
 
     timers('evaluate').stop()
     timers.log(['evaluate'])

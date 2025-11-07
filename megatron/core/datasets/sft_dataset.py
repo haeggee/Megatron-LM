@@ -228,7 +228,7 @@ class SFTIndexedDataset(GPTDataset):
                 raise ValueError(error_msg)
             else:
                 # only keep samples needed
-                sample_index = sample_index[:self.num_samples]
+                sample_index = sample_index[:self.num_samples+1]
 
             # Build the shuffle index (sample level)
             shuffle_index = _build_shuffle_index(
@@ -287,9 +287,7 @@ class SFTIndexedDataset(GPTDataset):
         if self.num_samples is not None and self.num_samples > num_samples_available:
             error_msg = (
                 f"ERROR: Requested {self.num_samples} training samples but only "
-                f"{num_samples_available} packed samples available from dataset. "
-                f"This would lead to crashed training in the end." 
-                "To mitigate this multi-epoch support would have to be supported!"
+                f"{num_samples_available} packed samples available from dataset."
             )
             log_single_rank(logger, logging.ERROR, error_msg)
             raise ValueError(error_msg)
