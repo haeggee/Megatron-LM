@@ -670,6 +670,9 @@ class SFTIndexedDataset(GPTDataset):
 
         # 5) Equalize sample loss
         if self.config.sft_equalize_sample_loss:
+            # Add small epsilon to prevent division by very small numbers
+            eps = 1e-10
+
             if len(eod_indices) > 0:
                 # Process each sample segment (between EOD tokens)
                 start_idx = 0
@@ -678,7 +681,7 @@ class SFTIndexedDataset(GPTDataset):
                     segment_loss_sum = segment_mask.sum()
 
                     # Normalize so total sample contribution = 1.0
-                    if segment_loss_sum > 0:
+                    if segment_loss_sum > eps:
                         loss_mask[start_idx:eod_idx+1] = segment_mask / segment_loss_sum
 
                     start_idx = eod_idx + 1
@@ -687,13 +690,13 @@ class SFTIndexedDataset(GPTDataset):
                 if start_idx < len(loss_mask):
                     segment_mask = loss_mask[start_idx:]
                     segment_loss_sum = segment_mask.sum()
-                    if segment_loss_sum > 0:
+                    if segment_loss_sum > eps:
                         loss_mask[start_idx:] = segment_mask / segment_loss_sum
             else:
                 # No EOD tokens found - treat entire sequence as one sample
                 total_sum = loss_mask.sum()
-                if total_sum > 0:
-                    loss_mask = loss_mask / total_sum
+                if total_sum > eps:
+                    loss_mask[:] = loss_mask / total_sum  # In-place update to ensure it's returned
 
         return attention_mask, loss_mask, position_ids, assistant_mask
 
