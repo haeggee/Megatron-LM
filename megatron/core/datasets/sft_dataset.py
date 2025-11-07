@@ -23,7 +23,7 @@ class SFTIndexedDataset(GPTDataset):
     The dataset used during SFT. Uses Low Level Indexed Dataset to load from pre-tokenized SFT data.
     Each original document/dataset-sample is loaded one by one and padded to fill the sequence length.
     """
-    APPROX_NUM_PACKED_DOCS_PER_SEQ = 1.4
+    APPROX_NUM_PACKED_DOCS_PER_SEQ = 3
 
     def __init__(
         self,
@@ -214,10 +214,10 @@ class SFTIndexedDataset(GPTDataset):
                 add_extra_token_to_sequence=self.config.add_extra_token_to_sequence,
             )
 
-            num_samples_available = sample_index.shape[0] - 1
-
+            # TODO: packing statistics might be not accurate as multi-epoch support now in place!
             self._log_packing_statistics(document_index, sample_index, from_cache=False)
 
+            num_samples_available = sample_index.shape[0] - 1
             # Validate: if num_samples requested exceeds what's available, abort
             if self.num_samples is not None and self.num_samples > num_samples_available:
                 error_msg = (
@@ -226,6 +226,9 @@ class SFTIndexedDataset(GPTDataset):
                 )
                 log_single_rank(logger, logging.ERROR, error_msg)
                 raise ValueError(error_msg)
+            else:
+                # only keep samples needed
+                sample_index = sample_index[:self.num_samples]
 
             # Build the shuffle index (sample level)
             shuffle_index = _build_shuffle_index(
@@ -295,13 +298,12 @@ class SFTIndexedDataset(GPTDataset):
 
     def _get_num_epochs_packed(self) -> int:
         """
-        Calculate approximative upperbound of number of epochs based on requested samples and number of tokens per epoch.
+        Calculate approximative upperbound of number of epochs based on requested samples and number of documents per epoch.
         Assume a constant sample packing efficiency: ex. On avg 1.5 docs per sequence.
         """
         n_docs = self.numel_low_level_dataset(self.dataset)
         approx_sample_per_epoch = n_docs / self.APPROX_NUM_PACKED_DOCS_PER_SEQ
-        num_epochs = int(np.ceil(self.num_samples / approx_sample_per_epoch))
-        return num_epochs
+        return int(np.ceil(self.num_samples / approx_sample_per_epoch))
 
     def _build_single_document_indices(self) -> np.ndarray:
         """
