@@ -1,4 +1,4 @@
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 
 import time
 import os
@@ -403,7 +403,7 @@ class SFTIndexedDataset(GPTDataset):
 
         return document_index
 
-    def _get_packed_sample(self, idx: int) -> np.ndarray:
+    def _get_packed_sample(self, idx: int) -> Tuple[np.ndarray, np.ndarray]:
         """
         Load and concatenate multiple whole documents for a packed sample.
         Similar to GPT dataset's _query_document_sample_shuffle_indices but only handles whole documents.
@@ -414,21 +414,19 @@ class SFTIndexedDataset(GPTDataset):
         Returns:
             np.ndarray: Concatenated tokens from multiple documents, padded to sequence length
         """
-        # Apply shuffle
         shuffled_idx = self.shuffle_index[idx]
 
-        # Get sample boundaries from sample_index
+        # Get sample boundaries from sample_index (first(inclusive) and last(exclusive) sample to be packed)
         doc_index_beg, _ = self.sample_index[shuffled_idx]
         doc_index_end, _ = self.sample_index[shuffled_idx + 1]
+        assert doc_index_beg < doc_index_end  # the way we create the index, the end idx doc is always excluded => for same doc begin & end idx are different
 
-        # Target length
+
         target_length = self.config.sequence_length + self.config.add_extra_token_to_sequence
 
-        # Collect document tokens
         document_tokens = []
+        doc_end_indices = [] # store positions of sample ends (use to reset pos id and attn mask)
 
-        # Iterate through documents in this sample
-        assert doc_index_beg < doc_index_end  # the way we create the index, the end idx doc is always excluded, so even for same doc begin end end idx are different
         for i in range(doc_index_beg, doc_index_end):
             # Get the actual document ID from document_index
             doc_id = self.document_index[i]
@@ -436,7 +434,7 @@ class SFTIndexedDataset(GPTDataset):
             # Load the full document (offset is always 0 for whole-document packing)
             document = self.dataset.get(doc_id)
 
-            # Check if document is too long and truncate if yes (as in single document index) TODO: add option to discard here and for single doc case?
+            # Check if document is too long and truncate if yes (as in single document index)
             if len(document) > target_length:
                 # Truncate and add EOD
                 logger.warning(
@@ -444,13 +442,16 @@ class SFTIndexedDataset(GPTDataset):
                 document = np.concatenate([document[:target_length - 1], np.array([self._eod_token_id])])
 
             document_tokens.append(document)
+            doc_end_indices.append(document.size)
 
         # Concatenate all documents
         if len(document_tokens) > 0:
             text = np.concatenate(document_tokens)
+            eos_idx = np.concatenate(doc_end_indices).cumsum() - 1
         else:
             # Edge case: empty sample (shouldn't happen)
             text = np.array([], dtype=np.int64)
+            eos_idx = np.array([], dtype=np.int64)
 
         # Pad to target length
         if len(text) < target_length:
@@ -464,7 +465,7 @@ class SFTIndexedDataset(GPTDataset):
                 f"Sample contains {len(document_tokens)} documents."
             )
 
-        return text
+        return text, eos_idx
 
     def __len__(self) -> int:
         if self._using_packed_samples:
@@ -490,12 +491,13 @@ class SFTIndexedDataset(GPTDataset):
                 [self._pad_token_id] * (self.config.sequence_length + self.config.add_extra_token_to_sequence),
                 dtype=np.int64)
         elif self._using_packed_samples:
-            # Packed mode: load and concatenate multiple whole documents
-            text = self._get_packed_sample(idx)
+            # Packed mode: load and concatenate multiple whole documents, return indices of document borders additionally
+            text, eos_idx = self._get_packed_sample(idx)
         else:
             # Single-document mode: Get document. index is already shuffled
             actual_doc_id = self.document_index[idx]
             document = self.dataset.get(actual_doc_id)
+            eos_idx = np.ndarray([document.size - 1], dtype=np.int64)
 
             # Truncate or pad to sequence_length
             target_length = self.config.sequence_length + self.config.add_extra_token_to_sequence
@@ -522,7 +524,8 @@ class SFTIndexedDataset(GPTDataset):
 
         # Generate mask and position ids. If PLW activated, loss mask will have partial weight for user input tokens
         attention_mask, loss_mask, position_ids, assistant_mask = self._get_ltor_masks_and_position_ids(
-            labels
+            labels,
+            eos_idx - 1 # -1 as eos_idx is based on tokens not labels, and we use labels as reference in mask creation
         )
 
         # DEBUG: if activated, log every 100 samples
@@ -583,33 +586,35 @@ class SFTIndexedDataset(GPTDataset):
                 "assistant_mask": assistant_mask,
             }
 
-    def _get_ltor_masks_and_position_ids(self, data):
+    def _get_ltor_masks_and_position_ids(self, data: torch.Tensor, eos_indices: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Build masks and position id for SFT data. Possibility to mask arbitrary (also special) token(sequences).
             1. Can mask full user prompts or with prompt-loss-weight (plw)
             2. Can mask arbitrary token sequences (e.g. assistant begin, assistant end, BOS, EOS)
             3. Creates attention mask if configured. The attention mask will exclude padding tokens from attention.
-            4. Can equalize sample loss for packed and non-packed sequences
+            4. Can equalize sample loss for packed and non-packed sequences (loss = 1 for each sample in seq)
 
         For packed samples (when sft_pack_samples=True):
             - Position IDs are reset at each EOD token (document boundary)
             - Attention mask blocks cross-document attention at EOD boundaries
+            - ASSUMES NO WRONG PLACED EOD (=ONLY PROPERLY BOUNDARY OF SAMPLES)
 
         Also creates an assistant_mask to identify assistant response tokens for separate loss tracking.
+
+        Args:
+            data:           labels
+            eos_indices:    indices of document boundaries (calculated based on sample loading from low level dataset as
+                            sft data can be contaminated with eod).
         """
 
         position_ids = torch.arange(self.config.sequence_length, dtype=torch.long)
         loss_mask = torch.ones(self.config.sequence_length, dtype=torch.float)
 
-        # only compute eod indices if necessary
-        if self._using_packed_samples or self.config.sft_equalize_sample_loss:
-            eod_indices = torch.where(data == self._eod_token_id)[0]
-
-        # 0) For packed samples: reset position IDs at document boundaries (EOD tokens)
+        # 0) For packed samples: reset position IDs at document boundaries
         if self._using_packed_samples:
-            if len(eod_indices) > 0:
+            if eos_indices.size > 0:
                 # Reset position IDs after each EOD token
-                for eod_idx in eod_indices:
+                for eod_idx in eos_indices:
                     if eod_idx + 1 < len(position_ids):
                         # Subtract the position value at EOD+1 from all subsequent positions
                         to_subtract = position_ids[eod_idx].clone() + 1
@@ -652,8 +657,8 @@ class SFTIndexedDataset(GPTDataset):
 
             # For packed samples: block cross-document attention at EOD boundaries
             if self._using_packed_samples:
-                if len(eod_indices) > 0:
-                    for eod_idx in eod_indices:
+                if eos_indices.size > 0:
+                    for eod_idx in eos_indices:
                         if eod_idx + 1 < self.config.sequence_length:
                             # Zero out attention from all tokens after EOD to all tokens up to and including EOD
                             attention_mask[(eod_idx + 1):, :(eod_idx + 1)] = 0.0
@@ -673,10 +678,10 @@ class SFTIndexedDataset(GPTDataset):
             # Add small epsilon to prevent division by very small numbers
             eps = 1e-10
 
-            if len(eod_indices) > 0:
+            if eos_indices.size > 0:
                 # Process each sample segment (between EOD tokens)
                 start_idx = 0
-                for eod_idx in eod_indices:
+                for eod_idx in eos_indices:
                     segment_mask = loss_mask[start_idx:eod_idx+1]
                     segment_loss_sum = segment_mask.sum()
 
