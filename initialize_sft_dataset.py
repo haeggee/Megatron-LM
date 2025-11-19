@@ -66,9 +66,16 @@ def core_gpt_dataset_config_from_args(args):
     blend_per_split: Optional[List[Optional[Tuple[List[str], Optional[List[float]]]]]]
     blend, blend_per_split = get_blend_and_blend_per_split(args)
 
+    # Double sequence length if loading loss masks from disk (dataset stores tokens + loss_mask concatenated)
+    sequence_length = args.seq_length
+    if args.sft and args.sft_load_loss_mask:
+        sequence_length = args.seq_length * 2
+        print_rank_0(f"> SFT: Loading loss masks from disk, doubling dataset sequence_length to {sequence_length} "
+                     f"(model will see {args.seq_length} tokens)")
+
     return GPTDatasetConfig(
         random_seed=args.seed,
-        sequence_length=args.seq_length,
+        sequence_length=sequence_length,
         blend=blend,
         blend_per_split=blend_per_split,
         split=args.split,
@@ -88,6 +95,8 @@ def core_gpt_dataset_config_from_args(args):
         sft_plw=args.sft_plw,
         sft_pack_samples=args.sft_pack_samples,
         sft_equalize_sample_loss=args.sft_equalize_sample_loss,
+        sft_load_loss_mask=args.sft_load_loss_mask,
+        sft_disable_assistant_mask=args.sft_disable_assistant_mask,
         skip_margin_samples=args.data_skip_margin_samples
     )
 

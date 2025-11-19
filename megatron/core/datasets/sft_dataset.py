@@ -5,8 +5,6 @@ import os
 import logging
 
 import numpy as np
-import json
-from pathlib import Path
 import torch
 import torch.nn.functional as F
 
@@ -37,9 +35,6 @@ class SFTIndexedDataset(GPTDataset):
         # Call Megatron Dataset init instead of direct parent, as we initialize index differently
         MegatronDataset.__init__(self, dataset, dataset_path, indexed_indices, num_samples, index_split, config)
 
-        if self.config.sft_debug:
-            self.debug_writer = DebugDataWriter(output_dir="/users/rkreft/debug_data")  # Initialize once, outside the loop
-
         # Set and log plw weight
         self.sft_plw_value = config.sft_plw
         log_single_rank(logger, logging.INFO, f"SFT PLW: {self.sft_plw_value}", )
@@ -48,8 +43,11 @@ class SFTIndexedDataset(GPTDataset):
         # Set pad token
         try:
             self._pad_token_id = self.tokenizer.pad
-        except Exception:
+            log_single_rank(logger, logging.INFO, f"Using tokenizer pad token ID: {self._pad_token_id}")
+        except (AttributeError, KeyError, TypeError) as e:
             self._pad_token_id = _PAD_TOKEN_ID
+            log_single_rank(logger, logging.WARNING,
+                          f"Tokenizer pad token not available ({type(e).__name__}), using default: {self._pad_token_id}")
 
         # End of Document token to add end to truncated samples TODO: currently works with HF tokenizers only
         self._eod_token_id = self.tokenizer.eod
@@ -60,8 +58,6 @@ class SFTIndexedDataset(GPTDataset):
         self._sft_user_begin_sequence = torch.tensor(self.tokenizer.sft_user_begin_sequence, dtype=torch.long)
         self._sft_turn_end_sequence = torch.tensor(self.tokenizer.sft_eot_token, dtype=torch.long)
         self._sft_assistant_begin_sequence = torch.tensor(self.tokenizer.sft_assistant_begin_sequence, dtype=torch.long)
-        self._img_begin_sequence = torch.tensor(self.tokenizer.img_begin_token, dtype=torch.long)
-        self._img_end_sequence = torch.tensor(self.tokenizer.img_end_token, dtype=torch.long)
 
         # Configure token (sequences) to remove from loss calculation
         self.tokens_to_mask = []
@@ -72,6 +68,25 @@ class SFTIndexedDataset(GPTDataset):
             self.tokens_to_mask.append(self._sft_assistant_begin_sequence)  # already a tensor
             self.tokens_to_mask.append(self._sft_user_begin_sequence)
         log_single_rank(logger, logging.WARNING, f"Masking the following tokens/token-sequences: {[t.tolist() for t in self.tokens_to_mask]}", )
+
+        # Set actual model sequence length (config.sequence_length is doubled if loading loss masks from disk)
+        if self.config.sft_load_loss_mask:
+            self.model_seq_length = self.config.sequence_length // 2
+            log_single_rank(logger, logging.INFO,
+                          f"Loading loss masks from disk: dataset seq_length={self.config.sequence_length}, "
+                          f"model seq_length={self.model_seq_length}")
+        else:
+            self.model_seq_length = self.config.sequence_length
+
+        # Initialize cache manager
+        self.cache_manager = IndexCacheManager(
+            config=self.config,
+            dataset_path_prefix=self.dataset.path_prefix,
+            unique_description=self.unique_description,
+            unique_description_hash=self.unique_description_hash,
+            dataset_class_name=type(self).__name__,
+            split_name=self.index_split.name
+        )
 
         # Build indices based on packing mode
         if self.config.sft_pack_samples:
@@ -90,7 +105,7 @@ class SFTIndexedDataset(GPTDataset):
         """
         Extend key attributes from Megatron dataset, to include vital sft config attributes.
         """
-        return ["random_seed", "sequence_length", "split", "split_matrix", "tokenizer", "sft_pack_samples"]
+        return ["random_seed", "sequence_length", "split", "split_matrix", "tokenizer", "sft_pack_samples", "sft_load_loss_mask"]
 
     def _log_packing_statistics(self, document_index, sample_index, from_cache=False):
         """
@@ -118,67 +133,36 @@ class SFTIndexedDataset(GPTDataset):
         log_single_rank(logger, logging.INFO, f"> Total tokens in samples: {total_tokens_in_samples:,}")
         log_single_rank(logger, logging.INFO, f"> Average tokens per sample: {avg_tokens_per_sample:.1f}")
         log_single_rank(logger, logging.INFO, f"> Average documents per sample: {avg_documents_per_sample:.2f}")
-        log_single_rank(logger, logging.INFO, f"> Token utilization: {100 * num_tokens_per_epoch / total_tokens_in_samples:.2f}%")
-        if from_cache:
-            log_single_rank(logger, logging.INFO, f"> ========================================================")
-        else:
-            log_single_rank(logger, logging.INFO, f"> ===================================")
+        log_single_rank(logger, logging.INFO, f"> Token utilization: {100 * num_tokens_per_epoch / total_tokens_in_samples:.2f}%\n\n")
 
     def _build_packing_document_to_sample_indices(self):
         """
-        Build indices for packed document sampling. Packs whole documents into sequences without splitting.
-        Uses only ONE epoch of documents (no replication across epochs). Training steps should match
-        the number of packed samples available.
+        Build indices for packed document sampling. Packs whole documents into sequences without splitting docs across sequences.
+        Multiple epochs and margin samples supported (Megatron requests 5% more samples than actually given as arg).
+        Approximate upperbound of number of epochs to get enough documents to create samples with.
 
         Returns a tuple of three indices:
         - document_index: Shuffled document IDs for one epoch
         - sample_index: Maps sample boundaries to (document_index position, offset) pairs
         - shuffle_index: Random permutation for shuffling sample order during training
 
-        Caches the generated indices to disk if path_to_cache is specified.
-
         Returns:
             Tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]:
-                - document_index: Shape (num_documents,) - shuffled document IDs for one epoch
+                - document_index: Shape (num_documents,) - shuffled document IDs (as many shuffled copies of orig document id's)
                 - sample_index: Shape (num_samples + 1, 2) - sample boundaries as [doc_idx_index, offset=0]
                 - shuffle_index: Shape (num_samples,) - permutation indices for shuffling
         """
         from megatron.core.datasets.gpt_dataset import _build_shuffle_index
         from megatron.core.datasets import helpers
 
-        path_to_cache = self.config.path_to_cache
-        if path_to_cache is None and not self.config.mock:
-            path_to_cache = os.path.join(
-                self.dataset.path_prefix, "cache", f"{type(self).__name__}_indices"
-            )
+        # Check cache
+        index_names = ["document_index", "sample_index", "shuffle_index"]
+        cache_hit = self.cache_manager.cache_exists(index_names)
 
-        if path_to_cache:
-            log_single_rank(
-                logger,
-                logging.WARNING,
-                f"path_to_cache exists! Search for indices in: {path_to_cache}",
-            )
-            base = f"{self.unique_description_hash}-{type(self).__name__}-{self.index_split.name}-packed"
-            get_path_to = lambda affix: os.path.join(path_to_cache, f"{base}-{affix}")
-            path_to_description = get_path_to("description.txt")
-            path_to_document_index = get_path_to("document_index.npy")
-            path_to_sample_index = get_path_to("sample_index.npy")
-            path_to_shuffle_index = get_path_to("shuffle_index.npy")
-            cache_hit = all(
-                map(
-                    os.path.isfile,
-                    [
-                        path_to_description,
-                        path_to_document_index,
-                        path_to_sample_index,
-                        path_to_shuffle_index,
-                    ],
-                )
-            )
-        else:
-            cache_hit = False
+        if self.cache_manager.get_cache_path():
+            log_single_rank(logger, logging.WARNING, f"path_to_cache exists! Search for indices in: {self.cache_manager.get_cache_path()}")
 
-        if not path_to_cache or (
+        if not self.cache_manager.get_cache_path() or (
             not cache_hit
             and (not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0)
         ):
@@ -219,15 +203,15 @@ class SFTIndexedDataset(GPTDataset):
 
             num_samples_available = sample_index.shape[0] - 1
             # Validate: if num_samples requested exceeds what's available, abort
-            if self.num_samples is not None and self.num_samples > num_samples_available:
+            if self.num_samples and self.num_samples > num_samples_available:
                 error_msg = (
                     f"ERROR: Requested {self.num_samples} training samples but only "
                     f"{num_samples_available} packed samples available from dataset. "
                 )
                 log_single_rank(logger, logging.ERROR, error_msg)
                 raise ValueError(error_msg)
-            else:
-                # only keep samples needed
+            elif self.num_samples:
+                # only keep samples needed if max num is defined
                 sample_index = sample_index[:self.num_samples+1]
 
             # Build the shuffle index (sample level)
@@ -235,20 +219,13 @@ class SFTIndexedDataset(GPTDataset):
                 sample_index.shape[0] - 1, sample_index.shape[0] - 1, numpy_random_state
             )
 
-            # Store to cache
-            if path_to_cache:
-                os.makedirs(path_to_cache, exist_ok=True)
-                with open(path_to_description, "wt") as writer:
-                    writer.write(self.unique_description)
-                np.save(path_to_document_index, document_index, allow_pickle=True)
-                np.save(path_to_sample_index, sample_index, allow_pickle=True)
-                np.save(path_to_shuffle_index, shuffle_index, allow_pickle=True)
-            else:
-                log_single_rank(
-                    logger,
-                    logging.WARNING,
-                    f"Unable to save {type(self).__name__} indexes because path_to_cache is None",
-                )
+            # Save to cache
+            self.cache_manager.save_indices({
+                "description": self.unique_description,
+                "document_index": document_index,
+                "sample_index": sample_index,
+                "shuffle_index": shuffle_index
+            })
 
             t_end = time.time()
             log_single_rank(logger, logging.DEBUG, f"\t> time elapsed: {t_end - t_beg:4f} seconds")
@@ -260,23 +237,10 @@ class SFTIndexedDataset(GPTDataset):
             logger, logging.INFO, f"Load the {type(self).__name__} {self.index_split.name} packed indices"
         )
 
-        log_single_rank(logger, logging.INFO, f"\tLoad the document index from {os.path.basename(path_to_document_index)}")
-        t_beg = time.time()
-        document_index = np.load(path_to_document_index, allow_pickle=True, mmap_mode='r')
-        t_end = time.time()
-        log_single_rank(logger, logging.DEBUG, f"\t> time elapsed: {t_end - t_beg:4f} seconds")
-
-        log_single_rank(logger, logging.INFO, f"\tLoad the sample index from {os.path.basename(path_to_sample_index)}")
-        t_beg = time.time()
-        sample_index = np.load(path_to_sample_index, allow_pickle=True, mmap_mode='r')
-        t_end = time.time()
-        log_single_rank(logger, logging.DEBUG, f"\t> time elapsed: {t_end - t_beg:4f} seconds")
-
-        log_single_rank(logger, logging.INFO, f"\tLoad the shuffle index from {os.path.basename(path_to_shuffle_index)}")
-        t_beg = time.time()
-        shuffle_index = np.load(path_to_shuffle_index, allow_pickle=True, mmap_mode='r')
-        t_end = time.time()
-        log_single_rank(logger, logging.DEBUG, f"\t> time elapsed: {t_end - t_beg:4f} seconds")
+        indices = self.cache_manager.load_indices(index_names)
+        document_index = indices["document_index"]
+        sample_index = indices["sample_index"]
+        shuffle_index = indices["shuffle_index"]
 
         num_samples_available = sample_index.shape[0] - 1
 
@@ -298,7 +262,10 @@ class SFTIndexedDataset(GPTDataset):
         """
         Calculate approximative upperbound of number of epochs based on requested samples and number of documents per epoch.
         Assume a constant sample packing efficiency: ex. On avg 1.5 docs per sequence.
+        If no number of samples given just use one set/epoch of documents.
         """
+        if not self.num_samples:
+            return 1
         n_docs = self.numel_low_level_dataset(self.dataset)
         approx_sample_per_epoch = n_docs / self.APPROX_NUM_PACKED_DOCS_PER_SEQ
         return int(np.ceil(self.num_samples / approx_sample_per_epoch))
@@ -311,36 +278,15 @@ class SFTIndexedDataset(GPTDataset):
         Returns:
             numpy.ndarray: The document index (Shape: (num_samples,))
         """
-        path_to_cache = self.config.path_to_cache
-        if path_to_cache is None and not self.config.mock:
-            path_to_cache = os.path.join(
-                self.dataset.path_prefix, "cache", f"{type(self).__name__}_indices"
-            )
+        # Check cache
+        index_names = ["document_index"]
+        cache_hit = self.cache_manager.cache_exists(index_names)
 
-        if path_to_cache:
-            log_single_rank(
-                logger,
-                logging.WARNING,
-                f"path_to_cache exists! Search for indices in: {path_to_cache}",
-            )
-            base = f"{self.unique_description_hash}-{type(self).__name__}-{self.index_split.name}"
-            get_path_to = lambda affix: os.path.join(path_to_cache, f"{base}-{affix}")
-            path_to_description = get_path_to("description.txt")
-            path_to_document_index = get_path_to("document_index.npy")
-            cache_hit = all(
-                map(
-                    os.path.isfile,
-                    [
-                        path_to_description,
-                        path_to_document_index,
-                    ],
-                )
-            )
-        else:
-            cache_hit = False
+        if self.cache_manager.get_cache_path():
+            log_single_rank(logger, logging.WARNING, f"path_to_cache exists! Search for indices in: {self.cache_manager.get_cache_path()}")
 
-        # if index files not cached, create indices and save to cache
-        if not path_to_cache or (
+        # Build indices if cache miss
+        if not self.cache_manager.get_cache_path() or (
                 not cache_hit
                 and (not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0)
         ):
@@ -357,32 +303,24 @@ class SFTIndexedDataset(GPTDataset):
             # Each document maps to exactly one sample
             if self.num_samples is None:
                 # Use all documents once
-                num_samples = len(self.indices)
+                self.num_samples = len(self.indices)
                 num_epochs = 1
             else:
                 # Calculate how many epochs needed
-                num_samples = self.num_samples
                 docs_per_epoch = len(self.indices)
-                num_epochs = (num_samples + docs_per_epoch - 1) // docs_per_epoch
+                num_epochs = (self.num_samples + docs_per_epoch - 1) // docs_per_epoch
 
             # Build document index by repeating indices for each epoch (shuffle per epoch)
             document_index = _build_document_index(num_epochs, self.indices.copy().astype(np.int32), numpy_random_state)
 
             # Truncate to exact number of samples if specified (ex. If last epoch is partial)
-            if self.num_samples is not None:
-                document_index = document_index[:self.num_samples]
+            document_index = document_index[:self.num_samples]
 
-            if path_to_cache:
-                os.makedirs(path_to_cache, exist_ok=True)
-                with open(path_to_description, "wt") as writer:
-                    writer.write(self.unique_description)
-                np.save(path_to_document_index, document_index, allow_pickle=True)
-            else:
-                log_single_rank(
-                    logger,
-                    logging.WARNING,
-                    f"Unable to save {type(self).__name__} indexes because path_to_cache is None",
-                )
+            # Save to cache
+            self.cache_manager.save_indices({
+                "description": self.unique_description,
+                "document_index": document_index
+            })
 
             t_end = time.time()
             log_single_rank(logger, logging.DEBUG, f"\t> time elapsed: {t_end - t_beg:4f} seconds")
@@ -396,14 +334,12 @@ class SFTIndexedDataset(GPTDataset):
             logger, logging.INFO, f"Load the {type(self).__name__} {self.index_split.name} indices"
         )
 
-        t_beg = time.time()
-        document_index = np.load(path_to_document_index, allow_pickle=True, mmap_mode='r')
-        t_end = time.time()
-        log_single_rank(logger, logging.DEBUG, f"\t> document index load time: {t_end - t_beg:4f} seconds")
+        indices = self.cache_manager.load_indices(index_names)
+        document_index = indices["document_index"]
 
         return document_index
 
-    def _get_packed_sample(self, idx: int) -> Tuple[np.ndarray, np.ndarray]:
+    def _get_packed_sample(self, idx: int) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
         """
         Load and concatenate multiple whole documents for a packed sample.
         Similar to GPT dataset's _query_document_sample_shuffle_indices but only handles whole documents.
@@ -412,7 +348,10 @@ class SFTIndexedDataset(GPTDataset):
             idx (int): The sample index
 
         Returns:
-            np.ndarray: Concatenated tokens from multiple documents, padded to sequence length
+            Tuple containing:
+                - np.ndarray: Concatenated tokens from multiple documents, padded to sequence length
+                - np.ndarray: End-of-sequence indices for each document
+                - Optional[np.ndarray]: Preloaded loss masks if sft_load_loss_mask is True, else None
         """
         shuffled_idx = self.shuffle_index[idx]
 
@@ -421,42 +360,64 @@ class SFTIndexedDataset(GPTDataset):
         doc_index_end, _ = self.sample_index[shuffled_idx + 1]
         assert doc_index_beg < doc_index_end  # the way we create the index, the end idx doc is always excluded => for same doc begin & end idx are different
 
-
-        target_length = self.config.sequence_length + self.config.add_extra_token_to_sequence
+        target_length = self.model_seq_length + self.config.add_extra_token_to_sequence
 
         document_tokens = []
+        document_loss_masks = [] if self.config.sft_load_loss_mask else None
         doc_end_indices = [] # store positions of sample ends (use to reset pos id and attn mask)
 
         for i in range(doc_index_beg, doc_index_end):
-            # Get the actual document ID from document_index
+            # Get the actual document ID from document_index & load whole document
             doc_id = self.document_index[i]
-
-            # Load the full document (offset is always 0 for whole-document packing)
             document = self.dataset.get(doc_id)
 
-            # Check if document is too long and truncate if yes (as in single document index)
-            if len(document) > target_length:
-                # Truncate and add EOD
-                logger.warning(
-                    f"Document {doc_id} in packed sample is too long ({len(document)} > {target_length}), truncating")
-                document = np.concatenate([document[:target_length - 1], np.array([self._eod_token_id])])
+            # If loading loss masks from disk, split the document into tokens and loss_mask
+            if self.config.sft_load_loss_mask:
+                # Dataset stores [tokens, loss_mask] concatenated
+                doc_len = len(document) // 2
+                doc_tokens = document[:doc_len]
+                doc_loss_mask = document[doc_len:]
 
-            document_tokens.append(document)
-            doc_end_indices.append(document.size)
+                # Truncate document and end with EOD if too long
+                if len(doc_tokens) > target_length:
+                    logger.warning(
+                        f"Document {doc_id} in packed sample is too long ({len(doc_tokens)} > {target_length}), truncating")
+                    doc_tokens = np.concatenate([doc_tokens[:target_length - 1], np.array([self._eod_token_id], dtype=np.int64)])
+                    doc_loss_mask = doc_loss_mask[:target_length - 1]
+                    # Append 0.0 for the EOD token in loss_mask
+                    doc_loss_mask = np.concatenate([doc_loss_mask, np.array([0.0], dtype=np.float32)])
+
+                document_tokens.append(doc_tokens)
+                document_loss_masks.append(doc_loss_mask)
+                doc_end_indices.append(doc_tokens.size)
+            else:
+                # Original behavior: no loss mask splitting
+                if len(document) > target_length:
+                    logger.warning(
+                        f"Document {doc_id} in packed sample is too long ({len(document)} > {target_length}), truncating")
+                    document = np.concatenate([document[:target_length - 1], np.array([self._eod_token_id], dtype=np.int64)])
+
+                document_tokens.append(document)
+                doc_end_indices.append(document.size)
 
         # Concatenate all documents
         if len(document_tokens) > 0:
             text = np.concatenate(document_tokens)
             eos_idx = np.concatenate(doc_end_indices).cumsum() - 1
+            if self.config.sft_load_loss_mask:
+                loss_mask_data = np.concatenate(document_loss_masks)
+            else:
+                loss_mask_data = None
         else:
-            # Edge case: empty sample (shouldn't happen)
-            text = np.array([], dtype=np.int64)
-            eos_idx = np.array([], dtype=np.int64)
+            raise RuntimeError("Encountered empty packed sample. This should not happen!")
 
         # Pad to target length
         if len(text) < target_length:
             padding_length = target_length - len(text)
             text = np.concatenate([text, np.full(padding_length, self._pad_token_id, dtype=np.int64)])
+            if self.config.sft_load_loss_mask:
+                # Pad loss_mask with 0.0 (padding tokens should have 0 loss)
+                loss_mask_data = np.concatenate([loss_mask_data, np.zeros(padding_length, dtype=np.float32)])
         elif len(text) > target_length:
             # This should never happen with correct packing - raise error
             raise RuntimeError(
@@ -465,13 +426,71 @@ class SFTIndexedDataset(GPTDataset):
                 f"Sample contains {len(document_tokens)} documents."
             )
 
-        return text, eos_idx
+        return text, eos_idx, loss_mask_data
 
     def __len__(self) -> int:
         if self._using_packed_samples:
             return self.sample_index.shape[0] - 1
         else:
             return len(self.document_index)
+
+    def _get_single_sample(self, idx: Optional[int]) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+        """
+        Retrieve a single sample as raw numpy arrays.
+
+        Args:
+            idx (Optional[int]): The sample index. If None, returns a padding sequence.
+
+        Returns:
+            Tuple containing:
+                - np.ndarray: Token sequence
+                - np.ndarray: End-of-sequence indices
+                - Optional[np.ndarray]: Preloaded loss masks if sft_load_loss_mask is True, else None
+        """
+        actual_doc_id = self.document_index[idx]
+        document = self.dataset.get(actual_doc_id)
+        preloaded_loss_mask = None
+
+        # If loading loss masks from disk, split document into tokens and loss_mask
+        if self.config.sft_load_loss_mask:
+            # Dataset stores [tokens, loss_mask] concatenated
+            doc_len = len(document) // 2
+            doc_tokens = document[:doc_len]
+            doc_loss_mask = document[doc_len:]
+            eos_idx = np.array([doc_tokens.size - 1], dtype=np.int64)
+
+            # Truncate or pad to sequence_length
+            target_length = self.model_seq_length + self.config.add_extra_token_to_sequence
+            if len(doc_tokens) >= target_length:
+                # End truncated document with end-of-document token
+                logger.warning(f"Document {actual_doc_id} is longer than model sequence length {target_length} and gets trunc")
+                trunc_doc = doc_tokens[:target_length-1]
+                text = np.concatenate([trunc_doc, np.array([self._eod_token_id], dtype=np.int64)])
+                preloaded_loss_mask = doc_loss_mask[:target_length-1]
+                # Add 0.0 for the EOD token in loss_mask
+                preloaded_loss_mask = np.concatenate([preloaded_loss_mask, np.array([0.0], dtype=np.float32)])
+            else:
+                padding_length = target_length - len(doc_tokens)
+                # Pad on right side with pad token and add 0 for respective loss mask
+                text = np.concatenate([doc_tokens, np.full(padding_length, self._pad_token_id, dtype=np.int64)])
+                preloaded_loss_mask = np.concatenate([doc_loss_mask, np.zeros(padding_length, dtype=np.float32)])
+        else:
+            # Normal mode: no loss mask splitting
+            eos_idx = np.array([document.size - 1], dtype=np.int64)
+
+            # Truncate or pad to sequence_length
+            target_length = self.model_seq_length + self.config.add_extra_token_to_sequence
+            if len(document) >= target_length:
+                # End truncated document with end-of-document token
+                logger.warning(f"Document {actual_doc_id} is longer than model sequence length {target_length} and gets trunc")
+                trunc_doc = document[:target_length-1]
+                text = np.concatenate([trunc_doc, np.array([self._eod_token_id], dtype=np.int64)])
+            else:
+                padding_length = target_length - len(document)
+                # Pad on right side with pad token
+                text = np.concatenate([document, np.full(padding_length, self._pad_token_id, dtype=np.int64)])
+
+        return text, eos_idx, preloaded_loss_mask
 
     def __getitem__(self, idx: Optional[int]) -> Dict[str, torch.Tensor]:
         """
@@ -488,28 +507,15 @@ class SFTIndexedDataset(GPTDataset):
         if idx is None:
             # Batch padding sequence
             text = np.array(
-                [self._pad_token_id] * (self.config.sequence_length + self.config.add_extra_token_to_sequence),
+                [self._pad_token_id] * (self.model_seq_length + self.config.add_extra_token_to_sequence),
                 dtype=np.int64)
+            eos_idx = np.array([], dtype=np.int64)
         elif self._using_packed_samples:
             # Packed mode: load and concatenate multiple whole documents, return indices of document borders additionally
-            text, eos_idx = self._get_packed_sample(idx)
+            text, eos_idx, preloaded_loss_mask = self._get_packed_sample(idx)
         else:
             # Single-document mode: Get document. index is already shuffled
-            actual_doc_id = self.document_index[idx]
-            document = self.dataset.get(actual_doc_id)
-            eos_idx = np.ndarray([document.size - 1], dtype=np.int64)
-
-            # Truncate or pad to sequence_length
-            target_length = self.config.sequence_length + self.config.add_extra_token_to_sequence
-            if len(document) >= target_length:
-                # End truncated document with end-of-document token
-                logger.warning(f"Document {actual_doc_id} is longer than model sequence length {target_length} and gets trunc")
-                trunc_doc = document[:target_length-1]
-                text = np.concatenate([trunc_doc, np.array([self._eod_token_id])])
-            else:
-                padding_length = target_length - len(document)
-                # Pad on right side with pad token
-                text = np.concatenate([document, np.full(padding_length, self._pad_token_id, dtype=np.int64)])
+            text, eos_idx, preloaded_loss_mask = self._get_single_sample(idx)
 
         text = torch.from_numpy(text).long()
 
@@ -525,43 +531,9 @@ class SFTIndexedDataset(GPTDataset):
         # Generate mask and position ids. If PLW activated, loss mask will have partial weight for user input tokens
         attention_mask, loss_mask, position_ids, assistant_mask = self._get_ltor_masks_and_position_ids(
             labels,
-            eos_idx - 1 # -1 as eos_idx is based on tokens not labels, and we use labels as reference in mask creation
+            eos_idx - 1, # -1 as eos_idx is based on tokens not labels, and we use labels as reference in mask creation
+            torch.from_numpy(preloaded_loss_mask).float() if preloaded_loss_mask else None
         )
-
-        # DEBUG: if activated, log every 100 samples
-        if self.config.sft_debug and idx is not None and idx % 100 == 0:  # Log every 100 samples
-            num_unmasked = loss_mask.sum().item()
-            total_tokens = loss_mask.numel()
-
-            logger.warning(f"Sample {idx} - DOC {actual_doc_id}: {num_unmasked}/{total_tokens} tokens unmasked "
-                            f"({100*num_unmasked/total_tokens:.1f}%), "
-                            f"doc_length={len(torch.from_numpy(document))}, "
-                            f"num_pad_tokens={(labels == self._pad_token_id).sum().item()}")
-            
-            # Store to files
-            self.debug_writer.append_sample(
-                idx=idx,
-                actual_doc_id=actual_doc_id,
-                tokens=tokens,
-                loss_mask=loss_mask,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                labels=labels,
-                document_length=len(torch.from_numpy(document)),
-                pad_token_id=self._pad_token_id
-            )
-            
-            # Continue with existing logging
-            user_begin_seq = torch.tensor(self._sft_user_begin_sequence, dtype=tokens.dtype, device=tokens.device)
-            logger.warning(f"Sample {idx}: Looking for user_begin pattern: {user_begin_seq.tolist()}")
-            logger.warning(f"Sample {idx}: Token sequence sample: {tokens[:100].tolist()}")
-            logger.warning(f"Sample {idx}: Loss mask sample: {loss_mask[:100].tolist()}")
-            logger.warning(f"Sample {idx}: Loss mask sample last 100: {loss_mask[-100:].tolist()}")
-            logger.warning(f"Sample {idx}: Position ids sample: {position_ids[:100].tolist()}")
-            if attention_mask is not None:
-                logger.warning(f"Sample {idx}: Attention mask sample (1=masked): {attention_mask[0,0,:100].long().tolist()}")
-        # END DEBUG
-
 
         # Map pad tokens to valid embedding indices
         tokens[tokens == self._pad_token_id] = 0
@@ -586,7 +558,7 @@ class SFTIndexedDataset(GPTDataset):
                 "assistant_mask": assistant_mask,
             }
 
-    def _get_ltor_masks_and_position_ids(self, data: torch.Tensor, eos_indices: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _get_ltor_masks_and_position_ids(self, data: torch.Tensor, eos_indices: np.ndarray, preloaded_loss_mask: Optional[torch.Tensor] = None) -> Tuple[Optional[torch.Tensor], torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
         Build masks and position id for SFT data. Possibility to mask arbitrary (also special) token(sequences).
             1. Can mask full user prompts or with prompt-loss-weight (plw)
@@ -602,13 +574,15 @@ class SFTIndexedDataset(GPTDataset):
         Also creates an assistant_mask to identify assistant response tokens for separate loss tracking.
 
         Args:
-            data:           labels
-            eos_indices:    indices of document boundaries (calculated based on sample loading from low level dataset as
-                            sft data can be contaminated with eod).
+            data:                   labels
+            eos_indices:            indices of document boundaries (calculated based on sample loading from low level dataset as
+                                    sft data can be contaminated with eod).
+            preloaded_loss_mask:    Optional pre-computed loss mask loaded from disk. If provided, user prompt masking
+                                    and special token masking are skipped for loss_mask.
         """
 
-        position_ids = torch.arange(self.config.sequence_length, dtype=torch.long)
-        loss_mask = torch.ones(self.config.sequence_length, dtype=torch.float)
+        position_ids = torch.arange(self.model_seq_length, dtype=torch.long)
+        loss_mask = preloaded_loss_mask.to(device=data.device) if preloaded_loss_mask is not None else torch.ones(self.model_seq_length, dtype=torch.float, device=data.device)
 
         # 0) For packed samples: reset position IDs at document boundaries
         if self._using_packed_samples:
@@ -620,33 +594,45 @@ class SFTIndexedDataset(GPTDataset):
                         to_subtract = position_ids[eod_idx].clone() + 1
                         position_ids[(eod_idx + 1):] -= to_subtract
 
-        # 1) Mask user sequences for loss
-        begin_seq = self._sft_user_begin_sequence.to(dtype=data.dtype, device=data.device)
-        end_seq = self._sft_turn_end_sequence.to(dtype=data.dtype, device=data.device)
+        # 1) Compute assistant_mask (unless disabled)
+        if not self.config.sft_disable_assistant_mask:
+            # Compute user sequences to derive assistant mask
+            begin_seq = self._sft_user_begin_sequence.to(dtype=data.dtype, device=data.device)
+            end_seq = self._sft_turn_end_sequence.to(dtype=data.dtype, device=data.device)
+            user_seq_mask = get_matching_mask_by_start_end(data, begin_seq, end_seq)
+            assistant_mask = (~user_seq_mask).float()
 
-        user_seq_mask = get_matching_mask_by_start_end(data, begin_seq, end_seq)
-        loss_mask[user_seq_mask] = self.sft_plw_value # value is 0 by default for full masking
+            # Only apply to loss_mask if NOT loading from disk
+            if preloaded_loss_mask is None:
+                loss_mask[user_seq_mask] = self.sft_plw_value # value is 0 by default for full masking
+        else:
+            # Disable assistant_mask tracking
+            assistant_mask = None
+            user_seq_mask = None
 
-        # 1b) Create assistant mask: everything that is not user sequences
-        assistant_mask = (~user_seq_mask).float()
+            # Still need to compute user_seq_mask for loss_mask if not loading from disk
+            if preloaded_loss_mask is None:
+                begin_seq = self._sft_user_begin_sequence.to(dtype=data.dtype, device=data.device)
+                end_seq = self._sft_turn_end_sequence.to(dtype=data.dtype, device=data.device)
+                user_seq_mask = get_matching_mask_by_start_end(data, begin_seq, end_seq)
+                loss_mask[user_seq_mask] = self.sft_plw_value
 
-        # 2) Mask other token(sequences) fully(set weight to 0) as configured in init (might contain BOS, EOS, assistant begin)
-        for t in self.tokens_to_mask:
-            # Use pre-computed tensor, just move to correct device/dtype
-            t_tensor = t.to(dtype=data.dtype, device=data.device)
-            if len(t_tensor) == 1:
-                mask = (data == t_tensor[0])
-            elif len(t_tensor) > 1:
-                mask = get_matching_mask(data, t_tensor, only_begin=False)
-            else:
-                raise ValueError(f"Invalid token to mask: {t}")
-            loss_mask[mask] = 0.0
-            assistant_mask[mask] = 0.0
+        # 2) Mask other token(sequences) - only for loss_mask if NOT loading from disk
+        if preloaded_loss_mask is None:
+            for t in self.tokens_to_mask:
+                t_tensor = t.to(dtype=data.dtype, device=data.device)
+                if len(t_tensor) == 1:
+                    mask = (data == t_tensor[0])
+                elif len(t_tensor) > 1:
+                    mask = get_matching_mask(data, t_tensor, only_begin=False)
+                else:
+                    raise ValueError(f"Invalid token to mask: {t}")
+                loss_mask[mask] = 0.0
 
         # 3) Create attention mask: mask attention from/to padding tokens
         if self.config.create_attention_mask:
             attention_mask = torch.tril(
-                torch.ones((self.config.sequence_length, self.config.sequence_length), device=data.device)
+                torch.ones((self.model_seq_length, self.model_seq_length), device=data.device)
             )
             no_padding_mask = (data != self._pad_token_id).float() # 1=real, 0=padding
 
@@ -659,7 +645,7 @@ class SFTIndexedDataset(GPTDataset):
             if self._using_packed_samples:
                 if eos_indices.size > 0:
                     for eod_idx in eos_indices:
-                        if eod_idx + 1 < self.config.sequence_length:
+                        if eod_idx + 1 < self.model_seq_length:
                             # Zero out attention from all tokens after EOD to all tokens up to and including EOD
                             attention_mask[(eod_idx + 1):, :(eod_idx + 1)] = 0.0
 
@@ -671,7 +657,8 @@ class SFTIndexedDataset(GPTDataset):
 
         # 4) Mask padding tokens (must be done BEFORE equalization to ensure correct normalization)
         loss_mask[data == self._pad_token_id] = 0.0
-        assistant_mask[data == self._pad_token_id] = 0.0
+        if assistant_mask is not None:
+            assistant_mask[data == self._pad_token_id] = 0.0
 
         # 5) Equalize sample loss
         if self.config.sft_equalize_sample_loss:
@@ -784,6 +771,105 @@ def get_matching_mask_by_start_end(sequence, begin_seq: torch.Tensor, end_seq: t
     return mask
 
 
+class IndexCacheManager:
+    """Manages cache file I/O for dataset indices."""
+
+    def __init__(
+        self,
+        config,
+        dataset_path_prefix: str,
+        unique_description: str,
+        unique_description_hash: str,
+        dataset_class_name: str,
+        split_name: str
+    ):
+        self.config = config
+        self.dataset_path_prefix = dataset_path_prefix
+        self.unique_description = unique_description
+        self.unique_description_hash = unique_description_hash
+        self.dataset_class_name = dataset_class_name
+        self.split_name = split_name
+
+        self._cache_dir = self._determine_cache_path()
+
+        if self._cache_dir:
+            base = f"{unique_description_hash}-{dataset_class_name}-{split_name}"
+            self._get_path_to = lambda affix: os.path.join(self._cache_dir, f"{base}-{affix}")
+
+    def _determine_cache_path(self) -> Optional[str]:
+        """Determine cache directory path from config."""
+        path_to_cache = self.config.path_to_cache
+        if path_to_cache is None and not self.config.mock:
+            path_to_cache = os.path.join(
+                self.dataset_path_prefix, "cache", f"{self.dataset_class_name}_indices"
+            )
+        return path_to_cache
+
+    def get_cache_path(self) -> Optional[str]:
+        """Return cache directory path."""
+        return self._cache_dir
+
+    def get_index_path(self, index_name: str) -> str:
+        """Return full path for an index file."""
+        if not self._cache_dir:
+            raise ValueError("Cache path is not configured")
+
+        if index_name == "description":
+            return self._get_path_to("description.txt")
+        else:
+            return self._get_path_to(f"{index_name}.npy")
+
+    def cache_exists(self, index_names: List[str]) -> bool:
+        """Check if all required cache files exist."""
+        if not self._cache_dir:
+            return False
+
+        files_to_check = [self.get_index_path("description")]
+        for index_name in index_names:
+            if index_name != "description":
+                files_to_check.append(self.get_index_path(index_name))
+
+        return all(os.path.isfile(f) for f in files_to_check)
+
+    def save_indices(self, indices: Dict[str, np.ndarray]) -> None:
+        """Save indices to cache files."""
+        if not self._cache_dir:
+            log_single_rank(
+                logger,
+                logging.WARNING,
+                f"Unable to save {self.dataset_class_name} indices because path_to_cache is None",
+            )
+            return
+
+        os.makedirs(self._cache_dir, exist_ok=True)
+
+        if "description" in indices:
+            with open(self.get_index_path("description"), "wt") as writer:
+                writer.write(indices["description"])
+
+        for index_name, index_data in indices.items():
+            if index_name != "description" and index_data is not None:
+                np.save(self.get_index_path(index_name), index_data, allow_pickle=True)
+
+    def load_indices(self, index_names: List[str]) -> Dict[str, np.ndarray]:
+        """Load indices from cache files."""
+        if not self._cache_dir:
+            raise ValueError("Cannot load indices: cache path is not configured")
+
+        indices = {}
+        for index_name in index_names:
+            index_path = self.get_index_path(index_name)
+            log_single_rank(logger, logging.INFO, f"\tLoad the {index_name} from {os.path.basename(index_path)}")
+
+            t_beg = time.time()
+            indices[index_name] = np.load(index_path, allow_pickle=True, mmap_mode='r')
+            t_end = time.time()
+
+            log_single_rank(logger, logging.DEBUG, f"\t> time elapsed: {t_end - t_beg:4f} seconds")
+
+        return indices
+
+
 def _build_document_index(num_epochs: int,
                                  documents: np.ndarray,
                                  numpy_random_state: np.random.RandomState
@@ -801,84 +887,3 @@ def _build_document_index(num_epochs: int,
 
     document_index = document_index.reshape(-1)
     return document_index
-
-
-class DebugDataWriter:
-    """Helper class to write debug data to files."""
-    
-    def __init__(self, output_dir="debug_data"):
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(exist_ok=True)
-        self.metadata_file = self.output_dir / "metadata.jsonl"
-        self.tokens_file = self.output_dir / "tokens.npy"
-        self.loss_mask_file = self.output_dir / "loss_mask.npy"
-        self.attention_mask_file = self.output_dir / "attention_mask.npy"
-        
-        # Initialize files if they don't exist
-        if not self.tokens_file.exists():
-            self._init_array_file(self.tokens_file)
-        if not self.loss_mask_file.exists():
-            self._init_array_file(self.loss_mask_file)
-        if not self.attention_mask_file.exists():
-            self._init_array_file(self.attention_mask_file)
-    
-    def _init_array_file(self, filepath):
-        """Initialize an empty numpy array file."""
-        np.save(filepath, np.array([]))
-    
-    def append_sample(self, idx, actual_doc_id, tokens, loss_mask, 
-                     attention_mask=None, position_ids=None, 
-                     labels=None, document_length=None, pad_token_id=None):
-        """Append a sample to the debug files."""
-        
-        # Convert tensors to numpy
-        tokens_np = tokens.cpu().numpy() if torch.is_tensor(tokens) else tokens
-        loss_mask_np = loss_mask.cpu().numpy() if torch.is_tensor(loss_mask) else loss_mask
-        
-        # Load existing data
-        tokens_data = np.load(self.tokens_file, allow_pickle=True)
-        loss_mask_data = np.load(self.loss_mask_file, allow_pickle=True)
-        
-        # Append new data
-        if tokens_data.size == 0:
-            tokens_data = np.array([tokens_np], dtype=object)
-            loss_mask_data = np.array([loss_mask_np], dtype=object)
-        else:
-            tokens_data = np.append(tokens_data, [tokens_np])
-            loss_mask_data = np.append(loss_mask_data, [loss_mask_np])
-        
-        # Save updated arrays
-        np.save(self.tokens_file, tokens_data)
-        np.save(self.loss_mask_file, loss_mask_data)
-        
-        # Handle attention mask
-        if attention_mask is not None:
-            attention_mask_np = attention_mask.cpu().numpy() if torch.is_tensor(attention_mask) else attention_mask
-            attention_mask_data = np.load(self.attention_mask_file, allow_pickle=True)
-            
-            if attention_mask_data.size == 0:
-                attention_mask_data = np.array([attention_mask_np], dtype=object)
-            else:
-                attention_mask_data = np.append(attention_mask_data, [attention_mask_np])
-            
-            np.save(self.attention_mask_file, attention_mask_data)
-        
-        # Save metadata
-        num_unmasked = loss_mask_np.sum()
-        total_tokens = loss_mask_np.size
-        
-        metadata = {
-            "sample_idx": int(idx) if idx is not None else None,
-            "doc_id": int(actual_doc_id) if actual_doc_id is not None else None,
-            "num_unmasked": int(num_unmasked),
-            "total_tokens": int(total_tokens),
-            "unmasked_percentage": float(100 * num_unmasked / total_tokens),
-            "document_length": int(document_length) if document_length is not None else None,
-            "num_pad_tokens": int((labels == pad_token_id).sum()) if labels is not None and pad_token_id is not None else None,
-            "sequence_length": int(len(tokens_np)),
-            "has_attention_mask": attention_mask is not None
-        }
-        
-        # Append metadata as JSONL
-        with open(self.metadata_file, 'a') as f:
-            f.write(json.dumps(metadata) + '\n')

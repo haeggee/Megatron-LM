@@ -1592,7 +1592,6 @@ def _add_training_args(parser):
                                                                                   " Assistant Start tokens. User tokens"
                                                                                   " are masked overall including end-of-turn"
                                                                                   " and user-start sequence in any case")
-    group.add_argument('--sft_debug', action='store_true', help='Store and print debug data and information from the SFT dataset')
     group.add_argument('--sft_plw', type=float, default=0, help="Prompt loss weight to apply to user input tokens in general. Default is 0 (no loss calculated on img tokens)")
     group.add_argument('--sft-pack-samples', action='store_true',
                        help='Enable document packing for SFT. Packs whole documents into sequences '
@@ -1600,6 +1599,15 @@ def _add_training_args(parser):
                        'and cross-document attention masking.')
     group.add_argument('--sft-equalize-sample-loss', action='store_true',
                        help='When enabled, equalizes loss across samples. In packed or non-packed setting')
+    group.add_argument('--sft-load-loss-mask', action='store_true',
+                       help='Load pre-computed loss masks from disk alongside tokens. '
+                       'When enabled, expect tokens concatenated with loss_mask (2x length), '
+                       'and user prompt masking and special token masking are skipped. '
+                       'The loaded loss_mask is used directly with only padding masking and optional equalization applied.')
+    group.add_argument('--sft-disable-assistant-mask', action='store_true',
+                       help='Disable assistant mask computation and tracking. '
+                       'When enabled, assistant_mask will be set to None.'
+                       'This disables separate tracking of assistant token loss.')
     return parser
 
 
