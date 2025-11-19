@@ -44,7 +44,7 @@ class SFTIndexedDataset(GPTDataset):
         try:
             self._pad_token_id = self.tokenizer.pad
             log_single_rank(logger, logging.INFO, f"Using tokenizer pad token ID: {self._pad_token_id}")
-        except (AttributeError, KeyError, TypeError) as e:
+        except (AttributeError, KeyError, TypeError, NotImplementedError) as e:
             self._pad_token_id = _PAD_TOKEN_ID
             log_single_rank(logger, logging.WARNING,
                           f"Tokenizer pad token not available ({type(e).__name__}), using default: {self._pad_token_id}")
@@ -61,13 +61,13 @@ class SFTIndexedDataset(GPTDataset):
 
         # Configure token (sequences) to remove from loss calculation
         self.tokens_to_mask = []
-        if self.config.sft_mask_special_tokens:
+        if self.config.sft_mask_special_tokens and not self.config.sft_load_loss_mask:
             # add tokenizer special tokens like EOS, BOS and assistant begin to be masked. Never mask End of turn.
             self.tokens_to_mask.append(torch.tensor([self._eod_token_id], dtype=torch.long))
             self.tokens_to_mask.append(torch.tensor([self._bos_token_id], dtype=torch.long))
             self.tokens_to_mask.append(self._sft_assistant_begin_sequence)  # already a tensor
             self.tokens_to_mask.append(self._sft_user_begin_sequence)
-        log_single_rank(logger, logging.WARNING, f"Masking the following tokens/token-sequences: {[t.tolist() for t in self.tokens_to_mask]}", )
+        log_single_rank(logger, logging.WARNING, f"On the fly masking the following tokens/token-sequences: {[t.tolist() for t in self.tokens_to_mask]}", )
 
         # Set actual model sequence length (config.sequence_length is doubled if loading loss masks from disk)
         if self.config.sft_load_loss_mask:
@@ -403,7 +403,7 @@ class SFTIndexedDataset(GPTDataset):
         # Concatenate all documents
         if len(document_tokens) > 0:
             text = np.concatenate(document_tokens)
-            eos_idx = np.concatenate(doc_end_indices).cumsum() - 1
+            eos_idx = np.array(doc_end_indices).cumsum() - 1
             if self.config.sft_load_loss_mask:
                 loss_mask_data = np.concatenate(document_loss_masks)
             else:
