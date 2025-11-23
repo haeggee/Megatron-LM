@@ -179,6 +179,9 @@ def get_gpt_layer_with_transformer_engine_spec(
                         k_layernorm=(
                             L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
                         ),
+                        sub_ln=(
+                            L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
+                        ),
                     ),
                 ),
                 self_attn_bda=get_bias_dropout_add,
