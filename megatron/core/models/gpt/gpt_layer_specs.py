@@ -179,7 +179,7 @@ def get_gpt_layer_with_transformer_engine_spec(
                         k_layernorm=(
                             L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
                         ),
-                        sub_ln=(
+                        subln=(
                             L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
                         ),
                     ),
