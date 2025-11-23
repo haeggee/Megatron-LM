@@ -206,7 +206,7 @@ class Attention(MegatronModule, ABC):
             set_save_original_input(self.linear_proj)
 
         if self.config.differential_attention:
-            self.alpha = torch.nn.Parameter(torch.tensor(self.config.differential_attention_alpha_init, dtype=torch.bfloat16))
+            self.alpha = torch.nn.Parameter(torch.tensor(0.3, dtype=torch.bfloat16))
         else:
             self.alpha = None
 
@@ -791,7 +791,7 @@ class Attention(MegatronModule, ABC):
         # ==================================
 
         nvtx_range_push(suffix="core_attention")
-        if self.config.use_differential_attention:
+        if self.config.differential_attention:
             # ----- differential flash path (exact) ---------------------------------
             alpha = self.alpha                                    # bf16 scalar
             q1, q2 = torch.chunk(query, 2, dim=-1)               # [s,b,np,hn//2]
