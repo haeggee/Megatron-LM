@@ -999,6 +999,8 @@ class SelfAttention(Attention):
                 self.q_layernorm.bias.data,
                 self.k_layernorm.weight.data,
                 self.k_layernorm.bias.data,
+                self.subln.weight.data,
+                self.subln.bias.data,
             ]
         )
         dp_list = [torch.empty_like(inputs) for _ in range(get_data_parallel_world_size())]
@@ -1022,6 +1024,8 @@ class SelfAttention(Attention):
                     self.q_layernorm.bias.data,
                     self.k_layernorm.weight.data,
                     self.k_layernorm.bias.data,
+                    self.subln.weight.data,
+                    self.subln.bias.data,
                 ],
                 ["q_w", "q_b", "k_w", "k_b"],
                 "DP",
@@ -1041,6 +1045,8 @@ class SelfAttention(Attention):
                     self.q_layernorm.bias.data,
                     self.k_layernorm.weight.data,
                     self.k_layernorm.bias.data,
+                    self.subln.weight.data,
+                    self.subln.bias.data,
                 ],
                 ["q_w", "q_b", "k_w", "k_b"],
                 "TP",
