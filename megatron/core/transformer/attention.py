@@ -205,6 +205,11 @@ class Attention(MegatronModule, ABC):
             # the quantized tensor.
             set_save_original_input(self.linear_proj)
 
+        if self.config.differential_attention:
+            self.alpha = torch.nn.Parameter(torch.tensor(self.config.differential_attention_alpha_init, dtype=torch.bfloat16))
+        else:
+            self.alpha = None
+
     def _checkpointed_attention_forward(
         self,
         query,
@@ -786,47 +791,63 @@ class Attention(MegatronModule, ABC):
         # ==================================
 
         nvtx_range_push(suffix="core_attention")
-        if self.checkpoint_core_attention and self.training:
-            core_attn_out = self._checkpointed_attention_forward(
-                query,
-                key,
-                value,
-                attention_mask,
-                attn_mask_type=attn_mask_type,
-                attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
-            )
+        if self.config.use_differential_attention:
+            # ----- differential flash path (exact) ---------------------------------
+            alpha = self.alpha                                    # bf16 scalar
+            q1, q2 = torch.chunk(query, 2, dim=-1)               # [s,b,np,hn//2]
+            k1, k2 = torch.chunk(key,   2, dim=-1)
+        
+            def _flash(q_, k_, v_):
+                if packed_seq_params is not None:                                   # packed / varlen
+                    cu_query_lengths, max_seqlen_q = inference_context.cu_query_lengths()
+                    cu_kv_lengths, kv_lengths, max_seqlen_k = inference_context.cu_kv_lengths()
+                    return self.flash_decode_and_prefill(
+                        q_, k_, v_, max_seqlen_q, max_seqlen_k,
+                        cu_query_lengths, cu_kv_lengths, kv_lengths, block_table)
+                if inference_context is not None and inference_context.is_decode_only():  # flash-decode
+                    inference_key_memory, inference_value_memory = inference_context.key_value_memory_dict[self.layer_number]
+                    return self.flash_decode(
+                        sequence_len_offset, q_, k_, v_,
+                        inference_key_memory, inference_value_memory,
+                        rotary_pos_cos, rotary_pos_sin,
+                        rotary_interleaved=self.config.rotary_interleaved)
+                # plain Flash-2
+                from flash_attn import flash_attn_func
+                return flash_attn_func(
+                    q_, k_, v_,
+                    causal=(attn_mask_type == AttnMaskType.causal),
+                    softmax_scale=self.core_attention.softmax_scale)
+        
+            out1 = _flash(q1, k1, value)
+            out2 = _flash(q2, k2, value)
+            core_attn_out = out1 - alpha * out2
+            core_attn_out = core_attn_out.reshape(core_attn_out.size(0),
+                                                  core_attn_out.size(1), -1)
         else:
-            if inference_context is None or inference_context.is_static_batching():
-                # Static batching attention kernel.
-                core_attn_out = self.core_attention(
-                    query,
-                    key,
-                    value,
-                    attention_mask,
+            # ----- original Megatron paths (unchanged) -----------------------------
+            if self.checkpoint_core_attention and self.training:
+                core_attn_out = self._checkpointed_attention_forward(
+                    query, key, value, attention_mask,
                     attn_mask_type=attn_mask_type,
                     attention_bias=attention_bias,
                     packed_seq_params=packed_seq_params,
                 )
-
             else:
-                # Dynamic batching attention kernel.
-                q, k, v = (query, key, value)
-                cu_query_lengths, max_seqlen_q = inference_context.cu_query_lengths()
-                cu_kv_lengths, kv_lengths, max_seqlen_k = inference_context.cu_kv_lengths()
-
-                core_attn_out = self.flash_decode_and_prefill(
-                    q,
-                    k,
-                    v,
-                    max_seqlen_q,
-                    max_seqlen_k,
-                    cu_query_lengths,
-                    cu_kv_lengths,
-                    kv_lengths,
-                    block_table,
-                )
-                core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
+                if inference_context is None or inference_context.is_static_batching():
+                    core_attn_out = self.core_attention(
+                        query, key, value, attention_mask,
+                        attn_mask_type=attn_mask_type,
+                        attention_bias=attention_bias,
+                        packed_seq_params=packed_seq_params,
+                    )
+                else:
+                    q, k, v = (query, key, value)
+                    cu_query_lengths, max_seqlen_q = inference_context.cu_query_lengths()
+                    cu_kv_lengths, kv_lengths, max_seqlen_k = inference_context.cu_kv_lengths()
+                    core_attn_out = self.flash_decode_and_prefill(
+                        q, k, v, max_seqlen_q, max_seqlen_k,
+                        cu_query_lengths, cu_kv_lengths, kv_lengths, block_table)
+                    core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
 
         if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
             # reshape to same output shape as unpacked case
