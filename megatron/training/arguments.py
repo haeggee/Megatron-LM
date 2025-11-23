@@ -1590,7 +1590,7 @@ def _add_network_size_args(parser):
                        help='An extension of squared relu to handle negative values')
     group.add_argument('--xssslur2', action='store_true',
                        help='A more efficient xIELU')
-    group.add_argument('--differential-attention', action='store_true',
+    group.add_argument('--differential-attention', action='store_true', default=False,
                        help='Applies differential attention')
     group.add_argument('--swiglu', action='store_true',
                        help='Use gated linear units and SiLU activation instead of default gelu')
