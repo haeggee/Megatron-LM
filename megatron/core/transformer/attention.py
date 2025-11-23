@@ -207,9 +207,20 @@ class Attention(MegatronModule, ABC):
             set_save_original_input(self.linear_proj)
 
         if self.config.differential_attention:
-            self.alpha = torch.nn.Parameter(torch.tensor(0.3, dtype=torch.bfloat16))
-        else:
-            self.alpha = None
+            lambda_init = 0.8 
+            self.lambda_q1 = nn.Parameter(
+                torch.zeros(self.head_dim, dtype=torch.float32).normal_(0, 0.1)
+            )
+            self.lambda_k1 = nn.Parameter(
+                torch.zeros(self.head_dim, dtype=torch.float32).normal_(0, 0.1)
+            )
+            self.lambda_q2 = nn.Parameter(
+                torch.zeros(self.head_dim, dtype=torch.float32).normal_(0, 0.1)
+            )
+            self.lambda_k2 = nn.Parameter(
+                torch.zeros(self.head_dim, dtype=torch.float32).normal_(0, 0.1)
+            )
+            self.lambda_init = lambda_init
 
     def _checkpointed_attention_forward(
         self,
@@ -791,49 +802,61 @@ class Attention(MegatronModule, ABC):
         # core attention computation
         # ==================================
 
-        nvtx_range_push(suffix="core_attention")
+        nvtx_range_push("core_attention")
         if self.config.differential_attention:
-            # ----- differential flash path (exact) ---------------------------------
-            alpha = self.alpha                                    # bf16 scalar
-            q1, q2 = torch.chunk(query, 2, dim=-1)               # [s,b,np,hn//2]
+            # split heads and channels
+            q1, q2 = torch.chunk(query, 2, dim=-1)  # [s,b,np,hn//2]
             k1, k2 = torch.chunk(key,   2, dim=-1)
             v1, v2 = torch.chunk(value, 2, dim=-1)
 
             softmax_scale = 1.0 / math.sqrt(k1.size(-1))
-        
+
             def _flash(q_, k_, v_):
-                if packed_seq_params is not None:                                   # packed / varlen
+                if packed_seq_params is not None:
                     cu_query_lengths, max_seqlen_q = inference_context.cu_query_lengths()
                     cu_kv_lengths, kv_lengths, max_seqlen_k = inference_context.cu_kv_lengths()
                     return self.flash_decode_and_prefill(
                         q_, k_, v_, max_seqlen_q, max_seqlen_k,
-                        cu_query_lengths, cu_kv_lengths, kv_lengths, block_table)
-                if inference_context is not None and inference_context.is_decode_only():  # flash-decode
-                    inference_key_memory, inference_value_memory = inference_context.key_value_memory_dict[self.layer_number]
+                        cu_query_lengths, cu_kv_lengths, kv_lengths, block_table
+                    )
+                if inference_context is not None and inference_context.is_decode_only():
+                    inference_key_memory, inference_value_memory = \
+                        inference_context.key_value_memory_dict[self.layer_number]
                     return self.flash_decode(
                         sequence_len_offset, q_, k_, v_,
                         inference_key_memory, inference_value_memory,
                         rotary_pos_cos, rotary_pos_sin,
-                        rotary_interleaved=self.config.rotary_interleaved)
-                # plain Flash-2
+                        rotary_interleaved=self.config.rotary_interleaved
+                    )
                 from flash_attn import flash_attn_func
                 return flash_attn_func(
                     q_, k_, v_,
                     causal=(attn_mask_type == AttnMaskType.causal),
-                    softmax_scale=softmax_scale)
-        
+                    softmax_scale=softmax_scale
+                )
+
             # four attention tiles
             out11 = _flash(q1, k1, v1)
             out12 = _flash(q1, k1, v2)
-            out1  = torch.cat([out11, out12], dim=-1)            # [s,b,np,hn]
-        
+            out1  = torch.cat([out11, out12], dim=-1)  # [s,b,np,hn]
+
             out21 = _flash(q2, k2, v1)
             out22 = _flash(q2, k2, v2)
-            out2  = torch.cat([out21, out22], dim=-1)            # [s,b,np,hn]
-        
-            core_attn_out = out1 - alpha * out2
+            out2  = torch.cat([out21, out22], dim=-1)  # [s,b,np,hn]
+
+            # λ-math identical to reference
+            lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float()).type_as(out1)
+            lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float()).type_as(out1)
+            lambda_full = lambda_1 - lambda_2 + self.lambda_init
+
+            core_attn_out = out1 - lambda_full * out2
+            core_attn_out = self.subln(core_attn_out)
+            core_attn_out = core_attn_out * (1. - self.lambda_init)
+
+            # final reshape + proj
             core_attn_out = core_attn_out.reshape(core_attn_out.size(0),
                                                   core_attn_out.size(1), -1)
+            core_attn_out = self.out_proj(core_attn_out)
         else:
             # ----- original Megatron paths (unchanged) -----------------------------
             if self.checkpoint_core_attention and self.training:
