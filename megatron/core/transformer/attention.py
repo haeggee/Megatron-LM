@@ -6,6 +6,7 @@ from typing import NoReturn, Optional, Tuple, Union
 
 import math
 import torch
+import torch.nn as nn
 from torch import Tensor
 
 from megatron.core import tensor_parallel
