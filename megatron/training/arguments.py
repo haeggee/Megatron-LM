@@ -1240,6 +1240,8 @@ def core_transformer_config_from_args(args, config_class=None):
     elif args.xssslur2:
         kw_args['activation_func'] = XSSSLUR2
 
+    kw_args['differential_attention'] = args.differential_attention
+
     if args.init_method_xavier_uniform:
         kw_args['init_method'] = torch.nn.init.xavier_uniform_
         kw_args['scaled_init_method'] = torch.nn.init.xavier_uniform_
@@ -1588,6 +1590,8 @@ def _add_network_size_args(parser):
                        help='An extension of squared relu to handle negative values')
     group.add_argument('--xssslur2', action='store_true',
                        help='A more efficient xIELU')
+    group.add_argument('--differential-attention', action='store_true',
+                       help='Applies differential attention')
     group.add_argument('--swiglu', action='store_true',
                        help='Use gated linear units and SiLU activation instead of default gelu')
     group.add_argument('--onnx-safe', type=bool, required=False,
