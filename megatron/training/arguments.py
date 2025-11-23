@@ -1240,8 +1240,6 @@ def core_transformer_config_from_args(args, config_class=None):
     elif args.xssslur2:
         kw_args['activation_func'] = XSSSLUR2
 
-    kw_args['differential_attention'] = args.differential_attention
-
     if args.init_method_xavier_uniform:
         kw_args['init_method'] = torch.nn.init.xavier_uniform_
         kw_args['scaled_init_method'] = torch.nn.init.xavier_uniform_
