@@ -226,7 +226,7 @@ class Attention(MegatronModule, ABC):
             self.lambda_init = lambda_init
             self.subln = build_module(
                 submodules.subln,                 # or any key you prefer
-                hidden_size=2 * self.hidden_size_per_attention_head,
+                hidden_size=2 * self.head_dim,
                 config=self.config,
                 eps=self.config.layernorm_epsilon,
             )
