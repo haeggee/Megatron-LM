@@ -797,6 +797,7 @@ class Attention(MegatronModule, ABC):
             alpha = self.alpha                                    # bf16 scalar
             q1, q2 = torch.chunk(query, 2, dim=-1)               # [s,b,np,hn//2]
             k1, k2 = torch.chunk(key,   2, dim=-1)
+            v1, v2 = torch.chunk(value, 2, dim=-1)
 
             softmax_scale = 1.0 / math.sqrt(k1.size(-1))
         
