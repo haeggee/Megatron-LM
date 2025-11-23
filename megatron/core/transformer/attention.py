@@ -96,6 +96,7 @@ class SelfAttentionSubmodules:
     linear_proj: Union[ModuleSpec, type] = None
     q_layernorm: Union[ModuleSpec, type] = None
     k_layernorm: Union[ModuleSpec, type] = None
+    subln: Union[ModuleSpec, type] = None
 
 
 @dataclass
@@ -221,6 +222,12 @@ class Attention(MegatronModule, ABC):
                 torch.zeros(self.head_dim, dtype=torch.float32).normal_(0, 0.1)
             )
             self.lambda_init = lambda_init
+            self.subln = build_module(
+                submodules.q_layernorm,                 # or any key you prefer
+                hidden_size=2 * self.hidden_size_per_attention_head,
+                config=self.config,
+                eps=self.config.layernorm_epsilon,
+            )
 
     def _checkpointed_attention_forward(
         self,
