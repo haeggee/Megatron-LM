@@ -821,8 +821,15 @@ class Attention(MegatronModule, ABC):
                     causal=(attn_mask_type == AttnMaskType.causal),
                     softmax_scale=softmax_scale)
         
-            out1 = _flash(q1, k1, value)
-            out2 = _flash(q2, k2, value)
+            # four attention tiles
+            out11 = _flash(q1, k1, v1)
+            out12 = _flash(q1, k1, v2)
+            out1  = torch.cat([out11, out12], dim=-1)            # [s,b,np,hn]
+        
+            out21 = _flash(q2, k2, v1)
+            out22 = _flash(q2, k2, v2)
+            out2  = torch.cat([out21, out22], dim=-1)            # [s,b,np,hn]
+        
             core_attn_out = out1 - alpha * out2
             core_attn_out = core_attn_out.reshape(core_attn_out.size(0),
                                                   core_attn_out.size(1), -1)
