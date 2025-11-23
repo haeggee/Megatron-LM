@@ -844,28 +844,23 @@ class Attention(MegatronModule, ABC):
                     softmax_scale=softmax_scale
                 )
 
-            # four attention tiles
             out11 = _flash(q1, k1, v1)
             out12 = _flash(q1, k1, v2)
-            out1  = torch.cat([out11, out12], dim=-1)  # [s,b,np,hn]
-
             out21 = _flash(q2, k2, v1)
             out22 = _flash(q2, k2, v2)
-            out2  = torch.cat([out21, out22], dim=-1)  # [s,b,np,hn]
-
-            # λ-math identical to reference
-            lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float()).type_as(out1)
-            lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float()).type_as(out1)
+            
+            out1 = torch.cat([out11, out12], dim=-1)
+            out2 = torch.cat([out21, out22], dim=-1)
+            
+            lambda_1 = torch.exp((self.lambda_q1 * self.lambda_k1).sum(-1).float()).type_as(out1)
+            lambda_2 = torch.exp((self.lambda_q2 * self.lambda_k2).sum(-1).float()).type_as(out1)
             lambda_full = lambda_1 - lambda_2 + self.lambda_init
-
+            
             core_attn_out = out1 - lambda_full * out2
             core_attn_out = self.subln(core_attn_out)
             core_attn_out = core_attn_out * (1. - self.lambda_init)
-
-            # final reshape + proj
             core_attn_out = core_attn_out.reshape(core_attn_out.size(0),
                                                   core_attn_out.size(1), -1)
-            core_attn_out = self.out_proj(core_attn_out)
         else:
             # ----- original Megatron paths (unchanged) -----------------------------
             if self.checkpoint_core_attention and self.training:
