@@ -796,6 +796,8 @@ class Attention(MegatronModule, ABC):
             alpha = self.alpha                                    # bf16 scalar
             q1, q2 = torch.chunk(query, 2, dim=-1)               # [s,b,np,hn//2]
             k1, k2 = torch.chunk(key,   2, dim=-1)
+
+            softmax_scale = 1.0 / math.sqrt(k1.size(-1))
         
             def _flash(q_, k_, v_):
                 if packed_seq_params is not None:                                   # packed / varlen
@@ -816,7 +818,7 @@ class Attention(MegatronModule, ABC):
                 return flash_attn_func(
                     q_, k_, v_,
                     causal=(attn_mask_type == AttnMaskType.causal),
-                    softmax_scale=self.core_attention.softmax_scale)
+                    softmax_scale=softmax_scale)
         
             out1 = _flash(q1, k1, value)
             out2 = _flash(q2, k2, value)
