@@ -208,7 +208,7 @@ class Attention(MegatronModule, ABC):
             # the quantized tensor.
             set_save_original_input(self.linear_proj)
 
-        self.head_dim = self.hidden_size_per_attention_head # // 2
+        self.head_dim = self.hidden_size_per_attention_head // 2
         if self.config.differential_attention:
             lambda_init = 0.8 
             self.lambda_q1 = nn.Parameter(
