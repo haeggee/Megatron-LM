@@ -152,6 +152,12 @@ class Attention(MegatronModule, ABC):
             ), "Attention pg_collection must have cp process group"
         self.pg_collection = pg_collection
 
+        self.config.num_attention_heads = (
+            self.config.num_attention_heads // 2
+            if self.config.differential_attention
+            else self.config.num_attention_heads
+        )
+
         # Per attention head and per partition values
         world_size = get_pg_size(self.pg_collection.tp)
         self.hidden_size_per_attention_head = divide(
