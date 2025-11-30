@@ -210,7 +210,7 @@ class Attention(MegatronModule, ABC):
 
         self.head_dim = self.hidden_size_per_attention_head // 2
         if self.config.differential_attention:
-            lambda_init = 0.8 
+            lambda_init = 0.8 - 0.6 * math.exp(-0.3 * self.layer_number)
             self.lambda_q1 = nn.Parameter(
                 torch.zeros(self.head_dim, dtype=torch.float32).normal_(0, 0.1)
             )
@@ -831,18 +831,22 @@ class Attention(MegatronModule, ABC):
                 if inference_context is not None and inference_context.is_decode_only():
                     inference_key_memory, inference_value_memory = \
                         inference_context.key_value_memory_dict[self.layer_number]
-                    return self.flash_decode(
+                    output = self.flash_decode(
                         sequence_len_offset, q_, k_, v_,
                         inference_key_memory, inference_value_memory,
                         rotary_pos_cos, rotary_pos_sin,
                         rotary_interleaved=self.config.rotary_interleaved
                     )
+                    return output.transpose(0, 1).contiguous()
                 from flash_attn import flash_attn_func
-                return flash_attn_func(
-                    q_, k_, v_,
+                out = flash_attn_func(
+                    q_.permute(1, 0, 2, 3),
+                    k_.permute(1, 0, 2, 3),
+                    v_.permute(1, 0, 2, 3),
                     causal=(attn_mask_type == AttnMaskType.causal),
                     softmax_scale=softmax_scale
                 )
+                return out.permute(1, 0, 2, 3)
 
             out11 = _flash(q1, k1, v1)
             out12 = _flash(q1, k1, v2)
