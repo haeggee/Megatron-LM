@@ -6,19 +6,30 @@
 # ⚠️ WARNING ⚠️
 
 NUMBER_OF_DATATROVE_TASKS=20
-TOKENIZER=meta-llama/Llama-3.1-70B
-TOKENIZER_NAME=Llama-3.1-70B
-DATASET_NAME=fineweb-2
+TOKENIZER=swiss-ai/Apertus-70B-2509
+TOKENIZER_NAME=Apertus-70B-2509
+# DATASET_NAME=fineweb2-hq/fra_latn
+DATASET_NAME=fineweb2-hq-baseline_fra/fra_retention_01
 COLUMN_KEY=text
 
+REHYDRATE=True  # Set to True or False
+if [ "$REHYDRATE" = "True" ]; then
+  REHYDRATE_FLAG="--rehydrate"
+else
+  REHYDRATE_FLAG=""
+fi
+
 MEGATRON_LM_DIR=/iopsstor/scratch/cscs/$USER/Megatron-LM
-PATH_TO_PREPROCESSING_METADATA=$MEGATRON_LM_DIR/datasets/$DATASET_NAME
-PATH_TO_DATATROVE_LOGGING_DIR=$MEGATRON_LM_DIR/logs/datatrove
+# PATH_TO_PREPROCESSING_METADATA=$MEGATRON_LM_DIR/datasets/$DATASET_NAME # Where dumps are stored
+PATH_TO_PREPROCESSING_METADATA=$SCRATCH/datasets_Megatron/$DATASET_NAME
+PATH_TO_DATATROVE_LOGGING_DIR=$MEGATRON_LM_DIR/logs/datatrove # Where datatrove logs are stored
 PATH_TO_SLURM_LOGGING_DIR=$MEGATRON_LM_DIR/logs/slurm/tokenization-$TOKENIZER_NAME-$DATASET_NAME
-PATH_TO_OUTPUT_FOLDER=/iopsstor/scratch/cscs/$USER/datasets
+PATH_TO_OUTPUT_FOLDER=/iopsstor/scratch/cscs/$USER/datasets_Megatron_tokenized # Where tokenized datasets are stored
 
 DATASET_OUTPUT_FOLDER_NAME=$PATH_TO_OUTPUT_FOLDER/$TOKENIZER_NAME/$DATASET_NAME
-CSV_RESULTS_FILE=$PATH_TO_PREPROCESSING_METADATA/tokenize-$TOKENIZER_NAME-$DATASET_NAME.csv
+# CSV_RESULTS_FILE=$PATH_TO_PREPROCESSING_METADATA/tokenize-$TOKENIZER_NAME-$DATASET_NAME.csv
+SANITIZED_DATASET_NAME=$(echo "$DATASET_NAME" | tr '/' '_')
+CSV_RESULTS_FILE=$PATH_TO_PREPROCESSING_METADATA/tokenize-$TOKENIZER_NAME-$SANITIZED_DATASET_NAME.csv
 
 mkdir -p $DATASET_OUTPUT_FOLDER_NAME
 mkdir -p $PATH_TO_SLURM_LOGGING_DIR
@@ -31,5 +42,5 @@ for paths_file in "$PATH_TO_PREPROCESSING_METADATA/dumps"/*; do
   dump=$(grep -oP '(?<=paths_file_)\d+(?=\.txt)' <<< $paths_file)
   output_folder=$DATASET_OUTPUT_FOLDER_NAME/dump-$dump
   logging_dir=$PATH_TO_DATATROVE_LOGGING_DIR/$TOKENIZER_NAME/$DATASET_NAME/dump-$dump
-  sbatch --job-name=tokenize-$DATASET_NAME-dump-$dump --output=$PATH_TO_SLURM_LOGGING_DIR/R-%x-%j.out --error=$PATH_TO_SLURM_LOGGING_DIR/R-%x-%j.err $MEGATRON_LM_DIR/scripts/tokenization/tokenize.sh $PATH_TO_PREPROCESSING_METADATA/raw-dataset-link $output_folder $TOKENIZER $logging_dir $CSV_RESULTS_FILE $paths_file $NUMBER_OF_DATATROVE_TASKS $MEGATRON_LM_DIR $COLUMN_KEY
-done
+  sbatch --job-name=tokenize-$DATASET_NAME-dump-$dump --output=$PATH_TO_SLURM_LOGGING_DIR/R-%x-%j.out --error=$PATH_TO_SLURM_LOGGING_DIR/R-%x-%j.err $MEGATRON_LM_DIR/scripts/tokenization/tokenize.sh $PATH_TO_PREPROCESSING_METADATA/raw-dataset-link $output_folder $TOKENIZER $logging_dir $CSV_RESULTS_FILE $paths_file $NUMBER_OF_DATATROVE_TASKS $MEGATRON_LM_DIR $COLUMN_KEY $REHYDRATE_FLAG
+done  
