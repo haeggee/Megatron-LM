@@ -7,6 +7,7 @@ import argparse
 from data_pipeline_pretrain.pipeline.tokens import MegatronDocumentTokenizer
 from datatrove.executor.local import LocalPipelineExecutor
 from datatrove.pipeline.readers import ParquetReader
+from data_pipeline_pretrain.pipeline.tokens.rehydrater import Rehydrater
 
 
 def get_args():
@@ -71,6 +72,11 @@ def get_args():
         default="text",
         help="Column to preprocess from the Dataset. Default: text",
     )
+    group.add_argument(
+        "--rehydrate",
+        action="store_true",
+        help="Whether to rehydrate the dataset. Default: False",
+    )
 
     args = parser.parse_args()
 
@@ -92,6 +98,7 @@ def main(args):
                 paths_file=args.paths_file,
                 text_key=args.column,
             ),
+            *([Rehydrater()] if args.rehydrate else []),
             MegatronDocumentTokenizer(
                 output_folder=args.output_folder,
                 tokenizer_name_or_path=args.tokenizer_name_or_path,

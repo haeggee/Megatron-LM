@@ -1,11 +1,12 @@
-TOKENIZER_NAME=Llama-3.1-70B
-DATASET_NAME=fineweb-2
+TOKENIZER_NAME=Apertus-70B-2509
+# DATASET_NAME=fineweb2-hq/fra_latn
+DATASET_NAME=fineweb2-hq-baseline_fra/fra_retention_01
 
 MEGATRON_LM_DIR=/iopsstor/scratch/cscs/$USER/Megatron-LM
 PATH_TO_SLURM_LOGGING_DIR=$MEGATRON_LM_DIR/logs/slurm/merge-$TOKENIZER_NAME-$DATASET_NAME
 
-PATH_TO_INPUT_FOLDER=/iopsstor/scratch/cscs/asolergi/Megatron-LM/datasets/$DATASET_NAME/tokenized-dir-link
-PATH_TO_OUTPUT_FOLDER=/capstor/store/cscs/swissai/a06/datasets_tokenized/nemo # /iopsstor/scratch/cscs/$USER/datasets
+PATH_TO_INPUT_FOLDER=/iopsstor/scratch/cscs/$USER/datasets_Megatron_tokenized/$TOKENIZER_NAME/$DATASET_NAME
+PATH_TO_OUTPUT_FOLDER=/iopsstor/scratch/cscs/$USER/datasets_Megatron_merged # /iopsstor/scratch/cscs/$USER/datasets
 DATASET_OUTPUT_FOLDER_NAME=$PATH_TO_OUTPUT_FOLDER/$TOKENIZER_NAME/$DATASET_NAME-merge
 
 mkdir -p $PATH_TO_SLURM_LOGGING_DIR

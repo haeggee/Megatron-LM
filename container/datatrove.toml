@@ -1,6 +1,6 @@
-image = "/capstor/store/cscs/swissai/a06/containers/data-pipeline-pretrain/data-pipeline-pretrain.sqsh"
+image = "/capstor/store/cscs/swissai/infra01/containers/data-pipeline-pretrain/data-pipeline-pretrain-0.2.0.sqsh"
 
-mounts = ["/capstor", "/iopsstor", "/users", "/users/asolergi/data-pipeline-pretrain:/data-pipeline-pretrain"]
+mounts = ["/capstor", "/iopsstor", "/users", "/users/$USER/data-pipeline-pretrain:/data-pipeline-pretrain"]
 
 writable = true
 
