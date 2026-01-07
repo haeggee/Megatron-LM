@@ -55,18 +55,22 @@ class SFTIndexedDataset(GPTDataset):
 
         # Load pre-computed sequences from tokenizer config and convert to tensors
         # These are pre-tokenized in the tokenizer_config.json by add_emu3_tokens_llama3_vision_instruct.py
+        # some models have separate assistant/user end sequences, some a common eot token.
+        # user/assistant end default to same eot if there is a common eot token
         self._sft_user_begin_sequence = torch.tensor(self.tokenizer.sft_user_begin_sequence, dtype=torch.long)
-        self._sft_turn_end_sequence = torch.tensor(self.tokenizer.sft_eot_token, dtype=torch.long)
+        self._sft_user_end_sequence = torch.tensor(self.tokenizer.sft_user_end_sequence, dtype=torch.long)
+        self._sft_assistant_end_sequence = torch.tensor(self.tokenizer.sft_assistant_end_sequence, dtype=torch.long)
         self._sft_assistant_begin_sequence = torch.tensor(self.tokenizer.sft_assistant_begin_sequence, dtype=torch.long)
 
         # Configure token (sequences) to remove from loss calculation
         self.tokens_to_mask = []
         if self.config.sft_mask_special_tokens and not self.config.sft_load_loss_mask:
             # add tokenizer special tokens like EOS, BOS and assistant begin to be masked. Never mask End of turn.
+            # TODO: in current apertus tokenizer eod is eot by default!!
             self.tokens_to_mask.append(torch.tensor([self._eod_token_id], dtype=torch.long))
             self.tokens_to_mask.append(torch.tensor([self._bos_token_id], dtype=torch.long))
             self.tokens_to_mask.append(self._sft_assistant_begin_sequence)  # already a tensor
-            self.tokens_to_mask.append(self._sft_user_begin_sequence)
+            # user begin and end are masked by default as only assistant unmasked
         log_single_rank(logger, logging.WARNING, f"On the fly masking the following tokens/token-sequences: {[t.tolist() for t in self.tokens_to_mask]}", )
 
         # Set actual model sequence length (config.sequence_length is doubled if loading loss masks from disk)
@@ -350,7 +354,7 @@ class SFTIndexedDataset(GPTDataset):
         Returns:
             Tuple containing:
                 - np.ndarray: Concatenated tokens from multiple documents, padded to sequence length
-                - np.ndarray: End-of-sequence indices for each document
+                - np.ndarray: End-of-sequence indices for each document (list of size n for n docs in sequence, so min size = 1)
                 - Optional[np.ndarray]: Preloaded loss masks if sft_load_loss_mask is True, else None
         """
         shuffled_idx = self.shuffle_index[idx]
@@ -444,7 +448,7 @@ class SFTIndexedDataset(GPTDataset):
         Returns:
             Tuple containing:
                 - np.ndarray: Token sequence
-                - np.ndarray: End-of-sequence indices
+                - np.ndarray: End-of-sequence indices (single number for case of single sample)
                 - Optional[np.ndarray]: Preloaded loss masks if sft_load_loss_mask is True, else None
         """
         actual_doc_id = self.document_index[idx]
@@ -576,13 +580,13 @@ class SFTIndexedDataset(GPTDataset):
         Args:
             data:                   labels
             eos_indices:            indices of document boundaries (calculated based on sample loading from low level dataset as
-                                    sft data can be contaminated with eod).
+                                    sft data can be contaminated with eod or eod missing).
             preloaded_loss_mask:    Optional pre-computed loss mask loaded from disk. If provided, user prompt masking
                                     and special token masking are skipped for loss_mask.
         """
 
         position_ids = torch.arange(self.model_seq_length, dtype=torch.long)
-        loss_mask = preloaded_loss_mask.to(device=data.device) if preloaded_loss_mask is not None else torch.ones(self.model_seq_length, dtype=torch.float, device=data.device)
+        loss_mask = preloaded_loss_mask.to(device=data.device) if preloaded_loss_mask is not None else torch.zeros(self.model_seq_length, dtype=torch.float, device=data.device)
 
         # 0) For packed samples: reset position IDs at document boundaries
         if self._using_packed_samples:
@@ -594,30 +598,21 @@ class SFTIndexedDataset(GPTDataset):
                         to_subtract = position_ids[eod_idx].clone() + 1
                         position_ids[(eod_idx + 1):] -= to_subtract
 
-        # 1) Compute assistant_mask (unless disabled)
-        if not self.config.sft_disable_assistant_mask:
-            # Compute user sequences to derive assistant mask
-            begin_seq = self._sft_user_begin_sequence.to(dtype=data.dtype, device=data.device)
-            end_seq = self._sft_turn_end_sequence.to(dtype=data.dtype, device=data.device)
-            user_seq_mask = get_matching_mask_by_start_end(data, begin_seq, end_seq)
-            assistant_mask = (~user_seq_mask).float()
+        # 1) unmask assistant parts and set rest to plw value (if not loaded from disk) otherwise assistant loss needed
+        #    to keep track of assistant loss
+        begin_seq = self._sft_assistant_begin_sequence.to(dtype=data.dtype, device=data.device)
+        end_seq = self._sft_assistant_end_sequence.to(dtype=data.dtype, device=data.device)
+        assistant_mask = get_matching_mask_by_start_end(data, begin_seq, end_seq)
+        prompt_mask = (~assistant_mask).float()
 
-            # Only apply to loss_mask if NOT loading from disk
-            if preloaded_loss_mask is None:
-                loss_mask[user_seq_mask] = self.sft_plw_value # value is 0 by default for full masking
-        else:
-            # Disable assistant_mask tracking
-            assistant_mask = None
-            user_seq_mask = None
+        # Only apply to loss_mask if NOT loading from disk
+        if preloaded_loss_mask is None:
+            loss_mask[assistant_mask] = 1
+            if self.sft_plw_value > 0:
+                loss_mask[prompt_mask] = self.sft_plw_value # value is 0 by default for full masking
 
-            # Still need to compute user_seq_mask for loss_mask if not loading from disk
-            if preloaded_loss_mask is None:
-                begin_seq = self._sft_user_begin_sequence.to(dtype=data.dtype, device=data.device)
-                end_seq = self._sft_turn_end_sequence.to(dtype=data.dtype, device=data.device)
-                user_seq_mask = get_matching_mask_by_start_end(data, begin_seq, end_seq)
-                loss_mask[user_seq_mask] = self.sft_plw_value
 
-        # 2) Mask other token(sequences) - only for loss_mask if NOT loading from disk
+        # 2) Mask loss for special tokens (if activated) - only if not load loss from disk
         if preloaded_loss_mask is None:
             for t in self.tokens_to_mask:
                 t_tensor = t.to(dtype=data.dtype, device=data.device)
@@ -655,7 +650,7 @@ class SFTIndexedDataset(GPTDataset):
         else:
             attention_mask = None
 
-        # 4) Mask padding tokens (must be done BEFORE equalization to ensure correct normalization)
+        # 4) Make sure padding tokens are masked even if they are part of an assistant answer somehow TODO: check!
         loss_mask[data == self._pad_token_id] = 0.0
         if assistant_mask is not None:
             assistant_mask[data == self._pad_token_id] = 0.0
@@ -665,7 +660,7 @@ class SFTIndexedDataset(GPTDataset):
             # Add small epsilon to prevent division by very small numbers
             eps = 1e-10
 
-            if eos_indices.size > 0:
+            if eos_indices.size > 0: # in sane data this should always be the case as every sample packed or not has >=1 doc
                 # Process each sample segment (between EOD tokens)
                 start_idx = 0
                 for eod_idx in eos_indices:
@@ -682,13 +677,9 @@ class SFTIndexedDataset(GPTDataset):
                 if start_idx < len(loss_mask):
                     segment_mask = loss_mask[start_idx:]
                     segment_loss_sum = segment_mask.sum()
+                    # only do if not just padding (sum = 0)
                     if segment_loss_sum > eps:
                         loss_mask[start_idx:] = segment_mask / segment_loss_sum
-            else:
-                # No EOD tokens found - treat entire sequence as one sample
-                total_sum = loss_mask.sum()
-                if total_sum > eps:
-                    loss_mask[:] = loss_mask / total_sum  # In-place update to ensure it's returned
 
         return attention_mask, loss_mask, position_ids, assistant_mask
 

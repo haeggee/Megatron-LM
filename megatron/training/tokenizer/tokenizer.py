@@ -201,6 +201,18 @@ class _HuggingFaceTokenizer(MegatronTokenizer):
         return self._tokenizer.init_kwargs.get('sft_eot_token', None)
 
     @property
+    def sft_assistant_end_sequence(self):
+        """If tokenizer defines separate assistant-end sequence return it, otherwise return eot token"""
+        separate_token = self._tokenizer.init_kwargs.get('sft_assistant_end_sequence', None)
+        return separate_token if separate_token is not None else self.sft_eot_token
+
+    @property
+    def sft_user_end_sequence(self):
+        """If tokenizer defines separate user-end sequence return it, otherwise return eot token"""
+        separate_token = self._tokenizer.init_kwargs.get('sft_user_end_sequence', None)
+        return separate_token if separate_token is not None else self.sft_eot_token
+
+    @property
     def img_begin_token(self):
         """Get pre-tokenized image begin token from tokenizer config."""
         return self._tokenizer.init_kwargs.get('img_begin_token', None)

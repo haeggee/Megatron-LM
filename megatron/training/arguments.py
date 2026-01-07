@@ -1604,10 +1604,6 @@ def _add_training_args(parser):
                        'When enabled, expect tokens concatenated with loss_mask (2x length), '
                        'and user prompt masking and special token masking are skipped. '
                        'The loaded loss_mask is used directly with only padding masking and optional equalization applied.')
-    group.add_argument('--sft-disable-assistant-mask', action='store_true',
-                       help='Disable assistant mask computation and tracking. '
-                       'When enabled, assistant_mask will be set to None.'
-                       'This disables separate tracking of assistant token loss.')
     return parser
 
 

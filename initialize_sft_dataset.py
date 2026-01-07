@@ -96,7 +96,6 @@ def core_gpt_dataset_config_from_args(args):
         sft_pack_samples=args.sft_pack_samples,
         sft_equalize_sample_loss=args.sft_equalize_sample_loss,
         sft_load_loss_mask=args.sft_load_loss_mask,
-        sft_disable_assistant_mask=args.sft_disable_assistant_mask,
         skip_margin_samples=args.data_skip_margin_samples
     )
 
