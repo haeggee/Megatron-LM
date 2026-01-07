@@ -19,7 +19,9 @@ logger = logging.getLogger(__name__)
 class SFTIndexedDataset(GPTDataset):
     """
     The dataset used during SFT. Uses Low Level Indexed Dataset to load from pre-tokenized SFT data.
-    Each original document/dataset-sample is loaded one by one and padded to fill the sequence length.
+    Supports loading tokens + mask from disk and loading only tokens = loss mask creation on the fly.
+    If not loading from disk: assumes tokenizer also defines user/assistant begin/end sequences.
+    See megatron/training/tokenizer/tokenizer.py (HuggingFaceTokenizer) how they are loaded.
     """
     APPROX_NUM_PACKED_DOCS_PER_SEQ = 3
 
@@ -532,10 +534,10 @@ class SFTIndexedDataset(GPTDataset):
             labels = torch.roll(text, shifts=-1, dims=0)
             labels[-1] = self._pad_token_id
 
-        # Generate mask and position ids. If PLW activated, loss mask will have partial weight for user input tokens
+        # Generate loss-mask, position-ids, assistant mask and optionally attention mask. If PLW activated, loss mask will have partial weight for user input tokens
         attention_mask, loss_mask, position_ids, assistant_mask = self._get_ltor_masks_and_position_ids(
-            labels,
-            eos_idx - 1, # -1 as eos_idx is based on tokens not labels, and we use labels as reference in mask creation
+            labels, # labels are used to create the loss and assistant mask
+            eos_idx, # eos_idx is based on tokens(NOT labels) and controls position-ids and attn mask reset
             torch.from_numpy(preloaded_loss_mask).float() if preloaded_loss_mask else None
         )
 
