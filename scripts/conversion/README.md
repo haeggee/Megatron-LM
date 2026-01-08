@@ -1,6 +1,38 @@
 # Conversion scripts
 
-This readme explains how to perform megatron to huggingface conversions.
+This readme explains how to perform checkpoint conversions between Megatron and HuggingFace formats.
+
+## Converting HuggingFace → Megatron
+
+To convert a HuggingFace checkpoint back to Megatron format, use the `convert_hf_to_megatron.sh` script:
+
+1. **Edit the configuration** at the top of `scripts/conversion/convert_hf_to_megatron.sh`:
+   ```bash
+   HF_CHECKPOINT_PATH="/path/to/hf/checkpoint"
+   TORCH_OUTPUT_PATH="/path/to/megatron/torch"
+   MODEL_SIZE="llama3"  # Options: llama2-7B, llama2-13B, llama2-70B, llama3, mistral, yi-34B, qwen2.5
+   TARGET_TENSOR_PARALLEL_SIZE=1
+   TARGET_PIPELINE_PARALLEL_SIZE=1
+   PRECISION="bf16"
+   ```
+
+2. **Run the conversion**:
+   ```bash
+   bash scripts/conversion/convert_hf_to_megatron.sh
+   ```
+
+The script supports a two-stage pipeline:
+- **Stage 1 (always):** HF → Megatron (torch format) - **CPU only**, no GPUs required
+- **Stage 2 (optional):** torch → torch_dist format (set `CONVERT_TO_TORCH_DIST=true` and specify `TORCH_DIST_OUTPUT_PATH`)
+  - If `TP=1, PP=1`: CPU only, no GPUs required
+  - If `TP>1 or PP>1`: Requires `TP × PP` GPUs
+
+See the script's configuration section for all available options.
+
+---
+
+## Converting Megatron → HuggingFace
+
 To do this conversion, the first thing to ask is if you have been saving megatron checkpoints using `torch_dist` format.
 This is specified by the `--ckpt-format=torch_dist`, and is the default value.
 If you have been using the swiss-ai templates, you most likely are.
