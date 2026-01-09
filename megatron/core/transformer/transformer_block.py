@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -18,8 +18,8 @@ from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.pipeline_parallel.utils import is_vp_first_stage, is_vp_last_stage
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.transformer.enums import LayerType
-from megatron.core.transformer.module import MegatronModule
+from megatron.core.transformer.enums import CudaGraphScope, LayerType
+from megatron.core.transformer.module import GraphableMegatronModule, MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import (
@@ -218,7 +218,7 @@ class TransformerBlockSubmodules:
             or instance of the layer normalization to be applied.
     """
 
-    layer_specs: List[ModuleSpec] = None
+    layer_specs: Optional[List[ModuleSpec]] = None
     layer_norm: Optional[Union[ModuleSpec, torch.nn.Module]] = None
 
 
@@ -263,7 +263,7 @@ def _get_block_submodules(
         raise Exception(f"specialize for {type(spec).__name__}.")
 
 
-class TransformerBlock(MegatronModule):
+class TransformerBlock(GraphableMegatronModule, MegatronModule):
     """Transformer class."""
 
     def __init__(
@@ -273,7 +273,7 @@ class TransformerBlock(MegatronModule):
         post_layer_norm: bool = True,
         pre_process: bool = True,
         post_process: bool = True,
-        pg_collection: ProcessGroupCollection = None,
+        pg_collection: Optional[ProcessGroupCollection] = None,
         vp_stage: Optional[int] = None,
     ):
         super().__init__(config=config)
@@ -281,6 +281,7 @@ class TransformerBlock(MegatronModule):
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
+        self.tp_group = pg_collection.tp
 
         pp_group = self.pg_collection.pp if hasattr(self.pg_collection, 'pp') else None
         pp_rank = get_pg_rank(pp_group)
@@ -382,6 +383,33 @@ class TransformerBlock(MegatronModule):
             )
         else:
             self.final_layernorm = None  # Either this or nn.Identity
+
+        if self.config.inference_fuse_tp_communication:
+            self._setup_fused_tp_communication()
+
+    def _setup_fused_tp_communication(self):
+        """Setup fused TP communication for all layers.
+        We have a fused reduce-scatter + add + layer-norm + all-gather operation.
+        We call this kernel from within row parallel linear layers.
+        But layer-norm needs the layer norm weights from the
+        successive column parallel linear layer.
+        This function is used to pass those weights to the respective layers.
+        """
+
+        for i in range(len(self.layers)):
+            current_layer = self.layers[i]
+
+            # Get next layer's QKV norm weights (None for last layer)
+            if i < len(self.layers) - 1:
+                next_qkv_norm_weights = self.layers[i + 1].get_qkv_layer_norm_weights()
+            else:
+                next_qkv_norm_weights = None
+
+            # Configure all fused TP communication settings in one call
+            current_layer.configure_fused_tp_inference(
+                skip_qkv_norm_and_all_gather=(i > 0),
+                fc2_next_layer_norm_weights=next_qkv_norm_weights,
+            )
 
     def _get_layer(self, layer_number: int):
         return self.layers[layer_number]
@@ -511,6 +539,47 @@ class TransformerBlock(MegatronModule):
         forward_step_func"""
         self.input_tensor = input_tensor
 
+    def _should_call_local_cudagraph(self, *args, **kwargs):
+        """
+        Check if we should call the local cudagraph path.
+        """
+        if not self.training and (
+            hasattr(self, 'cudagraph_manager')
+            and kwargs['attention_mask'] is None
+            and (
+                kwargs.get('inference_context') is not None
+                or kwargs.get('inference_params') is not None
+            )
+            and CudaGraphScope.full_iteration in self.config.cuda_graph_scope
+        ):
+            if kwargs['inference_context'].is_static_batching():
+                using_cuda_graph = kwargs['inference_context'].is_decode_only()
+            else:
+                using_cuda_graph = kwargs['inference_context'].using_cuda_graph_this_step()
+
+            if using_cuda_graph:
+                return True
+        return False
+
+    def __call__(self, *args, **kwargs):
+        if self._should_call_local_cudagraph(*args, **kwargs):
+            kwargs['hidden_states'] = (
+                kwargs['hidden_states'].unwrap()
+                if isinstance(kwargs['hidden_states'], WrappedTensor)
+                else kwargs['hidden_states']
+            )
+            # dynamic_inference_decode_only is not a real argument to forward, it is only used
+            # to differentiate the cuda graph used for decode from the one used for non-decode
+            # inference.
+            dynamic_inference_decode_only = kwargs['inference_context'].is_decode_only()
+            # cudagraphmanager returns a singleton tuple, whereas the
+            # normal forward returns a tensor, therefore we need
+            # to extract the tensor from the tuple
+            return super().__call__(
+                *args, dynamic_inference_decode_only=dynamic_inference_decode_only, **kwargs
+            )[0]
+        return super().__call__(*args, **kwargs)
+
     def forward(
         self,
         hidden_states: Union[Tensor, WrappedTensor],
@@ -520,12 +589,14 @@ class TransformerBlock(MegatronModule):
         rotary_pos_emb: Optional[Tensor] = None,
         rotary_pos_cos: Optional[Tensor] = None,
         rotary_pos_sin: Optional[Tensor] = None,
+        rotary_pos_cos_sin: Optional[Tensor] = None,
         attention_bias: Optional[Tensor] = None,
         inference_context: Optional[BaseInferenceContext] = None,
         packed_seq_params: Optional[PackedSeqParams] = None,
         sequence_len_offset: Optional[Tensor] = None,
         *,
         inference_params: Optional[BaseInferenceContext] = None,
+        dynamic_inference_decode_only: Optional[bool] = None,
     ):
         """
         Perform the forward pass through the transformer block.
@@ -543,6 +614,10 @@ class TransformerBlock(MegatronModule):
             context (Tensor, optional): Context tensor for cross-attention.
             context_mask (Tensor, optional): Mask for cross-attention context
             rotary_pos_emb (Tensor, optional): Rotary positional embeddings.
+            rotary_pos_cos (Optional[Tensor]): Rotary embedding cosine.
+            rotary_pos_sin (Optional[Tensor]): Rotary embedding sine.
+            rotary_pos_cos_sin (Optional[Tensor]): Combined rotary embedding cosine and sine.
+            Currently used exclusively for inference with dynamic batching and flashinfer RoPE.
             attention_bias (Tensor): Bias tensor for Q * K.T of shape in shape broadcastable
                 to [b, num_head, sq, skv], e.g. [1, 1, sq, skv].
                 Used as an alternative to apply attention mask for TE cuDNN attention.
@@ -550,6 +625,9 @@ class TransformerBlock(MegatronModule):
                 optimizations.
             packed_seq_params (PackedSeqParams, optional): Parameters for packed sequence
                 processing.
+            dynamic_inference_decode_only: Optional[bool]: If true, indicates that the current
+                inference context is for decode-only. This args is only used to uniquely
+                identify decode and non-decode cuda graph runners in the cuda graph manager.
 
         Returns:
             Union[Tensor, Tuple[Tensor, Tensor]]: The output hidden states tensor of shape
@@ -557,6 +635,9 @@ class TransformerBlock(MegatronModule):
         """
 
         inference_context = deprecate_inference_params(inference_context, inference_params)
+        # Remove 'dynamic_inference_decode_only' from kwargs if present
+        # this is only used to uniquely identify decode and non-decode cuda graph
+        # runners in the cuda graph manager
 
         # Delete the obsolete reference to the initial input tensor if necessary
         if isinstance(hidden_states, WrappedTensor):
@@ -649,6 +730,7 @@ class TransformerBlock(MegatronModule):
                             rotary_pos_emb=rotary_pos_emb,
                             rotary_pos_cos=rotary_pos_cos,
                             rotary_pos_sin=rotary_pos_sin,
+                            rotary_pos_cos_sin=rotary_pos_cos_sin,
                             attention_bias=attention_bias,
                             inference_context=inference_context,
                             packed_seq_params=packed_seq_params,
@@ -715,7 +797,8 @@ class TransformerBlock(MegatronModule):
 
         singleton_local_shards = (metadata or {}).get('singleton_local_shards', False)
         if singleton_local_shards:
-            if not non_homogeneous_layers:
+            if metadata is not None and metadata.get('non_homogeneous_layers') is False:
+                # non_homogeneous_layers=False was set explicitly - emit an override warning
                 logger.warning(
                     'non_homogeneous_layers=False is deprecated.'
                     ' Setting non_homogeneous_layers=True.'
@@ -753,7 +836,11 @@ class TransformerBlock(MegatronModule):
             if not module is self.layers:
                 sharded_state_dict.update(
                     sharded_state_dict_default(
-                        module, f'{prefix}{name}.', sharded_offsets, metadata
+                        module,
+                        f'{prefix}{name}.',
+                        sharded_offsets,
+                        metadata,
+                        tp_group=self.tp_group,
                     )
                 )
 

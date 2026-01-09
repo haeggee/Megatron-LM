@@ -1,4 +1,4 @@
-# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import contextlib
 from functools import partial
@@ -17,6 +17,8 @@ from megatron.core.pipeline_parallel.utils import (
     is_vp_last_stage,
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.transformer.cuda_graphs import create_cudagraphs
+from megatron.core.transformer.enums import CudaGraphScope
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.utils import (
     drain_embedding_wgrad_compute,
@@ -230,12 +232,16 @@ def forward_step_calc_loss(
 
     num_tokens = torch.tensor(0, dtype=torch.int)
     if is_last_stage:
-        if not collect_non_loss_data:
+        if loss_func is None:
+            forward_data_store.append(output_tensor)
+        elif not collect_non_loss_data:
             outputs = loss_func(output_tensor)
             if len(outputs) == 3:
                 output_tensor, num_tokens, loss_reduced = outputs
                 if not config.calculate_per_token_loss:
-                    output_tensor /= num_tokens
+                    # Protect against division by zero when all tokens are masked
+                    #   in a microbatch.
+                    output_tensor /= torch.clamp(num_tokens, min=1)
                     output_tensor /= num_microbatches
             else:
                 # preserve legacy loss averaging behavior (ie, over the number of microbatches)
@@ -265,7 +271,7 @@ def forward_step_calc_loss(
         if config.calculate_per_token_loss:
             MoEAuxLossAutoScaler.set_loss_scale(loss_scale)
         else:
-            MoEAuxLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
+            MoEAuxLossAutoScaler.set_loss_scale(loss_scale * cp_group_size / num_microbatches)
 
     # Set the loss scale for Multi-Token Prediction (MTP) loss.
     if hasattr(config, 'mtp_num_layers') and config.mtp_num_layers is not None:
@@ -641,6 +647,13 @@ def forward_backward_no_pipelining(
 
     if config.timers is not None:
         config.timers('forward-backward').stop()
+
+    if (
+        hasattr(config, 'cuda_graph_impl')
+        and config.cuda_graph_impl == "local"
+        and CudaGraphScope.full_iteration not in config.cuda_graph_scope
+    ):
+        create_cudagraphs()
 
     return forward_data_store
 
@@ -1899,6 +1912,12 @@ def forward_backward_pipelining_with_interleaving(
     if config.timers is not None:
         config.timers('forward-backward').stop()
 
+    if (
+        hasattr(config, 'cuda_graph_impl')
+        and config.cuda_graph_impl == "local"
+        and CudaGraphScope.full_iteration not in config.cuda_graph_scope
+    ):
+        create_cudagraphs()
     nvtx_range_pop(suffix="misc")
 
     return forward_data_store
@@ -2276,5 +2295,12 @@ def forward_backward_pipelining_without_interleaving(
 
     if config.timers is not None:
         config.timers('forward-backward').stop()
+
+    if (
+        hasattr(config, 'cuda_graph_impl')
+        and config.cuda_graph_impl == "local"
+        and CudaGraphScope.full_iteration not in config.cuda_graph_scope
+    ):
+        create_cudagraphs()
 
     return forward_data_store
