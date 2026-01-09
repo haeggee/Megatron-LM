@@ -20,7 +20,6 @@ import torch.distributed
 
 from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
 from .log_handler import CustomHandler
-from ..core.optimizer.optimizer_config import
 
 # Make default logging level INFO, but filter out all log messages not from MCore.
 logging.basicConfig(handlers=[CustomHandler()], level=logging.INFO)
