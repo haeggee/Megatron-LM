@@ -391,6 +391,16 @@ def save_checkpoint(queue, args):
                 else:
                     mlp_l0_bias = chunk_bias(msg.pop("mlp l0 bias"), 'column', args.target_tensor_parallel_size, args.target_expert_parallel_size)
 
+            # QK normalization weights (Apertus-specific)
+            if getattr(md, 'qk_layernorm', False):
+                q_layernorm_weight = msg.pop("q norm weight")
+                k_layernorm_weight = msg.pop("k norm weight")
+
+            # XIELU activation parameters (Apertus-specific)
+            if getattr(md, 'xielu', False):
+                xielu_alpha_p = msg.pop("mlp alpha_p")
+                xielu_alpha_n = msg.pop("mlp alpha_n")
+
             # Save them to the model
             for ep_rank in range(args.target_expert_parallel_size):
                 for tp_rank in range(args.target_tensor_parallel_size):
@@ -435,6 +445,18 @@ def save_checkpoint(queue, args):
                     if margs.num_experts:
                         params_dict.update({
                             "router_weight":  router
+                        })
+                    # QK normalization weights (Apertus-specific)
+                    if getattr(md, 'qk_layernorm', False):
+                        params_dict.update({
+                            "self_attn_q_layernorm_weight": q_layernorm_weight,
+                            "self_attn_k_layernorm_weight": k_layernorm_weight,
+                        })
+                    # XIELU activation parameters (Apertus-specific)
+                    if getattr(md, 'xielu', False):
+                        params_dict.update({
+                            "mlp_xielu_alpha_p": xielu_alpha_p,
+                            "mlp_xielu_alpha_n": xielu_alpha_n,
                         })
                     model = get_local_model(pp_rank, ep_rank, tp_rank)
                     schema.set_layer(model, layer_id, params_dict)
