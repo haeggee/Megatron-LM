@@ -16,9 +16,9 @@
 # ============================================================================
 
 # Input/Output Paths
-HF_CHECKPOINT_PATH=""           # REQUIRED: Path to HuggingFace checkpoint directory
-TORCH_OUTPUT_PATH=""             # REQUIRED: Path to save Megatron torch checkpoint
-TORCH_DIST_OUTPUT_PATH=""        # Optional: Path to save Megatron torch_dist checkpoint
+HF_CHECKPOINT_PATH="/users/rkreft/scratch/apertus8b/hf_apertus_base"           # REQUIRED: Path to HuggingFace checkpoint directory
+TORCH_OUTPUT_PATH="/capstor/store/cscs/swissai/infra01/MLLM/apertus-8b/base_models/Apertus8B-tokens15T-it2627139_tp2/torch"             # REQUIRED: Path to save Megatron torch checkpoint
+TORCH_DIST_OUTPUT_PATH="/capstor/store/cscs/swissai/infra01/MLLM/apertus-8b/base_models/Apertus8B-tokens15T-it2627139_tp2/torch_dist"        # Optional: Path to save Megatron torch_dist checkpoint
 
 # Model Configuration
 MODEL_SIZE="llama3"              # Options: llama2-7B, llama2-13B, llama2-70B, llama3, mistral, yi-34B, qwen2.5
@@ -35,7 +35,7 @@ PRECISION="bf16"
 TOKENIZER_PATH=""
 
 # Optional Features
-CONVERT_TO_TORCH_DIST=false      # Set to true to enable Stage 2: torch → torch_dist
+CONVERT_TO_TORCH_DIST=true      # Set to true to enable Stage 2: torch → torch_dist
 TEST_LOGITS=false                # Validate conversion (only works with TP=1, PP=1)
 MAKE_VOCAB_SIZE_DIVISIBLE_BY=128 # Correct value for llama and Apertus models
 TRANSFORMER_IMPL="transformer_engine"  # Options: transformer_engine, local
@@ -117,40 +117,6 @@ validate_prerequisites() {
     export PYTHONPATH=${MEGATRON_LM_DIR}:${PYTHONPATH:-}
     print_success "PYTHONPATH includes ${MEGATRON_LM_DIR}"
 
-    # Check if Python is available
-    if ! command -v python &> /dev/null; then
-        print_error "Python not found in PATH"
-        has_error=1
-    else
-        print_success "Python found: $(python --version)"
-    fi
-
-    # Check if torchrun is available
-    if ! command -v torchrun &> /dev/null; then
-        print_error "torchrun not found in PATH"
-        has_error=1
-    else
-        print_success "torchrun found"
-    fi
-
-    # Check if convert.py exists
-    if [ ! -f "${MEGATRON_LM_DIR}/tools/checkpoint/convert.py" ]; then
-        print_error "convert.py not found at ${MEGATRON_LM_DIR}/tools/checkpoint/convert.py"
-        has_error=1
-    else
-        print_success "convert.py found"
-    fi
-
-    # Check if torch_2_torchdist.py exists (if needed)
-    if [ "$CONVERT_TO_TORCH_DIST" = true ]; then
-        if [ ! -f "${MEGATRON_LM_DIR}/scripts/conversion/torch_2_torchdist.py" ]; then
-            print_error "torch_2_torchdist.py not found at ${MEGATRON_LM_DIR}/scripts/conversion/torch_2_torchdist.py"
-            has_error=1
-        else
-            print_success "torch_2_torchdist.py found"
-        fi
-    fi
-
     if [ $has_error -eq 1 ]; then
         print_error "Prerequisite validation failed"
         exit 2
@@ -199,49 +165,6 @@ validate_configuration() {
         else
             print_success "TORCH_DIST_OUTPUT_PATH set: ${TORCH_DIST_OUTPUT_PATH}"
         fi
-    fi
-
-    # Validate MODEL_SIZE
-    local valid_sizes=("llama2-7B" "llama2-13B" "llama2-70B" "llama2-7Bf" "llama2-13Bf" "llama2-70Bf" "llama3" "mistral" "yi-34B" "qwen2.5")
-    if [[ ! " ${valid_sizes[@]} " =~ " ${MODEL_SIZE} " ]]; then
-        print_error "Invalid MODEL_SIZE: ${MODEL_SIZE}. Must be one of: ${valid_sizes[*]}"
-        has_error=1
-    else
-        print_success "MODEL_SIZE valid: ${MODEL_SIZE}"
-    fi
-
-    # Validate MODEL_TYPE
-    if [ "${MODEL_TYPE}" != "GPT" ] && [ "${MODEL_TYPE}" != "BERT" ]; then
-        print_error "Invalid MODEL_TYPE: ${MODEL_TYPE}. Must be GPT or BERT"
-        has_error=1
-    else
-        print_success "MODEL_TYPE valid: ${MODEL_TYPE}"
-    fi
-
-    # Validate PRECISION
-    if [ "${PRECISION}" != "bf16" ] && [ "${PRECISION}" != "fp16" ] && [ "${PRECISION}" != "fp32" ]; then
-        print_error "Invalid PRECISION: ${PRECISION}. Must be bf16, fp16, or fp32"
-        has_error=1
-    else
-        print_success "PRECISION valid: ${PRECISION}"
-    fi
-
-    # Validate parallelism settings
-    if [ ${TARGET_TENSOR_PARALLEL_SIZE} -lt 1 ]; then
-        print_error "TARGET_TENSOR_PARALLEL_SIZE must be >= 1"
-        has_error=1
-    fi
-    if [ ${TARGET_PIPELINE_PARALLEL_SIZE} -lt 1 ]; then
-        print_error "TARGET_PIPELINE_PARALLEL_SIZE must be >= 1"
-        has_error=1
-    fi
-    if [ ${TARGET_EXPERT_PARALLEL_SIZE} -lt 1 ]; then
-        print_error "TARGET_EXPERT_PARALLEL_SIZE must be >= 1"
-        has_error=1
-    fi
-
-    if [ $has_error -eq 0 ]; then
-        print_success "Parallelism: TP=${TARGET_TENSOR_PARALLEL_SIZE}, PP=${TARGET_PIPELINE_PARALLEL_SIZE}, EP=${TARGET_EXPERT_PARALLEL_SIZE}"
     fi
 
     # Validate TEST_LOGITS requirements
