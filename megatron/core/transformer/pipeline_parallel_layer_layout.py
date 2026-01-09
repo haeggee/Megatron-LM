@@ -1,21 +1,25 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
 import copy
+import logging
 import re
 from functools import lru_cache
 from typing import Optional
 
-import torch
-
 from megatron.core import parallel_state
 from megatron.core.transformer.enums import LayerType
+
+logger = logging.getLogger(__name__)
 
 
 class PipelineParallelLayerLayout:
     """Configuration of custom pipeline parallel layer partitioning."""
 
-    def __repr__(self):
-        return self.input_data
+    def __repr__(self) -> str:
+        if isinstance(self.input_data, str):
+            return self.input_data
+        else:
+            return str(self.input_data)
 
     def __init__(self, layout: str | list, pipeline_model_parallel_size: int):
         """Initialize PipelineParallelLayerLayout from a list or a str.
@@ -126,7 +130,7 @@ class PipelineParallelLayerLayout:
                 ), "All of the MTP layers must be in the same stage"
                 assert (
                     pp_rank == self.pipeline_model_parallel_size - 1
-                    and LayerType.loss in self.layout[pp_rank][-1],
+                    and LayerType.loss in self.layout[pp_rank][-1]
                 ), "MTP layers must be in the last stage together with Loss stage."
         # TODO: remove them in the future once they are supported
         if self.flatten_layout.count(LayerType.encoder) > 0:
@@ -247,10 +251,13 @@ class PipelineParallelLayerLayout:
         """Parse the pipeline model parallel layout from a string."""
         parsed_layout = PipelineParallelLayerLayout(layout, pipeline_model_parallel_size)
         # Pretty print the layout distribution.
-        if torch.distributed.get_rank() == 0:
-            print(
-                f"Parse pipeline model parallel layout {layout} to:\n" + parsed_layout.pretty_repr()
-            )
+        from megatron.core.utils import log_single_rank
+
+        log_single_rank(
+            logger,
+            logging.INFO,
+            f"Parse pipeline model parallel layout {layout} to:\n" + parsed_layout.pretty_repr(),
+        )
         return parsed_layout
 
     @staticmethod

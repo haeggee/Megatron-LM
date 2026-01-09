@@ -18,3 +18,7 @@ runs/
 **/dist/
 core_nid*
 .idea/
+
+# Sphinx documentation
+docs/_build
+docs/apidocs

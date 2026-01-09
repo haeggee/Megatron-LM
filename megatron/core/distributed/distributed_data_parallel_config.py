@@ -49,6 +49,11 @@ class DistributedDataParallelConfig:
        message size (which for ring algorithms is bucket_size / dp_size) apparently needs
        to be divisible by a power of 2 for high busbw."""
 
+    reduce_scatter_with_fp32_accumulation: bool = False
+    """If true, use a reduce-scatter implementation which sends lower-precision values
+       over the wire (using an all-to-all to keep total communication overhead in line
+       with the standard ring implementation) but performs accumulation locally in FP32."""
+
     average_in_collective: bool = False
     """If true, compute average in collective directly, as opposed to dividing by the
        dp_size first and then computing sum in the collective."""
@@ -132,6 +137,14 @@ class DistributedDataParallelConfig:
       when nccl_ub is set.
     """
 
+    fsdp_manual_registration: bool = False
+    """If true, manually register the FSDP communication buffers to NCCL user buffer.
+      This option is only effective when use_megatron_fsdp and nccl_ub is set.
+      For symmetric registration with large models, the registration itself can take 
+      a significant amount of time. This option minimizes the number of registration calls
+      to minimize the registration time.
+    """
+
     delay_wgrad_compute: bool = False
     """Delay the weight gradient computation to improve batch-level communication overlapping"""
 
@@ -141,6 +154,14 @@ class DistributedDataParallelConfig:
         """Check the validity of the config."""
         if self.reuse_grad_buf_for_mxfp8_param_ag:
             assert self.fp8_param_gather, "Reuse grad buffer only when keeping params in MXFP8."
+            # Using mxfp8 param without overlap param gather and overlap grad reduce will cause NaN.
+            # TODO: Remove this assertion when the issue is fixed.
+            assert (
+                self.overlap_param_gather
+            ), "--overlap-param-gather is required when using mxfp8 params"
+            assert (
+                self.overlap_grad_reduce
+            ), "--overlap-grad-reduce is required when using mxfp8 params"
 
         if self.nccl_ub:
             if 'expandable_segments:True' in os.getenv('PYTORCH_CUDA_ALLOC_CONF', '').split(','):
