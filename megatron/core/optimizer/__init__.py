@@ -62,6 +62,7 @@ from .optimizer_config import (
     ParamKey,
     ParamPredicate,
     SGDOptimizerConfig,
+    AdemamixOptimizerConfig,
 )
 
 logger = logging.getLogger(__name__)

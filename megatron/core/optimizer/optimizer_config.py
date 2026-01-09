@@ -387,3 +387,12 @@ class SGDOptimizerConfig(OptimizerConfig):
 
     sgd_momentum: float = 0.9
     """Momentum factor for SGD optimizer."""
+
+
+@dataclass
+class AdemamixOptimizerConfig(OptimizerConfig):
+    """SGD optimizer configuration object."""
+
+    optimizer: str = 'ademamix'
+    """Optimizer name."""
+
