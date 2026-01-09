@@ -42,7 +42,7 @@ def add_arguments(parser):
 
 
 def verify_transformers_version():
-    major, minor, patch = map(int, transformers.__version__.split('.'))
+    major, minor, patch = map(int, transformers.__version__.split('.')[:3])
     assert major >= 4 and minor >= 31
 
 
