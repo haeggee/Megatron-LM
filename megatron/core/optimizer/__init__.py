@@ -153,32 +153,6 @@ def _get_param_groups(
                     param_overrides_list
                 )
 
-            if hasattr(param, "apply_weight_decay"):
-                no_wd = not bool(getattr(param, "apply_weight_decay"))
-            elif hasattr(param, "skip_weight_decay"):
-                no_wd = bool(getattr(param, "skip_weight_decay"))
-
-            if (
-                any(keyword in name for keyword in ["alpha"])
-                and not hasattr(param, "apply_weight_decay")
-                and not hasattr(param, "skip_weight_decay")
-            ):
-                no_wd = True
-
-            if scale_lr_cond is not None:
-                scale_lr = scale_lr_cond(name, param)
-            else:
-                scale_lr = False
-
-            if not no_wd and not scale_lr:
-                wd_mult, _lr_mult = 1.0, 1.0
-            elif not no_wd and scale_lr:
-                wd_mult, _lr_mult = 1.0, lr_mult
-            elif no_wd and not scale_lr:
-                wd_mult, _lr_mult = 0.0, 1.0
-            else:
-                param_override = None
-
             is_expert_parallel = not getattr(param, 'allreduce', True)
 
             # Create config_tuple that is hash-able, and has a consistent ordering of the keys.
