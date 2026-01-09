@@ -730,73 +730,73 @@ def pretrain(
         app_metrics['app_build_optimizer_finish_time'] = one_logger_utils.get_timestamp_in_ms()
         config = get_model_config(model[0])
 
-    # Build a separate inference model for RL if requested.
-    inference_model = None
-    if args.perform_rl_step:
-        if args.rl_inference_tensor_model_parallel_size is not None:
-            print_rank_0(
-                f"Setting tensor model parallel size to {args.rl_inference_tensor_model_parallel_size} for inference model"
-            )
-            inference_pg_collection = build_inference_pg_collection(
-                tp_size=args.rl_inference_tensor_model_parallel_size,
-                world_size=args.world_size,
-                use_tp_pp_dp_mapping=args.use_tp_pp_dp_mapping,
-            )
-
-            # Build an isolated inference config so training config remains unchanged
-            inference_config = copy.deepcopy(config)
-            inference_config.tensor_model_parallel_size = args.rl_inference_tensor_model_parallel_size
-
-            # Optionally allocate the RL inference model weights from a unified virtual memory (UVM)
-            # mempool so we can prefetch weights to CPU when idle while keeping CUDA-graph-safe pointers.
-            uvm_mempool = None
-            uvm_level = args.rl_inference_model_unified_memory_level
-            if uvm_level and uvm_level > 0:
-                uvm_mempool = create_unified_mempool()
-
-            mempool_ctx = (
-                torch.cuda.use_mem_pool(uvm_mempool) if uvm_mempool is not None else nullcontext()
-            )
-            with mempool_ctx:
-                inference_model = get_model(
-                    model_provider,
-                    model_type,
-                    wrap_with_ddp=False,
-                    pg_collection=inference_pg_collection,
-                    config=inference_config,
+        # Build a separate inference model for RL if requested.
+        inference_model = None
+        if args.perform_rl_step:
+            if args.rl_inference_tensor_model_parallel_size is not None:
+                print_rank_0(
+                    f"Setting tensor model parallel size to {args.rl_inference_tensor_model_parallel_size} for inference model"
                 )
-            inference_model[0].eval()
+                inference_pg_collection = build_inference_pg_collection(
+                    tp_size=args.rl_inference_tensor_model_parallel_size,
+                    world_size=args.world_size,
+                    use_tp_pp_dp_mapping=args.use_tp_pp_dp_mapping,
+                )
+
+                # Build an isolated inference config so training config remains unchanged
+                inference_config = copy.deepcopy(config)
+                inference_config.tensor_model_parallel_size = args.rl_inference_tensor_model_parallel_size
+
+                # Optionally allocate the RL inference model weights from a unified virtual memory (UVM)
+                # mempool so we can prefetch weights to CPU when idle while keeping CUDA-graph-safe pointers.
+                uvm_mempool = None
+                uvm_level = args.rl_inference_model_unified_memory_level
+                if uvm_level and uvm_level > 0:
+                    uvm_mempool = create_unified_mempool()
+
+                mempool_ctx = (
+                    torch.cuda.use_mem_pool(uvm_mempool) if uvm_mempool is not None else nullcontext()
+                )
+                with mempool_ctx:
+                    inference_model = get_model(
+                        model_provider,
+                        model_type,
+                        wrap_with_ddp=False,
+                        pg_collection=inference_pg_collection,
+                        config=inference_config,
+                    )
+                inference_model[0].eval()
 
 
 
-    # Data stuff.
-    app_metrics['app_build_dataiters_start_time'] = one_logger_utils.get_timestamp_in_ms()
-    timers('train/valid/test-data-iterators-setup', log_level=0).start(barrier=True)
-    if args.virtual_pipeline_model_parallel_size is not None:
-        train_data_iterator = []
-        valid_data_iterator = []
-        test_data_iterator = []
-        for vp_stage in range(len(model)):
-            dataset_provider_parameters = inspect.signature(train_valid_test_dataset_provider).parameters
-            assert "vp_stage" in dataset_provider_parameters, \
-                "vp_stage must be a kwarg in train_valid_test_dataset_provider when using virtual pipeline parallelism"
-            vp_stage_train_valid_test_dataset_provider = \
-                functools.partial(train_valid_test_dataset_provider, vp_stage=vp_stage)
-            if getattr(train_valid_test_dataset_provider, 'is_distributed', False):
-                vp_stage_train_valid_test_dataset_provider.is_distributed = True
-            iterators = build_train_valid_test_data_iterators(
-                vp_stage_train_valid_test_dataset_provider
+        # Data stuff.
+        app_metrics['app_build_dataiters_start_time'] = one_logger_utils.get_timestamp_in_ms()
+        timers('train/valid/test-data-iterators-setup', log_level=0).start(barrier=True)
+        if args.virtual_pipeline_model_parallel_size is not None:
+            train_data_iterator = []
+            valid_data_iterator = []
+            test_data_iterator = []
+            for vp_stage in range(len(model)):
+                dataset_provider_parameters = inspect.signature(train_valid_test_dataset_provider).parameters
+                assert "vp_stage" in dataset_provider_parameters, \
+                    "vp_stage must be a kwarg in train_valid_test_dataset_provider when using virtual pipeline parallelism"
+                vp_stage_train_valid_test_dataset_provider = \
+                    functools.partial(train_valid_test_dataset_provider, vp_stage=vp_stage)
+                if getattr(train_valid_test_dataset_provider, 'is_distributed', False):
+                    vp_stage_train_valid_test_dataset_provider.is_distributed = True
+                iterators = build_train_valid_test_data_iterators(
+                    vp_stage_train_valid_test_dataset_provider
+                )
+                train_data_iterator.append(iterators[0])
+                valid_data_iterator.append(iterators[1])
+                test_data_iterator.append(iterators[2])
+        else:
+            train_data_iterator, valid_data_iterator, test_data_iterator = (
+                build_train_valid_test_data_iterators(train_valid_test_dataset_provider)
             )
-            train_data_iterator.append(iterators[0])
-            valid_data_iterator.append(iterators[1])
-            test_data_iterator.append(iterators[2])
-    else:
-        train_data_iterator, valid_data_iterator, test_data_iterator = (
-            build_train_valid_test_data_iterators(train_valid_test_dataset_provider)
-        )
-    timers('train/valid/test-data-iterators-setup').stop()
-    print_datetime('after dataloaders are built')
-    app_metrics['app_build_dataiters_finish_time'] = one_logger_utils.get_timestamp_in_ms()
+        timers('train/valid/test-data-iterators-setup').stop()
+        print_datetime('after dataloaders are built')
+        app_metrics['app_build_dataiters_finish_time'] = one_logger_utils.get_timestamp_in_ms()
 
     except AssertionError:
         print_rank_0("An error has been detected; Canceling pending scheduled jobs.")
