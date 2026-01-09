@@ -2110,6 +2110,12 @@ def _add_data_args(parser):
                        'end-of-document token.')
     group.add_argument('--eod-mask-loss', action='store_true',
                        help='Mask loss for the end of document tokens.')
+    group.add_argument('--use-packed-seq-params', action='store_true',
+                       help='Use EOD (End-of-Document) tokens to compute packed sequence parameters. '
+                       'When enabled, attention masking will respect document boundaries marked by '
+                       'EOD tokens, preventing cross-document attention in packed sequences. '
+                       'This is needed because Megatron currently does not use the attention mask from '
+                       'the dataloader (it is ignored), and using it would be inefficient.')
     group.add_argument('--goldfish-loss', action='store_true',
                        help='Enable goldfish loss during pretraining.')
     group.add_argument('--goldfish-k', type=int, default=50,

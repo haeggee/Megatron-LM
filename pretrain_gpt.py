@@ -40,6 +40,49 @@ from megatron.core.models.gpt.gpt_layer_specs import (
 
 stimer = StragglerDetector()
 
+
+def tokens_to_packed_seq_params(input_ids, eod_token, orig_seq_len, qkv_format='thd', cu_seqlens_padded=None):
+    """
+    Compute PackedSeqParams from input tokens using EOD token boundaries.
+
+    Args:
+        input_ids: Input token IDs, shape assumed flattened (1, tokens) or (tokens)
+        eod_token: End-of-Document token ID (from tokenizer.eod)
+        orig_seq_len: Original sequence length for fixed boundaries
+        qkv_format: QKV format - 'sbhd' (default) or 'thd' (for CP with padding)
+        cu_seqlens_padded: Optional padded cumulative lengths for context parallelism
+
+    Returns:
+        PackedSeqParams with cu_seqlens respecting both EOD and orig_seq_len boundaries
+    """
+    from megatron.core.packed_seq_params import PackedSeqParams
+
+    # Create boundaries at fixed intervals (based on orig_seq_len)
+    fixed_boundaries = torch.arange(
+        0, input_ids.size(-1) + orig_seq_len, orig_seq_len,
+        device=input_ids.device, dtype=torch.int32
+    )
+
+    # Find EOD token positions (+1 to mark position AFTER eod)
+    eod_positions = (input_ids == eod_token).nonzero()[:, 0].int() + 1
+
+    # Concatenate and sort to get all boundaries (fixed + EOD)
+    cu_seq, _ = torch.sort(torch.cat((fixed_boundaries, eod_positions)))
+
+    # Compute max sequence length between boundaries
+    max_len = (cu_seq[1:] - cu_seq[:-1]).max()
+
+    return PackedSeqParams(
+        cu_seqlens_q=cu_seq,
+        cu_seqlens_kv=cu_seq,
+        max_seqlen_q=max_len,
+        max_seqlen_kv=max_len,
+        qkv_format=qkv_format,
+        cu_seqlens_q_padded=cu_seqlens_padded,
+        cu_seqlens_kv_padded=cu_seqlens_padded,
+    )
+
+
 def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megatron.legacy.model.GPTModel]:
     """Builds the model.
 
@@ -296,11 +339,36 @@ def forward_step(data_iterator, model: GPTModel):
     with stimer(bdata=True):
         tokens, labels, loss_mask, attention_mask, position_ids, assistant_mask = get_batch(
             data_iterator)
+
+        # Compute packed sequence parameters if enabled
+        packed_seq_params = None
+        if args.use_packed_seq_params:
+            # Reshape tensors from [B, S] to [1, B*S] for THD format
+            batch_size, seq_len = tokens.shape
+            tokens = tokens.view(1, -1)  # [1, B*S]
+            labels = labels.view(1, -1)  # [1, B*S]
+            loss_mask = loss_mask.view(1, -1)  # [1, B*S]
+            position_ids = position_ids.view(1, -1)  # [1, B*S]
+            # Note: attention_mask not needed in THD format with packed_seq_params
+
+            tokenizer = get_tokenizer()
+
+            # Hardcoded to 'thd' format for now
+            # TODO: Add cu_seqlens_padded support for context parallelism when needed
+            qkv_format = 'thd'
+
+            packed_seq_params = tokens_to_packed_seq_params(
+                tokens,
+                eod_token=tokenizer.eod,
+                orig_seq_len=args.seq_length,
+                qkv_format=qkv_format,
+                cu_seqlens_padded=None  # TODO: Compute for CP support
+            )
     timers('batch-generator').stop()
 
     with stimer:
         output_tensor = model(tokens, position_ids, attention_mask,
-                              labels=labels)
+                              labels=labels, packed_seq_params=packed_seq_params)
 
     return output_tensor, partial(loss_func, loss_mask, labels=labels, assistant_mask=assistant_mask)
 
