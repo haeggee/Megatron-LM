@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import torch
 
-from megatron.training.activations import fast_gelu, quick_gelu, squared_relu
+from megatron.core.activations import fast_gelu, quick_gelu, squared_relu
 
 
 def get_language_model_config(config):

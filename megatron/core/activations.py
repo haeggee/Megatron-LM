@@ -1,4 +1,6 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+"""Activation functions for Megatron-Core."""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,7 +9,26 @@ from megatron.core.jit import jit_fuser
 from megatron.core.transformer.module import MegatronModule
 
 
-# Trying to apply @jit_fuser / @torch.compile to XIELU class causes issues with sharded_state_dict naming
+@jit_fuser
+def squared_relu(x: torch.Tensor) -> torch.Tensor:
+    """Squared ReLU activation"""
+    return torch.pow(F.relu(x), 2)
+
+
+@jit_fuser
+def quick_gelu(x: torch.Tensor) -> torch.Tensor:
+    """Quick GELU activation"""
+    return x * torch.sigmoid(1.702 * x)
+
+
+@jit_fuser
+def fast_gelu(x: torch.Tensor) -> torch.Tensor:
+    """Fast GELU activation"""
+    return 0.5 * x * (1.0 + torch.tanh(x * 0.7978845608 * (1.0 + 0.044715 * x * x)))
+
+
+# Swiss AI XIELU family activations with learnable parameters
+
 @jit_fuser
 def compiled_xielu(x, alpha_p, alpha_n, beta=0.5, eps=-1e-6):
     return torch.where(x > 0,
@@ -74,18 +95,3 @@ class XIPReLUP(MegatronModule):
         alpha_n = F.softplus(self.alpha_n)
         power = 1 + F.softplus(self.power)
         return compiled_xiprelup(x, alpha_p, alpha_n, power, self.beta, self.eps)
-
-
-@jit_fuser
-def squared_relu(x: torch.Tensor) -> torch.Tensor:
-    return torch.pow(F.relu(x), 2)
-
-
-@jit_fuser
-def quick_gelu(x: torch.Tensor) -> torch.Tensor:
-    return x * torch.sigmoid(1.702 * x)
-
-
-@jit_fuser
-def fast_gelu(x: torch.Tensor) -> torch.Tensor:
-    return 0.5 * x * (1.0 + torch.tanh(x * 0.7978845608 * (1.0 + 0.044715 * x * x)))
