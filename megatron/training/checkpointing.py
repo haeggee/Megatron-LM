@@ -1306,7 +1306,7 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
                 model[i].load_state_dict(state_dict['model%d' % i], strict=strict)
 
     # Expand the embedding size to make the model multimodal
-    if model[0].vocab_size != args.total_multimodal_vocab_size:
+    if hasattr(args, 'total_multimodal_vocab_size') and model[0].vocab_size != args.total_multimodal_vocab_size:
         print_rank_0(f"Expanding model vocab size from {model[0].vocab_size} to {args.total_multimodal_vocab_size}")
         model[0].vocab_size = args.total_multimodal_vocab_size
         extend_vocab_and_load_weights(model, state_dict, args.base_vocab_size, mpu)
@@ -1320,6 +1320,12 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
         # After this you can start a new training with the extended model, just remove the --extend-model-vocab flag
         # And specify the correct load path
         # TODO (nirmiger): would it be possible to continue training directly?
+
+        # FIX: Update padded_vocab_size to match the extended model's actual vocab size. Otherwise only the training checkpoints will store correct size (as for training the size is loaded from tokenizer)
+        if hasattr(args, 'total_multimodal_vocab_size'):
+            print_rank_0(f"Updating padded_vocab_size from {args.padded_vocab_size} to {args.total_multimodal_vocab_size} for extended model checkpoint")
+            args.padded_vocab_size = args.total_multimodal_vocab_size
+
         save_checkpoint(1, model , None, None, 0)
         sys.exit()
 
