@@ -22,6 +22,7 @@ _GLOBAL_ADLR_AUTORESUME = None
 _GLOBAL_TIMERS = None
 _GLOBAL_ENERGY_MONITOR = None
 _GLOBAL_SIGNAL_HANDLER = None
+_GLOBAL_INTERNALS_LOGGER = None
 
 def get_args():
     """Return arguments."""
@@ -73,6 +74,12 @@ def get_signal_handler():
     return _GLOBAL_SIGNAL_HANDLER
 
 
+def get_internals_logger():
+    """Return internals logger. It can be None so no need
+    to check if it is initialized."""
+    return _GLOBAL_INTERNALS_LOGGER
+
+
 def _set_signal_handler(exit_signal):
 
     global _GLOBAL_SIGNAL_HANDLER
@@ -105,6 +112,7 @@ def set_global_variables(args, build_tokenizer=True):
     _set_adlr_autoresume(args)
     _set_timers(args)
     _set_energy_monitor(args)
+    _set_internals_logger(args)
 
     if args.enable_experimental:
         set_experimental_flag(True)
@@ -129,6 +137,7 @@ def unset_global_variables():
     global _GLOBAL_TIMERS
     global _GLOBAL_ENERGY_MONITOR
     global _GLOBAL_SIGNAL_HANDLER
+    global _GLOBAL_INTERNALS_LOGGER
 
     _GLOBAL_ARGS = None
     _GLOBAL_NUM_MICROBATCHES_CALCULATOR = None
@@ -140,6 +149,7 @@ def unset_global_variables():
     _GLOBAL_TIMERS = None
     _GLOBAL_ENERGY_MONITOR = None
     _GLOBAL_SIGNAL_HANDLER = None
+    _GLOBAL_INTERNALS_LOGGER = None
 
     unset_num_microbatches_calculator()
 
@@ -270,6 +280,29 @@ def _set_energy_monitor(args):
     _GLOBAL_ENERGY_MONITOR = EnergyMonitor()
 
 
+def _set_internals_logger(args):
+    """Initialize internals logger for model internals logging to W&B."""
+    global _GLOBAL_INTERNALS_LOGGER
+    _ensure_var_is_not_initialized(_GLOBAL_INTERNALS_LOGGER, 'internals logger')
+
+    if getattr(args, 'log_model_internals', False) and args.rank == (args.world_size - 1):
+        # Only initialize on the last rank (consistent with W&B writer)
+        from megatron.training.internals_logging import (
+            InternalsLoggingConfig,
+            InternalsHookManager,
+            InternalsStateManager,
+            InternalsLogger,
+        )
+
+        config = InternalsLoggingConfig.from_args(args)
+        hook_manager = InternalsHookManager(config)
+        state_manager = InternalsStateManager(weights_on_gpu=config.weights_on_gpu)
+        _GLOBAL_INTERNALS_LOGGER = InternalsLogger(config, hook_manager, state_manager)
+
+        if args.rank == 0:
+            print('> setting up model internals logger ...', flush=True)
+
+
 def _ensure_var_is_initialized(var, name):
     """Make sure the input variable is not None."""
     assert var is not None, '{} is not initialized.'.format(name)
@@ -306,3 +339,6 @@ def destroy_global_vars():
 
     global _GLOBAL_SIGNAL_HANDLER
     _GLOBAL_SIGNAL_HANDLER = None
+
+    global _GLOBAL_INTERNALS_LOGGER
+    _GLOBAL_INTERNALS_LOGGER = None

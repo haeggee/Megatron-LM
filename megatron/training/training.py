@@ -150,6 +150,7 @@ from .global_vars import (
     get_one_logger,
     get_tokenizer,
     get_energy_monitor,
+    get_internals_logger,
 )
 from . import one_logger_utils
 
@@ -2264,6 +2265,12 @@ def train(
     for model_module in model:
         model_module.train()
 
+    # Register hooks for model internals logging.
+    internals_logger = get_internals_logger()
+    if internals_logger is not None:
+        for model_chunk in model:
+            internals_logger.hook_manager.register_hooks(model_chunk)
+
     # Tracking loss.
     total_loss_dict = {}
 
@@ -2510,6 +2517,11 @@ def train(
             continue
 
         args.curr_iteration = iteration
+
+        # Enable internals capture if this is a logging iteration.
+        if internals_logger is not None and (iteration + 1) % args.log_interval == 0:
+            internals_logger.hook_manager.enable_capture()
+
         # For GRPO, we keep the data for a few epochs. DeepSeekMath paper calls this number $\mu$.
         # It is similar to a PPO epoch.
 
@@ -2653,6 +2665,14 @@ def train(
             num_zeros_in_grad,
             max_attention_logit,
         )
+
+        # Log model internals to W&B if enabled.
+        if internals_logger is not None and iteration % args.log_interval == 0:
+            wandb_writer = get_wandb_writer()
+            if wandb_writer is not None:
+                # Use first model chunk for logging
+                internals_logger.log_internals(model[0], iteration, wandb_writer)
+            internals_logger.hook_manager.disable_capture()
 
         # Evaluation.
         if args.eval_interval and iteration % args.eval_interval == 0 and args.do_valid:
