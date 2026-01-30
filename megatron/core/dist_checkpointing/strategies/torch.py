@@ -579,9 +579,22 @@ class MCoreLoadPlanner(DefaultLoadPlanner):
                 md.size = size
 
     def create_local_plan(self) -> LoadPlan:
-        """Runs additional shapes validation."""
+    """Runs additional shapes validation."""
+    
+        # Filter out missing _extra_state keys for old checkpoint compatibility
+        if hasattr(self, 'metadata') and self.metadata is not None:
+            available_keys = set(self.metadata.state_dict_metadata.keys())
+            missing_extra_state = [
+                k for k in list(self.state_dict.keys())
+                if '_extra_state' in k and k not in available_keys
+            ]
+            for k in missing_extra_state:
+                print(f"Warning: Missing {k} in checkpoint, initializing fresh (Apex QKLN compatibility)")
+                del self.state_dict[k]
+        
+        # Now validate only the keys that actually exist in checkpoint
         self._validate_global_shapes(self.metadata, self.shapes_validation_sharded_tensors)
-
+    
         with self._temporarily_bypass_shape_validation():
             local_plan = super().create_local_plan()
 
