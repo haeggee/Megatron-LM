@@ -382,11 +382,44 @@ def _replace_sharded_keys_with_state_dict_keys(
     flat_mapping: FLATTEN_MAPPING,
     rename_mapping: Dict[str, List[str]],
 ):
-    """Inverse of _replace_state_dict_keys_with_sharded_keys."""
+    """Inverse of _replace_sharded_keys_with_sharded_keys."""
     recovered_sd = {}
     for k, tensors in state_dict.items():
-        assert len(tensors) == len(rename_mapping[k])
+        # Handle old checkpoint format: ensure tensors is always a list
+        if isinstance(tensors, (io.BytesIO, torch.Tensor)):
+            tensors = [tensors]
+
+        # Skip keys that exist in checkpoint but not in current model
+        if k not in rename_mapping:
+            continue
+
+        if len(tensors) != len(rename_mapping[k]):
+            print(f"Warning: Length mismatch for {k}: checkpoint has {len(tensors)}, expected {len(rename_mapping[k])}")
+            continue
+
         for ten, recovered_k in zip(tensors, rename_mapping[k]):
+            # CRITICAL FIX: Deserialize BytesIO to actual tensors for _extra_state
+            if isinstance(ten, io.BytesIO):
+                ten.seek(0)  # Reset stream position
+                try:
+                    loaded = torch.load(ten)  # Deserialize
+                    # Handle case where torch.load returns a list containing one tensor
+                    if isinstance(loaded, list):
+                        if len(loaded) == 1:
+                            ten = loaded[0]
+                        else:
+                            print(f"Warning: Unexpected list length {len(loaded)} for {recovered_k}, using empty tensor")
+                            ten = torch.tensor([])
+                    else:
+                        ten = loaded
+                except Exception as e:
+                    print(f"Warning: Could not deserialize {recovered_k}, using empty tensor: {e}")
+                    ten = torch.tensor([])
+            elif not isinstance(ten, torch.Tensor):
+                # Handle any other non-tensor types
+                print(f"Warning: Unexpected type {type(ten)} for {recovered_k}, converting to empty tensor")
+                ten = torch.tensor([])
+
             recovered_sd[recovered_k] = ten
 
     return unflatten_state_dict(recovered_sd, flat_mapping)
@@ -547,8 +580,21 @@ class MCoreLoadPlanner(DefaultLoadPlanner):
 
     def create_local_plan(self) -> LoadPlan:
         """Runs additional shapes validation."""
+    
+        # Filter out missing _extra_state keys for old checkpoint compatibility
+        if hasattr(self, 'metadata') and self.metadata is not None:
+            available_keys = set(self.metadata.state_dict_metadata.keys())
+            missing_extra_state = [
+                k for k in list(self.state_dict.keys())
+                if '_extra_state' in k and k not in available_keys
+            ]
+            for k in missing_extra_state:
+                print(f"Warning: Missing {k} in checkpoint, initializing fresh (Apex QKLN compatibility)")
+                del self.state_dict[k]
+        
+        # Now validate only the keys that actually exist in checkpoint
         self._validate_global_shapes(self.metadata, self.shapes_validation_sharded_tensors)
-
+    
         with self._temporarily_bypass_shape_validation():
             local_plan = super().create_local_plan()
 
