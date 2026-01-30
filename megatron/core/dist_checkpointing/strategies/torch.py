@@ -579,7 +579,7 @@ class MCoreLoadPlanner(DefaultLoadPlanner):
                 md.size = size
 
     def create_local_plan(self) -> LoadPlan:
-    """Runs additional shapes validation."""
+        """Runs additional shapes validation."""
     
         # Filter out missing _extra_state keys for old checkpoint compatibility
         if hasattr(self, 'metadata') and self.metadata is not None:
