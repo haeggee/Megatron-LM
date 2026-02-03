@@ -64,7 +64,7 @@ def tokens_to_packed_seq_params(input_ids, eod_token, orig_seq_len, qkv_format='
     )
 
     # Find EOD token positions (+1 to mark position AFTER eod)
-    eod_positions = (input_ids == eod_token).nonzero()[:, 0].int() + 1
+    eod_positions = (input_ids.flatten() == eod_token).nonzero()[:, 0].int() + 1
 
     # Concatenate and sort to get all boundaries (fixed + EOD)
     cu_seq, _ = torch.sort(torch.cat((fixed_boundaries, eod_positions)))
