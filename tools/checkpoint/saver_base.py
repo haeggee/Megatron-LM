@@ -461,6 +461,16 @@ class MegatronCheckpointSaverBase:
                     else:
                         mlp_l0_bias = chunk_bias(msg.pop("mlp l0 bias"), 'column', self.args.target_tensor_parallel_size, self.args.target_expert_parallel_size)
 
+                # QK normalization weights (Apertus-specific)
+                if getattr(self.md, 'qk_layernorm', False):
+                    q_layernorm_weight = msg.pop("q norm weight")
+                    k_layernorm_weight = msg.pop("k norm weight")
+
+                # XIELU activation parameters (Apertus-specific)
+                if getattr(self.md, 'xielu', False):
+                    xielu_alpha_p = msg.pop("mlp alpha_p")
+                    xielu_alpha_n = msg.pop("mlp alpha_n")
+
                 # Save them to the model
                 for ep_rank in range(self.args.target_expert_parallel_size):
                     for tp_rank in range(self.args.target_tensor_parallel_size):
@@ -505,6 +515,18 @@ class MegatronCheckpointSaverBase:
                         if self.margs.num_experts:
                             params_dict.update({
                                 "router_weight":  router
+                            })
+                        # QK normalization weights (Apertus-specific)
+                        if getattr(self.md, 'qk_layernorm', False):
+                            params_dict.update({
+                                "self_attn_q_layernorm_weight": q_layernorm_weight,
+                                "self_attn_k_layernorm_weight": k_layernorm_weight,
+                            })
+                        # XIELU activation parameters (Apertus-specific)
+                        if getattr(self.md, 'xielu', False):
+                            params_dict.update({
+                                "mlp_xielu_alpha_p": xielu_alpha_p,
+                                "mlp_xielu_alpha_n": xielu_alpha_n,
                             })
                         model = self.get_local_model(pp_rank, ep_rank, tp_rank)
                         schema.set_layer(model, layer_id, params_dict)
