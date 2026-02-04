@@ -105,6 +105,34 @@ def build_tokenizer(args, **kwargs):
         args.base_vocab_size = base_vocab_size
         args.base_padded_vocab_size = _vocab_size_with_padding(base_vocab_size, args)
 
+    # Load omnimodal_config for per-modality loss tracking
+    omnimodal_config = tokenizer._tokenizer.init_kwargs.get("omnimodal_config", None)
+    if omnimodal_config is not None:
+        args.omnimodal_config = omnimodal_config
+        # Extract modality offsets and vocab sizes for easy access
+        for modality in omnimodal_config.get("modalities", []):
+            name = modality["name"]
+            setattr(args, f"{name}_token_offset", modality["offset"])
+            setattr(args, f"{name}_vocab_size", modality["vocab_size"])
+        if args.rank == 0:
+            print(f" > loaded omnimodal_config with modalities: "
+                  f"{[m['name'] for m in omnimodal_config.get('modalities', [])]}", flush=True)
+
+    # Optional contiguous range of omni special tokens to skip in goldfish masking.
+    # Defined as [base_vocab_size, min(modality_offset)) when available.
+    tokenizer.goldfish_exemption_range = None
+    if base_vocab_size is not None and omnimodal_config is not None:
+        min_offset = min(
+            (
+                m.get("offset")
+                for m in omnimodal_config.get("modalities", [])
+                if m.get("offset") is not None
+            ),
+            default=None,
+        )
+        if min_offset is not None and int(base_vocab_size) < int(min_offset):
+            tokenizer.goldfish_exemption_range = (int(base_vocab_size), int(min_offset))
+
     return tokenizer
 
 

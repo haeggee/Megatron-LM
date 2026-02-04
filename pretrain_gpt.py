@@ -58,16 +58,12 @@ def tokens_to_packed_seq_params(input_ids, eod_token, orig_seq_len, qkv_format='
     from megatron.core.packed_seq_params import PackedSeqParams
 
     # Create boundaries at fixed intervals (based on orig_seq_len)
-    fixed_boundaries = torch.arange(
-        0, input_ids.size(-1) + orig_seq_len, orig_seq_len,
-        device=input_ids.device, dtype=torch.int32
-    )
-
     # Find EOD token positions (+1 to mark position AFTER eod)
-    eod_positions = (input_ids.flatten() == eod_token).nonzero()[:, 0].int() + 1
-
     # Concatenate and sort to get all boundaries (fixed + EOD)
-    cu_seq, _ = torch.sort(torch.cat((fixed_boundaries, eod_positions)))
+    cu_seq, _ = torch.sort(torch.cat((
+        torch.arange(0, input_ids.size(-1) + orig_seq_len, orig_seq_len, device=input_ids.device, dtype=torch.int32),
+        (input_ids.flatten() == eod_token).nonzero()[:, 0].int() + 1,
+    )))
 
     # Compute max sequence length between boundaries
     max_len = (cu_seq[1:] - cu_seq[:-1]).max()
@@ -265,42 +261,35 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, labels: torc
 
     local_num_tokens = loss[1].clone().detach().to(torch.int)
 
-    # --- Optional: Separate image/text token losses and separate assistant loss in SFT---
+    # --- Per-modality token losses and separate assistant loss in SFT---
     stats_dict = {'lm loss': (reporting_loss[0], reporting_loss[1])}
-    if labels is not None:
-        losses_flat = losses.detach().clone().view(-1)
-        labels_flat = labels.transpose(0, 1).contiguous().view(-1)
 
-        img_token_start = args.base_vocab_size 
-        img_token_end = args.total_multimodal_vocab_size
+    if labels is not None and hasattr(args, 'base_vocab_size'):
+        losses_flat = losses.detach().reshape(-1)
+        labels_flat = labels.reshape(-1)
+        loss_mask_flat = loss_mask.reshape(-1)
 
-        image_mask = (labels_flat >= img_token_start) & (labels_flat <= img_token_end)
-        text_mask = ~image_mask
+        modalities = [('text', 0, args.base_vocab_size)]
+        omnimodal_config = getattr(args, 'omnimodal_config', None)
+        if omnimodal_config is not None:
+            for modality in omnimodal_config.get('modalities', []):
+                modalities.append((modality['name'], modality['offset'], modality['vocab_size']))
 
-        image_loss_mask = image_mask & (loss_mask > 0)
-        text_loss_mask = text_mask & (loss_mask > 0)
-        
-        image_loss = torch.cat([
-            torch.sum(losses_flat * image_loss_mask.float()).view(1),
-            image_loss_mask.float().sum().view(1)
-        ])
-        text_loss = torch.cat([
-            torch.sum(losses_flat * text_loss_mask.float()).view(1),
-            text_loss_mask.float().sum().view(1)
-        ])
+        sum_list = []
+        count_list = []
+        for name, offset, vocab_size in modalities:
+            in_range = (labels_flat >= offset) & (labels_flat < offset + vocab_size)
+            weights = loss_mask_flat * in_range.float()
+            sum_list.append(torch.sum(losses_flat * weights))
+            count_list.append(torch.sum(weights))
 
+        modality_stats = torch.stack((torch.stack(sum_list), torch.stack(count_list)), dim=1)
         if args.context_parallel_size > 1:
-            torch.distributed.all_reduce(image_loss, group=mpu.get_context_parallel_group())
-            torch.distributed.all_reduce(text_loss, group=mpu.get_context_parallel_group())
+            torch.distributed.all_reduce(modality_stats, group=mpu.get_context_parallel_group())
+        torch.distributed.all_reduce(modality_stats, group=mpu.get_data_parallel_group())
 
-        # Reduce for logging (across DP group)
-        reporting_image_loss = image_loss.clone().detach()
-        reporting_text_loss = text_loss.clone().detach()
-        torch.distributed.all_reduce(reporting_image_loss, group=mpu.get_data_parallel_group())
-        torch.distributed.all_reduce(reporting_text_loss, group=mpu.get_data_parallel_group())
-
-        stats_dict['image_token_loss'] = (reporting_image_loss[0], reporting_image_loss[1])
-        stats_dict['text_token_loss'] = (reporting_text_loss[0], reporting_text_loss[1])
+        for i, (name, _, _) in enumerate(modalities):
+            stats_dict[f'{name}_token_loss'] = (modality_stats[i, 0], modality_stats[i, 1])
 
         # Log separate assistant loss for SFT training
         if args.sft and assistant_mask is not None:
