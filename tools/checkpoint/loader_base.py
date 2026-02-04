@@ -40,7 +40,7 @@ class MegatronCheckpointLoaderBase:
         Populates self.margs and self.checkpoint_args.
         """
         # Ensure we can import Megatron
-        sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
+        sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir, os.path.pardir)))
         if self.args.megatron_path is not None:
             sys.path.insert(0, self.args.megatron_path)
 
