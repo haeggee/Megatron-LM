@@ -115,6 +115,10 @@ class GPTDataset(MegatronDataset):
         self.cached_loss_mask = None
         self.cached_position_ids = None
 
+        # Optional contiguous range of omni special tokens to skip in goldfish masking.
+        self._goldfish_exemption_start = None
+        self._goldfish_exemption_end = None
+
         try:
             self._pad_token_id = self.config.tokenizer.pad
         except Exception:
@@ -129,6 +133,9 @@ class GPTDataset(MegatronDataset):
             self._goldfish_h = self.config.goldfish_h
             self._goldfish_token_id = _GOLDFISH_TOKEN_ID
             self._goldfish_hash_table = None
+            exempt = getattr(self.config.tokenizer, "goldfish_exemption_range", None)
+            if exempt:
+                self._goldfish_exemption_start, self._goldfish_exemption_end = exempt
 
     @staticmethod
     def numel_low_level_dataset(low_level_dataset: IndexedDataset) -> int:
@@ -241,6 +248,8 @@ class GPTDataset(MegatronDataset):
                 k=self._goldfish_k,
                 goldfish_hash_table=self._goldfish_hash_table,
                 goldfish_context_width=self._goldfish_h,
+                exemption_start=self._goldfish_exemption_start,
+                exemption_end=self._goldfish_exemption_end,
             )
 
             loss_mask[goldfish_labels == self._goldfish_token_id] = 0.0
@@ -744,6 +753,8 @@ def apply_goldfish(
     k: int,
     goldfish_hash_table: torch.Tensor,
     goldfish_context_width: int=4,
+    exemption_start: Optional[int] = None,
+    exemption_end: Optional[int] = None,
 ):
     """
     Apply a mask to a tensor to skip every k-th token, using only the 'hash-table' strategy from the original Goldfish Loss implementation. 
@@ -761,8 +772,31 @@ def apply_goldfish(
     assert labels.ndim == 1, "Expected 1D tensor as used within GPTDataset.__getitem__"
     masked_labels = labels.clone()
 
-    hashed_keys = goldfish_hash_table[labels.unfold(0, goldfish_context_width, 1).prod(dim=-1) % _HASH_TABLE_SIZE]
+    hashed_keys = goldfish_hash_table[
+        labels.unfold(0, goldfish_context_width, 1).prod(dim=-1) % _HASH_TABLE_SIZE
+    ]
+
     dropped_token_indices = (hashed_keys < 1 / k)
+
+    if exemption_start is not None:
+        # Exemption is in token-id space; cancel drops where labels are in that range.
+        exempt_mask = (labels >= exemption_start) & (labels < exemption_end)
+        exempt_tail = exempt_mask[goldfish_context_width - 1 :]
+        if os.getenv("GOLDFISH_EXEMPT_LOG") == "1":
+            exempt_dropped = (dropped_token_indices & exempt_tail).nonzero(as_tuple=True)[0]
+            if exempt_dropped.numel() > 0:
+                label_idx = exempt_dropped + (goldfish_context_width - 1)
+                sample = torch.stack(
+                    (label_idx[:5], labels[label_idx[:5]]), dim=1
+                ).cpu().tolist()
+                log_single_rank(
+                    logger,
+                    logging.INFO,
+                    f"Goldfish exemption cancels {exempt_dropped.numel()} drops; "
+                    f"sample (idx, token_id){sample}",
+                )
+        dropped_token_indices &= ~exempt_tail
+
     masked_labels[goldfish_context_width-1:][dropped_token_indices] = goldfish_token_id
 
     return masked_labels
