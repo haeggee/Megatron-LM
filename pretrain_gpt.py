@@ -4,7 +4,7 @@
 
 import json
 from functools import partial
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import torch
 
@@ -27,6 +27,7 @@ from megatron.training.utils import (
     is_first_or_last_pipeline_stage,
 )
 from model_provider import model_provider
+from megatron.core import mpu
 
 try:
     from megatron.post_training.arguments import add_modelopt_args
@@ -37,6 +38,45 @@ except ImportError:
     has_nvidia_modelopt = False
 
 stimer = StragglerDetector()
+
+
+def tokens_to_packed_seq_params(input_ids, eod_token, orig_seq_len, qkv_format='thd', cu_seqlens_padded=None):
+    """
+    Compute PackedSeqParams from input tokens using EOD token boundaries.
+
+    Args:
+        input_ids: Input token IDs, shape assumed flattened (1, tokens) or (tokens)
+        eod_token: End-of-Document token ID (from tokenizer.eod)
+        orig_seq_len: Original sequence length for fixed boundaries
+        qkv_format: QKV format - 'sbhd' (default) or 'thd' (for CP with padding)
+        cu_seqlens_padded: Optional padded cumulative lengths for context parallelism
+
+    Returns:
+        PackedSeqParams with cu_seqlens respecting both EOD and orig_seq_len boundaries
+    """
+    from megatron.core.packed_seq_params import PackedSeqParams
+
+    # Create boundaries at fixed intervals (based on orig_seq_len)
+    # Find EOD token positions (+1 to mark position AFTER eod)
+    # Concatenate and sort to get all boundaries (fixed + EOD)
+    cu_seq, _ = torch.sort(torch.cat((
+        torch.arange(0, input_ids.size(-1) + orig_seq_len, orig_seq_len, device=input_ids.device, dtype=torch.int32),
+        (input_ids.flatten() == eod_token).nonzero()[:, 0].int() + 1,
+    )))
+
+    # Compute max sequence length between boundaries
+    max_len = (cu_seq[1:] - cu_seq[:-1]).max()
+
+    return PackedSeqParams(
+        cu_seqlens_q=cu_seq,
+        cu_seqlens_kv=cu_seq,
+        max_seqlen_q=max_len,
+        max_seqlen_kv=max_len,
+        qkv_format=qkv_format,
+        cu_seqlens_q_padded=cu_seqlens_padded,
+        cu_seqlens_kv_padded=cu_seqlens_padded,
+    )
+
 
 
 def get_batch(data_iterator, vp_stage=None):
@@ -58,15 +98,14 @@ def get_batch(data_iterator, vp_stage=None):
 SPIKY_LOSS_FACTOR = 10
 
 
-def loss_func(
-    loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optional[GPTModel] = None
-):
+def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optional[GPTModel] = None, labels: torch.Tensor = None):
     """Loss function.
 
     Args:
         loss_mask (torch.Tensor): Used to mask out some portions of the loss
         output_tensor (torch.Tensor): The tensor with the losses
         model (GPTModel, optional): The model (can be wrapped)
+        labels: tensor with labels to allow reporting of special losses based on label ids
 
     Returns:
         the loss scalar for this micro-batch
@@ -117,6 +156,34 @@ def loss_func(
             fatal=False,
         )
 
+    # --- Per-modality token losses ---
+    if labels is not None and hasattr(args, 'base_vocab_size'):
+        losses_flat = losses.detach().reshape(-1)
+        labels_flat = labels.reshape(-1)
+        loss_mask_flat = loss_mask.reshape(-1)
+
+        modalities = [('text', 0, args.base_vocab_size)]
+        omnimodal_config = getattr(args, 'omnimodal_config', None)
+        if omnimodal_config is not None:
+            for modality in omnimodal_config.get('modalities', []):
+                modalities.append((modality['name'], modality['offset'], modality['vocab_size']))
+
+        sum_list = []
+        count_list = []
+        for name, offset, vocab_size in modalities:
+            in_range = (labels_flat >= offset) & (labels_flat < offset + vocab_size)
+            weights = loss_mask_flat * in_range.float()
+            sum_list.append(torch.sum(losses_flat * weights))
+            count_list.append(torch.sum(weights))
+
+        modality_stats = torch.stack((torch.stack(sum_list), torch.stack(count_list)), dim=1)
+        if args.context_parallel_size > 1:
+            torch.distributed.all_reduce(modality_stats, group=mpu.get_context_parallel_group())
+        torch.distributed.all_reduce(modality_stats, group=mpu.get_data_parallel_group())
+
+        for i, (name, _, _) in enumerate(modalities):
+            report[f'{name}_token_loss'] = torch.cat([modality_stats[i, 0], modality_stats[i, 1]])
+
     return loss, num_tokens, report
 
 
@@ -137,26 +204,53 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
     with stimer(bdata=True):
         vp_stage = get_attr_wrapped_model(model, "vp_stage")
         tokens, labels, loss_mask, attention_mask, position_ids = get_batch(data_iterator, vp_stage)
+
+        # Compute packed sequence parameters if enabled
+        packed_seq_params = None
+        if args.use_packed_seq_params:
+            # Reshape tensors from [B, S] to [1, B*S] for THD format
+            tokens = tokens.view(1, -1)  # [1, B*S]
+            labels = labels.view(1, -1)  # [1, B*S]
+            loss_mask = loss_mask.view(1, -1)  # [1, B*S]
+            position_ids = position_ids.view(1, -1)  # [1, B*S]
+            # Note: attention_mask not needed in THD format with packed_seq_params
+
+            tokenizer = get_tokenizer()
+
+            # Hardcoded to 'thd' format for now
+            # TODO: Add cu_seqlens_padded support for context parallelism when needed
+            qkv_format = 'thd'
+
+            packed_seq_params = tokens_to_packed_seq_params(
+                tokens,
+                eod_token=tokenizer.eod,
+                orig_seq_len=args.seq_length,
+                qkv_format=qkv_format,
+                cu_seqlens_padded=None  # TODO: Compute for CP support
+            )
     timers('batch-generator').stop()
 
     with stimer:
         if args.use_legacy_models:
-            output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
+            output_tensor = model(tokens, position_ids, attention_mask, labels=labels,
+                                  packed_seq_params=packed_seq_params)
         else:
             if return_schedule_plan:
                 assert args.overlap_moe_expert_parallel_comm, \
                     "overlap_moe_expert_parallel_comm must be enabled to return the schedule plan"
                 schedule_plan = model.build_schedule_plan(
-                    tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
+                    tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask,
+                    packed_seq_params=packed_seq_params
                 )
-                return schedule_plan, partial(loss_func, loss_mask, model=model)
+                return schedule_plan, partial(loss_func, loss_mask, model=model, labels=labels)
             else:
                 output_tensor = model(
-                    tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
+                    tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask,
+                    packed_seq_params=packed_seq_params
                 )
 
     # [ModelOpt]: model is needed to access ModelOpt distillation losses
-    return output_tensor, partial(loss_func, loss_mask, model=model)
+    return output_tensor, partial(loss_func, loss_mask, model=model, labels=labels)
 
 
 def is_dataset_built_on_rank(vp_stage=None):

@@ -40,7 +40,6 @@ try:
 except ImportError:
     HAVE_TE = False
 
-
 logger = logging.getLogger(__name__)
 
 
