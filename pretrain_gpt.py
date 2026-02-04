@@ -4,7 +4,7 @@
 
 import json
 from functools import partial
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -27,7 +27,6 @@ from megatron.training.utils import (
     is_first_or_last_pipeline_stage,
 )
 from model_provider import model_provider
-from megatron.core import mpu
 
 try:
     from megatron.post_training.arguments import add_modelopt_args
@@ -157,7 +156,9 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optio
         )
 
     # --- Per-modality token losses ---
-    if labels is not None and hasattr(args, 'base_vocab_size'):
+    # Skip when using modelopt since `losses` is not defined in that code path
+    is_modelopt = has_nvidia_modelopt and getattr(args, 'modelopt_enabled', False)
+    if labels is not None and getattr(args, 'base_vocab_size', None) is not None and not is_modelopt:
         losses_flat = losses.detach().reshape(-1)
         labels_flat = labels.reshape(-1)
         loss_mask_flat = loss_mask.reshape(-1)
@@ -176,13 +177,12 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optio
             sum_list.append(torch.sum(losses_flat * weights))
             count_list.append(torch.sum(weights))
 
+        # Stack as [num_modalities, 2] where dim=1 is [loss_sum, token_count]
+        # Don't reduce here - train_step() handles the DP/CP reduction for all report entries
         modality_stats = torch.stack((torch.stack(sum_list), torch.stack(count_list)), dim=1)
-        if args.context_parallel_size > 1:
-            torch.distributed.all_reduce(modality_stats, group=mpu.get_context_parallel_group())
-        torch.distributed.all_reduce(modality_stats, group=mpu.get_data_parallel_group())
 
         for i, (name, _, _) in enumerate(modalities):
-            report[f'{name}_token_loss'] = torch.cat([modality_stats[i, 0], modality_stats[i, 1]])
+            report[f'{name}_token_loss'] = modality_stats[i]
 
     return loss, num_tokens, report
 
