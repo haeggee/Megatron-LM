@@ -382,44 +382,46 @@ def _replace_sharded_keys_with_state_dict_keys(
     flat_mapping: FLATTEN_MAPPING,
     rename_mapping: Dict[str, List[str]],
 ):
-    """Inverse of _replace_sharded_keys_with_sharded_keys."""
+    """Inverse of _replace_state_dict_keys_with_sharded_keys."""
     recovered_sd = {}
     for k, tensors in state_dict.items():
         # Handle old checkpoint format: ensure tensors is always a list
         if isinstance(tensors, (io.BytesIO, torch.Tensor)):
             tensors = [tensors]
-
+        
         # Skip keys that exist in checkpoint but not in current model
         if k not in rename_mapping:
             continue
-
+            
         if len(tensors) != len(rename_mapping[k]):
             print(f"Warning: Length mismatch for {k}: checkpoint has {len(tensors)}, expected {len(rename_mapping[k])}")
             continue
-
+            
         for ten, recovered_k in zip(tensors, rename_mapping[k]):
-            # CRITICAL FIX: Deserialize BytesIO to actual tensors for _extra_state
+            # ONLY fix BytesIO deserialization for old checkpoint compatibility
             if isinstance(ten, io.BytesIO):
-                ten.seek(0)  # Reset stream position
+                ten.seek(0)
                 try:
-                    loaded = torch.load(ten)  # Deserialize
-                    # Handle case where torch.load returns a list containing one tensor
-                    if isinstance(loaded, list):
-                        if len(loaded) == 1:
-                            ten = loaded[0]
-                        else:
-                            print(f"Warning: Unexpected list length {len(loaded)} for {recovered_k}, using empty tensor")
-                            ten = torch.tensor([])
-                    else:
+                    loaded = torch.load(ten)
+                    # Handle list-wrapped tensors from old format
+                    if isinstance(loaded, list) and len(loaded) == 1:
+                        ten = loaded[0]
+                    elif isinstance(loaded, torch.Tensor):
                         ten = loaded
+                    else:
+                        print(f"Warning: Unexpected deserialized type {type(loaded)} for {recovered_k}, using empty tensor")
+                        ten = torch.tensor([])
                 except Exception as e:
                     print(f"Warning: Could not deserialize {recovered_k}, using empty tensor: {e}")
                     ten = torch.tensor([])
+            # NEW: Don't touch dict/list types - they're valid in new checkpoints
+            elif isinstance(ten, (dict, list)):
+                # Pass through unchanged for new checkpoint format
+                pass
             elif not isinstance(ten, torch.Tensor):
-                # Handle any other non-tensor types
                 print(f"Warning: Unexpected type {type(ten)} for {recovered_k}, converting to empty tensor")
                 ten = torch.tensor([])
-
+            
             recovered_sd[recovered_k] = ten
 
     return unflatten_state_dict(recovered_sd, flat_mapping)
