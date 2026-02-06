@@ -59,8 +59,6 @@ class SFTIndexedDataset(GPTDataset):
         # These are pre-tokenized in the tokenizer_config.json by add_emu3_tokens_llama3_vision_instruct.py
         # some models have separate assistant/user end sequences, some a common eot token.
         # user/assistant end default to same eot if there is a common eot token
-        self._sft_user_begin_sequence = torch.tensor(self.tokenizer.sft_user_begin_sequence, dtype=torch.long)
-        self._sft_user_end_sequence = torch.tensor(self.tokenizer.sft_user_end_sequence, dtype=torch.long)
         self._sft_assistant_end_sequence = torch.tensor(self.tokenizer.sft_assistant_end_sequence, dtype=torch.long)
         self._sft_assistant_begin_sequence = torch.tensor(self.tokenizer.sft_assistant_begin_sequence, dtype=torch.long)
 
