@@ -61,6 +61,9 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
     s3_cache_path: str = None
     """Path for caching indices for s3 dataloading."""
 
+    image_weight: float = 1.0
+    """Loss weight for image tokens (between img_start and img_end). Default 1.0 (no change)."""
+
     """
     SFT Options
     """
@@ -117,12 +120,21 @@ class GPTDataset(MegatronDataset):
                 self.config.reset_attention_mask,
                 self.config.eod_mask_loss,
                 self.config.goldfish_loss,
+                self.config.image_weight != 1.0,
             ]
         )
         self.masks_and_position_ids_are_cached = False
         self.cached_attention_mask = None
         self.cached_loss_mask = None
         self.cached_position_ids = None
+
+        # Image token loss masking
+        self._image_weight = self.config.image_weight
+        self._img_start_id = None
+        self._img_end_id = None
+        if self._image_weight != 1.0:
+            self._img_start_id = self.config.tokenizer.convert_tokens_to_ids("<|img_start|>")
+            self._img_end_id = self.config.tokenizer.convert_tokens_to_ids("<|img_end|>")
 
         # Optional contiguous range of omni special tokens to skip in goldfish masking.
         self._goldfish_exemption_start = None
@@ -262,6 +274,16 @@ class GPTDataset(MegatronDataset):
             )
 
             loss_mask[goldfish_labels == self._goldfish_token_id] = 0.0
+
+        # Image token loss masking
+        if self._image_weight != 1.0 and self._img_start_id is not None:
+            from megatron.core.datasets.sft_dataset import get_matching_mask_by_start_end
+            image_mask = get_matching_mask_by_start_end(
+                labels,
+                torch.tensor([self._img_start_id], device=labels.device),
+                torch.tensor([self._img_end_id], device=labels.device),
+            )
+            loss_mask[image_mask] = self._image_weight
 
         # Batch padding sequence so we mask the loss
         if idx is None:

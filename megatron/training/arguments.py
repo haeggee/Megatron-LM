@@ -2120,8 +2120,11 @@ def _add_data_args(parser):
                        help='Enable goldfish loss during pretraining.')
     group.add_argument('--goldfish-k', type=int, default=50,
                        help='Dropout factor k for goldfish loss masking, where dropout probability is 1/k.')
-    group.add_argument('--goldfish-h', type=int, default=50,                        
+    group.add_argument('--goldfish-h', type=int, default=50,
                         help='Context width for hashing in goldfish loss masking. Controls how many preceding tokens determine masking.')
+    group.add_argument('--image-weight', type=float, default=1.0,
+                       help='Loss mask weight for image tokens between <|img_start|> and <|img_end|>. '
+                            'Default 1.0 (normal loss). Set to 0.0 to fully mask image tokens.')
     group.add_argument('--no-create-attention-mask-in-dataloader', action='store_false',
                        help='If set, do not create attention_masks in dataloader.',
                        dest='create_attention_mask_in_dataloader')
