@@ -333,11 +333,12 @@ def forward_step(data_iterator, model: GPTModel):
         packed_seq_params = None
         if args.use_packed_seq_params:
             # Reshape tensors from [B, S] to [1, B*S] for THD format
-            batch_size, seq_len = tokens.shape
             tokens = tokens.view(1, -1)  # [1, B*S]
             labels = labels.view(1, -1)  # [1, B*S]
             loss_mask = loss_mask.view(1, -1)  # [1, B*S]
             position_ids = position_ids.view(1, -1)  # [1, B*S]
+            if args.sft and assistant_mask is not None:
+                assistant_mask = assistant_mask.view(1, -1) # [1, B*S]
             # Note: attention_mask not needed in THD format with packed_seq_params
 
             tokenizer = get_tokenizer()
@@ -406,7 +407,8 @@ def core_gpt_dataset_config_from_args(args):
         sft_pack_samples=args.sft_pack_samples,
         sft_equalize_sample_loss=args.sft_equalize_sample_loss,
         sft_load_loss_mask=args.sft_load_loss_mask,
-        skip_margin_samples=args.data_skip_margin_samples
+        skip_margin_samples=args.data_skip_margin_samples,
+        image_weight=args.image_weight,
     )
 
 

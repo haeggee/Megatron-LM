@@ -469,7 +469,10 @@ def get_batch_on_this_tp_rank(data_iterator):
        tokens=torch.empty((args.micro_batch_size,args.seq_length), dtype = torch.int64 , device = torch.cuda.current_device())
        labels=torch.empty((args.micro_batch_size,args.seq_length), dtype = torch.int64 , device = torch.cuda.current_device())
        loss_mask=torch.empty((args.micro_batch_size,args.seq_length), dtype = torch.float32 , device = torch.cuda.current_device())
-       assistant_mask=None
+       if args.sft:
+           assistant_mask=torch.empty((args.micro_batch_size,args.seq_length), dtype = torch.float32 , device = torch.cuda.current_device())
+       else:
+           assistant_mask=None
        if args.create_attention_mask_in_dataloader:
            attention_mask=torch.empty(
                 (args.micro_batch_size,1,args.seq_length,args.seq_length), dtype = torch.bool , device = torch.cuda.current_device()
