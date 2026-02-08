@@ -16,6 +16,7 @@ from megatron.core.datasets.megatron_tokenizer import MegatronTokenizer
 from megatron.core.datasets.utils import Split
 from megatron.core.datasets.utils_s3 import S3Config, is_s3_path
 from megatron.core.utils import log_single_rank
+from megatron.training import get_args
 
 logger = logging.getLogger(__name__)
 
@@ -128,13 +129,16 @@ class GPTDataset(MegatronDataset):
         self.cached_loss_mask = None
         self.cached_position_ids = None
 
+        args = get_args()
+
         # Image token loss masking
         self._image_weight = self.config.image_weight
-        self._img_start_id = None
-        self._img_end_id = None
+        self._first_vision_token_id = None
+        self._last_vision_token_id = None
         if self._image_weight != 1.0:
-            self._img_start_id = self.config.tokenizer.convert_tokens_to_ids("<|img_start|>")
-            self._img_end_id = self.config.tokenizer.convert_tokens_to_ids("<|img_end|>")
+            # Extract vision config from tokenizer
+            self._first_vision_token_id = args["vision_token_offset"]
+            self._last_vision_token_id = args["vision_token_offset"] + args["vision_vocab_size"]
 
         # Optional contiguous range of omni special tokens to skip in goldfish masking.
         self._goldfish_exemption_start = None
@@ -276,13 +280,8 @@ class GPTDataset(MegatronDataset):
             loss_mask[goldfish_labels == self._goldfish_token_id] = 0.0
 
         # Image token loss masking
-        if self._image_weight != 1.0 and self._img_start_id is not None:
-            from megatron.core.datasets.sft_dataset import get_matching_mask_by_start_end
-            image_mask = get_matching_mask_by_start_end(
-                labels,
-                torch.tensor([self._img_start_id], device=labels.device),
-                torch.tensor([self._img_end_id], device=labels.device),
-            )
+        if self._image_weight != 1.0 and self._first_vision_token_id is not None:
+            image_mask = (labels >= self._first_vision_token_id) & (labels <= self._last_vision_token_id)
             loss_mask[image_mask] = self._image_weight
 
         # Batch padding sequence so we mask the loss

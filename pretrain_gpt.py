@@ -295,6 +295,8 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, labels: torc
         if args.sft and assistant_mask is not None:
             # Use assistant_mask to identify assistant response tokens
             assistant_mask_flat = assistant_mask.view(-1).float()
+            assert (assistant_mask_flat >= 0).all(), f"assistant_mask has negative values: min={assistant_mask_flat.min()}"
+            assert (losses_flat >= 0).all(), f"CE losses have negative values: min={losses_flat.min()}"
             assistant_loss = torch.cat([
                 torch.sum(losses_flat * assistant_mask_flat).view(1),
                 assistant_mask_flat.sum().view(1)
