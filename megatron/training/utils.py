@@ -442,7 +442,7 @@ def get_batch_on_this_tp_rank(data_iterator):
            'loss_mask': data["loss_mask"].cuda(non_blocking = True),
            'attention_mask': None if "attention_mask" not in data else data["attention_mask"].cuda(non_blocking = True),
            'position_ids': data["position_ids"].cuda(non_blocking = True),
-           'assistant_mask': None if "assistant_mask" not in data else data["assistant_mask"].cuda(non_blocking = True),
+           'assistant_mask': None if "assistant_mask" not in data else data["assistant_mask"].float().cuda(non_blocking = True),
        }
 
        if args.pipeline_model_parallel_size == 1:
