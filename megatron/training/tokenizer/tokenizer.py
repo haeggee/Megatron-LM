@@ -243,12 +243,18 @@ class _HuggingFaceTokenizer(MegatronTokenizer):
     @property
     def img_begin_token(self):
         """Get pre-tokenized image begin token from tokenizer config."""
-        return self._tokenizer.init_kwargs.get('img_begin_token', None)
+        t_id = self._tokenizer.init_kwargs.get('img_begin_token', None)
+        if t_id is None:
+            t_id = self._tokenizer.convert_tokens_to_ids("<|img_start|>")
+        return t_id
 
     @property
     def img_end_token(self):
         """Get pre-tokenized image end token from tokenizer config."""
-        return self._tokenizer.init_kwargs.get('img_end_token', None)
+        t_id = self._tokenizer.init_kwargs.get('img_end_token', None)
+        if t_id is None:
+            t_id = self._tokenizer.convert_tokens_to_ids("<|img_end|>")
+        return t_id
 
 
 class _BertWordPieceTokenizer(MegatronTokenizer):

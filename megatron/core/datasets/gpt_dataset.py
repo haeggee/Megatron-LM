@@ -137,8 +137,14 @@ class GPTDataset(MegatronDataset):
         self._last_vision_token_id = None
         if self._image_weight != 1.0:
             # Extract vision config from tokenizer
-            self._first_vision_token_id = args["vision_token_offset"]
-            self._last_vision_token_id = args["vision_token_offset"] + args["vision_vocab_size"]
+            self._first_vision_token_id = args.vision_token_offset
+            self._last_vision_token_id = args.vision_token_offset + args.vision_vocab_size
+            log_single_rank(
+                logger,
+                logging.INFO,
+                f"VISION ID RANGE: {self._first_vision_token_id} {self._last_vision_token_id} apply weight {self._image_weight}",
+            )
+
 
         # Optional contiguous range of omni special tokens to skip in goldfish masking.
         self._goldfish_exemption_start = None
