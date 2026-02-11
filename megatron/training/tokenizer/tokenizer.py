@@ -99,7 +99,7 @@ def build_tokenizer(args, **kwargs):
     elif args.tokenizer_type == "SFTTokenizer":
         tokenizer = SFTTokenizer(
             args.tokenizer_model,
-            args.sft_tokenizer_prompt_format, 
+            args.sft_tokenizer_prompt_format,
         )
     elif args.tokenizer_type == 'NullMultimodalTokenizer':
         assert args.vocab_size is not None
@@ -781,7 +781,7 @@ class CustomTikTokenizer(MegatronLegacyTokenizer):
     @property
     def eos(self) -> int:
         return self._eos_id
-    
+
     @property
     def pad(self) -> int:
         return self._pad_id

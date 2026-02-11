@@ -17,6 +17,7 @@ from megatron.core.datasets.object_storage_utils import ObjectStorageConfig, is_
 from megatron.core.datasets.utils import Split
 from megatron.core.tokenizers import MegatronTokenizerBase
 from megatron.core.utils import log_single_rank
+from megatron.training import get_args
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,10 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
     """If provided, the sequence and document counts for each dataset. 
        Check --per-dataset-sequences-path
     """
+
+    image_weight: float = 1.0
+    """Loss weight for image tokens (between img_start and img_end). Default 1.0 (no change)."""
+
 
     def __post_init__(self) -> None:
         """Do asserts and set fields post init"""
@@ -126,12 +131,30 @@ class GPTDataset(MegatronDataset):
                 self.config.reset_attention_mask,
                 self.config.eod_mask_loss,
                 self.config.goldfish_loss,
+                self.config.image_weight != 1.0,
             ]
         )
         self.masks_and_position_ids_are_cached = False
         self.cached_attention_mask = None
         self.cached_loss_mask = None
         self.cached_position_ids = None
+
+        args = get_args()
+
+        # Image token loss masking
+        self._image_weight = self.config.image_weight
+        self._first_vision_token_id = None
+        self._last_vision_token_id = None
+        if self._image_weight != 1.0:
+            # Extract vision config from tokenizer
+            self._first_vision_token_id = args.vision_token_offset
+            self._last_vision_token_id = args.vision_token_offset + args.vision_vocab_size
+            log_single_rank(
+                logger,
+                logging.INFO,
+                f"VISION ID RANGE: {self._first_vision_token_id} {self._last_vision_token_id} apply weight {self._image_weight}",
+            )
+
 
         # Optional contiguous range of omni special tokens to skip in goldfish masking.
         self._goldfish_exemption_start = None
@@ -300,6 +323,11 @@ class GPTDataset(MegatronDataset):
             )
 
             loss_mask[goldfish_labels == self._goldfish_token_id] = 0.0
+
+        # Image token loss masking
+        if self._image_weight != 1.0 and self._first_vision_token_id is not None:
+            image_mask = (labels >= self._first_vision_token_id) & (labels <= self._last_vision_token_id)
+            loss_mask[image_mask] = self._image_weight
 
         # Batch padding sequence so we mask the loss
         if idx is None:
