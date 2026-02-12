@@ -17,7 +17,6 @@ from megatron.core.datasets.object_storage_utils import ObjectStorageConfig, is_
 from megatron.core.datasets.utils import Split
 from megatron.core.tokenizers import MegatronTokenizerBase
 from megatron.core.utils import log_single_rank
-from megatron.training import get_args
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +138,8 @@ class GPTDataset(MegatronDataset):
         self.cached_loss_mask = None
         self.cached_position_ids = None
 
+        # late import to prevent circular import
+        from megatron.training import get_args
         args = get_args()
 
         # Image token loss masking
