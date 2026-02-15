@@ -91,7 +91,7 @@ def get_standard_config_overrides(
     # Next construct the standard param group overrides for no weight decay on bias parameters
     #  as well as any length 1 parameters.
     param_length_1_match = ParamPredicate(
-        name="param_len_1", fn=lambda param: len(param.shape) == 1 and not ('alpha_p' in name or 'alpha_n' in name)
+        name="param_len_1", fn=lambda param: len(param.shape) == 1
     )
     param_wd_mult_key = ParamKey(name="*.bias", predicate=param_length_1_match)
     config_overrides[param_wd_mult_key] = ParamGroupOverride(wd_mult=0.0)
