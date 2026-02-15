@@ -276,20 +276,30 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, labels: torc
                 modalities.append((modality['name'], modality['offset'], modality['vocab_size']))
 
         sum_list = []
-        count_list = []
+        weighted_count_list = []
+        raw_count_list = []
         for name, offset, vocab_size in modalities:
             in_range = (labels_flat >= offset) & (labels_flat < offset + vocab_size)
-            weights = loss_mask_flat * in_range.float()
+            in_range_f = in_range.float()
+            weights = loss_mask_flat * in_range_f
             sum_list.append(torch.sum(losses_flat * weights))
-            count_list.append(torch.sum(weights))
+            weighted_count_list.append(torch.sum(weights))
+            raw_count_list.append(torch.sum(in_range_f))
 
-        modality_stats = torch.stack((torch.stack(sum_list), torch.stack(count_list)), dim=1)
+        modality_stats = torch.stack((
+            torch.stack(sum_list),
+            torch.stack(weighted_count_list),
+            torch.stack(raw_count_list),
+        ), dim=1)
         if args.context_parallel_size > 1:
             torch.distributed.all_reduce(modality_stats, group=mpu.get_context_parallel_group())
         torch.distributed.all_reduce(modality_stats, group=mpu.get_data_parallel_group())
 
         for i, (name, _, _) in enumerate(modalities):
+            # sum / weighted_count = per-token avg raw CE (image_weight cancels out)
             stats_dict[f'{name}_token_loss'] = (modality_stats[i, 0], modality_stats[i, 1])
+            # sum / raw_count = weighted avg contribution per token (reflects image_weight)
+            stats_dict[f'{name}_weighted_loss'] = (modality_stats[i, 0], modality_stats[i, 2])
 
         # Log separate assistant loss for SFT training
         if args.sft and assistant_mask is not None:
