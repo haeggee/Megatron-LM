@@ -5,8 +5,9 @@
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=288
-#SBATCH --environment=/iopsstor/scratch/cscs/yassine_turki/Megatron-LM/container/datatrove.toml # WARN(tj.solergibert) Modify path to your own file
+#SBATCH --environment=/capstor/store/cscs/swissai/a06/containers/data-pipeline-pretrain/data-pipeline.toml # WARN(tj.solergibert) Modify path to your own file
 #SBATCH --no-requeue
+
 input_folder=$1
 output_folder=$2
 tokenizer=$3
@@ -17,10 +18,10 @@ number_of_tasks=$7
 MEGATRON_LM_DIR=$8
 COLUMN_KEY=$9
 REHYDRATE_FLAG=${10}
+EXTENSION=${11:-.parquet}
+
 set -eo pipefail
 
-# # Make the local pretrain-data package importable inside the container
-# export PYTHONPATH=/iopsstor/scratch/cscs/$USER/pretrain-data/src:$PYTHONPATH
 # Setup ENV
 export HF_HUB_ENABLE_HF_TRANSFER=0
 # Setup directories
@@ -31,7 +32,9 @@ mkdir -p $output_folder
 echo "START TIME: $(date) | Preprocessing $paths_file with $number_of_tasks tasks per node with the $tokenizer tokenizer. Storing tokenized dataset in $output_folder"
 start_s=`date`
 start=`date +%s`
-numactl --membind=0-3 python3 $MEGATRON_LM_DIR/scripts/tokenization/preprocess_megatron.py --tokenizer-name-or-path $tokenizer --output-folder $output_folder --logging-dir $logging_dir --n-tasks $number_of_tasks --dataset $input_folder --paths-file $paths_file --column $COLUMN_KEY $REHYDRATE_FLAG
+
+numactl --membind=0-3 python3 $MEGATRON_LM_DIR/scripts/tokenization/preprocess_megatron.py --tokenizer-name-or-path $tokenizer --output-folder $output_folder --logging-dir $logging_dir --n-tasks $number_of_tasks --dataset $input_folder --paths-file $paths_file --column $COLUMN_KEY --extension $EXTENSION $REHYDRATE_FLAG
+
 end=`date +%s`
 end_s=`date`
 echo "FINISH TIME: $(date) | Preprocessed $paths_file ! Stored in $output_folder"

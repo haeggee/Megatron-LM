@@ -1,13 +1,13 @@
 """
-python3 preprocess_megatron.py --tokenizer-name-or-path meta-llama/Meta-Llama-3-8B --output-folder tokenized_datasets/fineweb-edu --n-tasks 16 --dataset datasets/fineweb-edu/raw-dataset-link --paths-file datasets/fineweb-edu/dumps/paths_file_0.txt
+python3 preprocess_megatron.py --tokenizer-name-or-path meta-llama/Meta-Llama-3-8B --output-folder tokenized_datasets/fineweb-edu --n-tasks 16 --dataset datasets/fineweb-edu/raw-dataset-link --paths-file datasets/fineweb-edu/dumps/paths_file_0.txt --extension .jsonl.zst
 """
 
 import argparse
 
 from data_pipeline_pretrain.pipeline.tokens import MegatronDocumentTokenizer
+from data_pipeline_pretrain.pipeline.tokens import Rehydrater
 from datatrove.executor.local import LocalPipelineExecutor
-from datatrove.pipeline.readers import ParquetReader
-from data_pipeline_pretrain.pipeline.tokens.rehydrater import Rehydrater
+from datatrove.pipeline.readers import ParquetReader, JsonlReader
 
 
 def get_args():
@@ -58,7 +58,13 @@ def get_args():
         "--dataset",
         type=str,
         required=True,
-        help="Path to a folder recursively containing multiple .parquet files",
+        help="Path to a folder recursively containing multiple data files",
+    )
+    group.add_argument(
+        "--extension",
+        type=str,
+        default=".parquet",
+        help="File extension to use. e.g. .parquet or .jsonl.zst. Default: .parquet",
     )
     group.add_argument(
         "--paths-file",
@@ -85,19 +91,27 @@ def get_args():
 
 def main(args):
     n_tasks = args.n_tasks
-    # Check number of files > n tasks
     with open(args.paths_file, "rb") as f:
         number_of_files = sum(1 for _ in f)
     if n_tasks > number_of_files:
         n_tasks = number_of_files
 
+    if "jsonl" in args.extension:
+        reader = JsonlReader(
+            data_folder=args.dataset,
+            paths_file=args.paths_file,
+            text_key=args.column,
+        )
+    else:
+        reader = ParquetReader(
+            data_folder=args.dataset,
+            paths_file=args.paths_file,
+            text_key=args.column,
+        )
+
     preprocess_executor = LocalPipelineExecutor(
         pipeline=[
-            ParquetReader(
-                data_folder=args.dataset,
-                paths_file=args.paths_file,
-                text_key=args.column,
-            ),
+            reader,
             *([Rehydrater()] if args.rehydrate else []),
             MegatronDocumentTokenizer(
                 output_folder=args.output_folder,
