@@ -2086,6 +2086,8 @@ def _add_regularization_args(parser):
                        help='Dropout probability for hidden state transformer.')
     group.add_argument('--weight-decay', type=float, default=0.01,
                        help='Weight decay coefficient for L2 regularization.')
+    group.add_argument('--weight-decay-on-xielu-alphas', action='store_true',
+                       help='Apply weight decay to XiELU alpha_p/alpha_n parameters.')
     group.add_argument('--start-weight-decay', type=float,
                        help='Initial weight decay coefficient for L2 regularization.')
     group.add_argument('--end-weight-decay', type=float,
