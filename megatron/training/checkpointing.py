@@ -414,7 +414,7 @@ def _build_sharded_state_dict_metadata(args: Namespace, dp_cp_group: Optional[to
     metadata['dp_cp_group'] = dp_cp_group
     return metadata
 
-def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floating_point_operations_so_far,
+def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floating_point_operations_so_far, gpuh_so_far,
                     checkpointing_context=None, pipeline_rank=None, expert_rank=None, tensor_rank=None, pipeline_parallel=None, expert_parallel=None, non_persistent_ckpt=False,
                     train_data_iterator=None, preprocess_common_state_dict_fn = None, release=False, tp_group: Optional[torch.distributed.ProcessGroup] = None, pp_group: Optional[torch.distributed.ProcessGroup] = None, dp_cp_group: Optional[torch.distributed.ProcessGroup] = None):
     """Save a model, optimizer and optionally dataloader checkpoint.
@@ -508,6 +508,14 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floati
         if not optimizer.is_stub_optimizer:
             optimizer.save_parameter_state(optim_checkpoint_name)
 
+    # LayerWiseDistributedOptimizer save optimizer state to file on different ranks
+    if getattr(args, "optimizer", "adam").startswith("dist_") and args.ckpt_format == 'torch':
+        dp_rank = mpu.get_data_parallel_rank()
+        optim_checkpoint_name = os.path.join(os.path.dirname(checkpoint_name), f"layer_wise_optimizer_{dp_rank}.pt")
+        ensure_directory_exists(optim_checkpoint_name)
+        if not optimizer.is_stub_optimizer:
+            optimizer.save_state_dict_to_file(optim_checkpoint_name)
+
     async_save_request = None
     if args.async_save:
         if ckpt_type == CheckpointType.LEGACY:
@@ -542,6 +550,7 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floati
 
         state_dict['num_floating_point_operations_so_far'] = num_floating_point_operations_so_far
         state_dict['tokens_so_far'] = args.consumed_train_samples * args.seq_length
+        state_dict['gpuh_so_far'] = gpuh_so_far
         if ckpt_type == CheckpointType.GLOBAL and ckpt_format == "torch_dist":
             if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
                 # TODO Handle non-empty directories (e.g., after a crash during saving).
@@ -1667,8 +1676,8 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
 
     # Checkpoint not loaded.
     if state_dict is None:
-        # Iteration, num_floating_point_operations_so_far and tokens_so_far default to 0.
-        return 0, 0, 0
+        # Iteration, num_floating_point_operations_so_far, tokens_so_far, gpuh_so_far default to 0.
+        return 0, 0, 0, 0
 
     # Set checkpoint version.
     set_checkpoint_version(state_dict.get('checkpoint_version', 0))
@@ -1693,6 +1702,7 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
                 sys.exit()
     num_floating_point_operations_so_far = state_dict.get('num_floating_point_operations_so_far', 0)
     tokens_so_far = state_dict.get('tokens_so_far', 0)
+    gpuh_so_far = state_dict.get('gpuh_so_far', 0)
 
     # Check arguments.
     if 'args' in state_dict and not args.finetune:
@@ -1738,7 +1748,12 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
     if not release and not args.finetune and not args.no_load_optim:
         try:
             # Load state dict.
-            if not skip_load_to_model_and_opt and optimizer is not None and not optimizer.is_stub_optimizer:
+            if getattr(args, "optimizer", "adam").startswith("dist_") and args.ckpt_format == 'torch':
+                # LayerWiseDistributedOptimizer load optimizer state from file on different ranks
+                dp_rank = mpu.get_data_parallel_rank()
+                optim_checkpoint_name = os.path.join(os.path.dirname(checkpoint_name), f"layer_wise_optimizer_{dp_rank}.pt")
+                optimizer.load_state_dict_from_file(optim_checkpoint_name)
+            elif not skip_load_to_model_and_opt and optimizer is not None and not optimizer.is_stub_optimizer:
                 optimizer.load_state_dict(state_dict['optimizer'])
 
             # Load distributed optimizer's custom parameter state.
@@ -1873,7 +1888,7 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
                     print_rank_0(">>> Inserting 'default_config' field into optimizer.param_groups...")
                 log_printed = True
 
-    return iteration, num_floating_point_operations_so_far, tokens_so_far
+    return iteration, num_floating_point_operations_so_far, tokens_so_far, gpuh_so_far
 
 
 def _to_dtensor(wrapped_model, model_state_dict):
