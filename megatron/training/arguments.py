@@ -498,7 +498,7 @@ def validate_args(args, defaults={}):
             args.cuda_graph_impl = "transformer_engine"
             del args.external_cuda_graph
 
-    if args.optimizer == "ademamix" and args.hyperball_mode in {"row", "col", "rowcol"}:
+    if args.optimizer == "ademamix" and args.hyperball_mode is not None:
         assert not args.distributed_optimizer
 
     # Set input defaults.
