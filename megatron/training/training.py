@@ -1234,7 +1234,7 @@ def get_megatron_optimizer_config(args: Any) -> OptimizerConfig:
 
     # Construct custom config_overrides for this branch:
     # - keep decoupled LR handling for embeddings/output
-    # - disable WD for bias
+    # - to disable WD for bias, set wd_mult to 0.0
     # - optionally enable WD for XiELU alpha params
     config_overrides = {}
     if args.decoupled_lr is not None:
@@ -1244,7 +1244,7 @@ def get_megatron_optimizer_config(args: Any) -> OptimizerConfig:
         config_overrides[ParamKey(attr="is_embedding_or_output_parameter")] = decoupled_lr_config
 
     config_overrides[ParamKey(name="*.bias")] = {"wd_mult": 0.0}
-    if args.weight_decay_on_xielu_alphas:
+    if not args.weight_decay_on_xielu_alphas:
         config_overrides[
             ParamKey(
                 name=(
@@ -1252,7 +1252,7 @@ def get_megatron_optimizer_config(args: Any) -> OptimizerConfig:
                     "*.activation_func.alpha_n",
                 )
             )
-        ] = {"wd_mult": 1.0}
+        ] = {"wd_mult": 0.0}
 
     # Previous default behavior (includes "all 1D params get wd_mult=0.0"), intentionally disabled.
     # config_overrides = get_standard_config_overrides(args.decoupled_lr, args.decoupled_min_lr)

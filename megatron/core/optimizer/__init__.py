@@ -149,10 +149,12 @@ def _get_param_groups(
                     if param_key.matches(param, name):
                         param_overrides_list.append(param_override)
 
+            # Default to no overrides for this parameter. Without this, parameters that
+            # do not match any key can inherit the last iterated override from
+            # config_overrides.items().
+            param_override: ParamGroupOverride | None = None
             if param_overrides_list:
-                param_override: ParamGroupOverride | None = combine_param_group_overrides(
-                    param_overrides_list
-                )
+                param_override = combine_param_group_overrides(param_overrides_list)
 
             is_expert_parallel = not getattr(param, 'allreduce', True)
 
