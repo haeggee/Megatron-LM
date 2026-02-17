@@ -140,6 +140,8 @@ def _get_param_groups(
         for name, param in model_chunk.named_parameters():
             if not param.requires_grad:
                 continue
+            if 'linear_qkv.weight' in name and len(param.shape) == 2:
+                param.is_qkv = True
 
             uses_default_config = False
             # Get optimizer config overrides for this parameter.
@@ -153,6 +155,8 @@ def _get_param_groups(
                 param_override: ParamGroupOverride | None = combine_param_group_overrides(
                     param_overrides_list
                 )
+            else:
+                param_override: ParamGroupOverride | None = None
 
             is_expert_parallel = not getattr(param, 'allreduce', True)
 
@@ -399,6 +403,10 @@ def _get_megatron_optimizer_based_on_param_groups(
                 "beta3_warmup": config.ademamix_beta3_warmup,
                 "alpha_warmup": config.ademamix_alpha_warmup,
                 "eps": config.adam_eps,
+                "hyperball_mode": config.hyperball_mode,
+                "hyperball_kind": config.hyperball_kind,
+                "hyperball_radius": config.hyperball_radius,
+                "hyperball_update": config.hyperball_update,
             }
 
             if config.use_precision_aware_optimizer:
@@ -415,7 +423,8 @@ def _get_megatron_optimizer_based_on_param_groups(
                         if len(opt.state[p]) == 0:
                             if config.adam_beta1 != 0:
                                 opt.state[p]['exp_avg_fast'] = torch.zeros_like(p.data)
-                            opt.state[p]['exp_avg_slow'] = torch.zeros_like(p.data)
+                            if config.alpha != 0:
+                                opt.state[p]['exp_avg_slow'] = torch.zeros_like(p.data)
                             opt.state[p]['exp_avg_sq'] = torch.zeros_like(p.data)
                         else:
                             opt.initialize_state(p)
@@ -544,6 +553,16 @@ def get_megatron_optimizer(
     Returns:
         Instance of MegatronOptimizer.
     """
+
+    if config.optimizer == "ademamix" and config.hyperball_mode is not None:
+        # We need to override the opt state defaults to disable hyperball normalization of 
+        # non-matrix weights and embeddings.
+        if config_overrides is None:
+            config_overrides = get_standard_config_overrides()
+        pred = ParamPredicate("no_hyperball",
+                              #fn=lambda param: False)
+                              fn=lambda param: len(param.shape) != 2 or getattr(param, 'is_embedding_or_output_parameter', False))
+        config_overrides[ParamKey(predicate=pred)] = ParamGroupOverride(hyperball_mode=None)
 
     log_single_rank(logger, logging.INFO, f'Setting up optimizer with config {config}')
 

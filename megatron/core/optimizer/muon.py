@@ -1,9 +1,10 @@
+# TODO split qkv normalization.
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 """Megatron muon optimizer wrapper to handle tensor-parallel."""
 
 import logging
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional, override
 
 import torch
 from torch.optim.optimizer import ParamsT
@@ -28,7 +29,7 @@ try:
         OrthogonalizedOptimizer,
         get_muon_scale_factor,
     )
-    from emerging_optimizers.orthogonalized_optimizers.muon_utils import newton_schulz_tp
+    from emerging_optimizers.orthogonalized_optimizers.muon_utils import newton_schulz_tp, newton_schulz
 
     HAVE_EMERGING_OPTIMIZERS = True
 except ImportError:
@@ -60,6 +61,11 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
         extra_scale_factor: float = 1.0,
         pg_collection: Optional[ProcessGroupCollection] = None,
         mode: Literal["blockwise", "duplicated", "distributed"] = "duplicated",
+        hyperball_mode: Optional[Literal["row", "col", "rowcol", "flat"]] = None,
+        hyperball_kind: Optional[Literal["l2", "standard", "spectral"]] = None,
+        hyperball_radius: Literal["learnable"] | float = 1.0,
+        hyperball_eps: float = 1e-8,
+        hyperball_update: float = True,
     ) -> None:
         if num_ns_steps < 1:
             raise ValueError(f"num_ns_steps must be at least 1, got {num_ns_steps}")
@@ -68,6 +74,7 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
             grad: torch.Tensor,
             tp_group: torch.distributed.ProcessGroup,
             partition_dim: int | None = None,
+            ignore_scale: bool = False,
         ) -> torch.Tensor:
             log_single_rank(
                 logger,
@@ -87,6 +94,8 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
                 mode="duplicated" if mode == "blockwise" else mode,
             )
             scale_factor = get_muon_scale_factor(size[0], size[1], mode=scale_mode)
+            if ignore_scale:
+                return orth_grad
             return orth_grad * scale_factor * extra_scale_factor
 
         self.pg_collection = pg_collection
@@ -94,6 +103,17 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
         self.split_qkv = split_qkv
         self.is_qkv_fn = is_qkv_fn
         self.qkv_split_shapes = qkv_split_shapes
+
+        self.hyperball_mode = hyperball_mode
+        self.hyperball_kind = hyperball_kind
+        self.hyperball_radius = hyperball_radius
+        self.hyperball_eps = hyperball_eps
+        self.hyperball_update = hyperball_update
+        if self.hyperball_mode is not None:
+            assert self.hyperball_kind is not None
+            assert self.hyperball_mode in {"row", "col", "rowcol", "flat"}
+            assert self.hyperball_kind in {"l2", "standard", "spectral"}
+            assert self.hyperball_kind != "spectral" or self.hyperball_mode == "flat"
 
         weight_decay_method = "decoupled" if use_decoupled_weight_decay else "l2"
         super().__init__(
@@ -107,7 +127,7 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
             scaled_orthogonalize_fn=scaled_orthogonalize_fn,
         )
 
-    def orthogonalize(self, p: torch.Tensor, grad: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    def orthogonalize(self, p: torch.Tensor, grad: torch.Tensor, ignore_scale: bool = False, **kwargs: Any) -> torch.Tensor:
         """Orthogonalize the momentum.
 
         Args:
@@ -151,15 +171,81 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
 
             # Apply Newton-Schulz and scales to each component, concat back
             qkv_grads = [
-                self.scaled_orthogonalize_fn(g, tp_group, partition_dim).view(
+                self.scaled_orthogonalize_fn(g, tp_group, partition_dim, ignore_scale=ignore_scale).view(
                     num_query_groups, -1, grad_shape[-1]
                 )
                 for g in qkv_grads
             ]
             grad = torch.cat(qkv_grads, dim=1).view(grad_shape)
         else:
-            grad = self.scaled_orthogonalize_fn(grad, tp_group, partition_dim)
+            grad = self.scaled_orthogonalize_fn(grad, tp_group, partition_dim, ignore_scale=ignore_scale)
         return grad
+
+    def _norm_mode_to_dim(self, mode: str) -> Optional[int]:
+        if mode == "col":
+            return 0
+        if mode == "row":
+            return 1
+        if mode == "flat":
+            return None
+        raise ValueError(f"Unknown mode {mode}")
+
+    # Hyperball constraint adapted from https://github.com/NVIDIA-NeMo/Emerging-Optimizers/blob/b8365dbdce94a979090af735698fabc6be497f06/emerging_optimizers/orthogonalized_optimizers/muon_hyperball.py.
+    @override
+    def pre_weight_update_fn_inplace(self, p: torch.Tensor, update: torch.Tensor) -> None:
+        """Store the original weight norm and normalize the update."""
+        if self.hyperball_mode is None:  # No normalization constraint requested.
+            return
+
+        if self.hyperball_radius == "learnable":
+            raise NotImplementedError(f"Learnable hyperball NYI")
+        if self.hyperball_mode == "rowcol":
+            raise NotImplementedError(f"Rowcol hyperball NYI")
+
+
+        # Normalize the update in-place and scale by R
+        # This modifies update to be: R * normalize(update)
+        R = self.hyperball_radius
+        self.state[p]["hyperball_R"] = R
+        dim = self._norm_mode_to_dim(self.hyperball_mode)
+        if not self.hyperball_update:
+            return
+        if self.hyperball_kind == "l2":
+            update_norm = update.norm(dim=dim, keepdim=True).clamp_min(self.hyperball_eps)
+            update.mul_(R / update_norm)
+        elif self.hyperball_kind == "spectral":
+            update_normalized = R * self.orthogonalize(p, update, ignore_scale=True)
+            update.mul_(0).add_(update_normalized)
+        else:  # standardization.
+            mu = update.mean(dim=dim, keepdim=True)
+            std = update.std(dim=dim, keepdim=True).clamp_min(self.hyperball_eps)
+            update.add_(mu).mul_(R / std)
+
+    
+    @override
+    def post_weight_update_fn_inplace(self, p: torch.Tensor, update: torch.Tensor) -> None:
+        """Normalize the updated weights and scale back to original norm."""
+        if self.hyperball_mode is None:  # No normalization constraint requested.
+            return
+
+        if self.hyperball_radius == "learnable":
+            raise NotImplementedError(f"Learnable hyperball error NYI")
+        if self.hyperball_mode == "rowcol":
+            raise NotImplementedError(f"Rowcol hyperball NYI")
+
+        # Normalize the result and scale back by R: p = R * (p / ||p||).
+        R = self.state[p]["hyperball_R"]
+        dim = self._norm_mode_to_dim(self.hyperball_mode)
+        if self.hyperball_kind == "l2":
+            p_norm = p.norm(dim=dim, keepdim=True).clamp_min(self.hyperball_eps)
+            p.mul_(R / p_norm)
+        elif self.hyperball_kind == "spectral":
+            p_normalized = R * self.orthogonalize(p, p, ignore_scale=True)
+            p.mul_(0).add_(p_normalized)
+        else:
+            mu = p.mean(dim=dim, keepdim=True)
+            std = p.std(dim=dim, keepdim=True).clamp_min(self.hyperball_eps)
+            p.add_(mu).mul_(R / std)
 
 
 def get_megatron_muon_optimizer(
@@ -271,6 +357,10 @@ def get_megatron_muon_optimizer(
         "extra_scale_factor": config.muon_extra_scale_factor,
         "pg_collection": pg_collection,
         "mode": config.muon_tp_mode,
+        "hyperball_mode": config.hyperball_mode,
+        "hyperball_kind": config.hyperball_kind,
+        "hyperball_radius": config.hyperball_radius,
+        "hyperball_update": config.hyperball_update,
     }
 
     # freezing nonlinear params and get param groups for muon

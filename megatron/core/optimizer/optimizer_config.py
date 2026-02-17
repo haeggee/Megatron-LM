@@ -2,7 +2,7 @@
 
 import fnmatch
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, Optional, Tuple, Union, Literal
 
 import torch
 
@@ -223,6 +223,18 @@ class OptimizerConfig:
 
     muon_extra_scale_factor: float = 1.0
     """Additional scale factor for the muon update."""
+
+    hyperball_mode: Optional[Literal["row", "col", "rowcol", "flat"]] = None
+    """When specified, enables hyperball constraint of the parameters, either row-wise, column-wise, row+column-wise or of the flattened vector."""
+
+    hyperball_kind: Optional[Literal["l2", "standard", "spectral"]] = "l2"
+    """When hyperball constraint is enabled, specified the normalization to perform, either l2 normalization, (x-mu)/std standardization or spectral norm."""
+
+    hyperball_radius: Literal["learnable"] | float = 1.0
+    """When hyperball constraint is enabled, sets the hyperball radius (float), or sets it as a learnable scale."""
+
+    hyperball_update: bool = True
+    """If enabled, then updates will also be projected to the hyperball."""
 
     # AdEMAMix
     ademamix_alpha: float = 2.0

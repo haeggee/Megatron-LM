@@ -30,6 +30,16 @@ WEIGHT_DECAY=0.1
 MIN_LR=1e-8
 OPT=adam
 
+BETA1=0.9
+BETA2=0.95
+BETA3=0.999
+ALPHA=5
+
+HYPERBALL=false
+HB_KIND=l2
+HB_R=1
+HB_NOUPDATE=false
+
 # Misc. defaults.
 EXTRA_LOG=true
 
@@ -51,6 +61,15 @@ usage () {
 	echo " --init <float>: Change init std."
 	# Optimizer settings.
 	echo " --opt <adam/dmuon/muon/ademamix> (default=$OPT)"
+	echo " --b1: beta1 (adam,muon&ademamix)"
+	echo " --b2: beta2 (adam&ademamix)"
+	echo " --b3: beta3 (ademamix)"
+	echo " --alpha: ademamix alpha"
+	echo " --wd: weight decay"
+	echo " --hb <row/col/rowcol/flat>: Enables hyperball training"
+	echo " --hb-kind <l2/standard/spectral>: hyperball kind"
+	echo " --hb-r <learnable/float>: hyperball radius"
+	echo " --hb-nu: hyperball dont normalize update"
 	# Logs.
 	echo " --wandb-name <str>: Specify wandb name."
 	echo " --no-extra-log"
@@ -131,8 +150,7 @@ SUFFIX=""
 while [[ $# -gt 0 ]]; do
 	case $1 in
 		# Misc settings.
-		--nodes)
-			NODES=$2; shift 2;;
+		--nodes) NODES=$2; shift 2;;
 		--extra-name)
 			EXTRA_NAME="-$2"; shift 2;;
 		--time)
@@ -153,6 +171,24 @@ while [[ $# -gt 0 ]]; do
 		# Opt settings.
 		--opt)
 			OPT=$2; shift 2;;
+		--b1)
+			BETA1=$2; shift 2;;
+		--b2)
+			BETA2=$2; shift 2;;
+		--b3)
+			BETA3=$2; shift 2;;
+		--alpha)
+			ALPHA=$2; shift 2;;
+		--wd)
+			WEIGHT_DECAY=$2; shift 2;;
+		--hb)
+			HYPERBALL=$2; shift 2;;
+		--hb-kind)
+			HB_KIND=$2; shift 2;;
+		--hb-r)
+			HB_R=$2; shift 2;;
+		--hb-nu)
+			HB_NOUPDATE=true; shift;;
 		# Logs.
 		--wandb-name)
 			WANDB_NAME=$2; shift 2;;
@@ -168,12 +204,46 @@ done
 #= MIDDLE: Set up arguments. =#
 # Opt settings.
 OPT_ARGS=()
-if [[ $OPT != adam ]]; then
+if [[ $OPT = adam ]]; then
+	if [[ $HYPERBALL != false ]]; then
+		echo "Adam hypersphere NYI"
+		exit 1
+	fi
+	if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.95 ]]; then
+		SUFFIX=${SUFFIX}-b${BETA1}_$BETA2
+	fi
+elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
 	SUFFIX=$SUFFIX-$OPT
+	if [[ $BETA1 != 0.9 ]]; then
+		SUFFIX=${SUFFIX}_m$BETA1
+	fi
 	if [[ $OPT = dmuon ]]; then
 		OPT=dist_muon
 	fi
-else
+elif [[ $OPT = ademamix ]]; then
+	SUFFIX=$SUFFIX-$OPT
+	if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.95 ]] || [[ $BETA3 != 0.999 ]]; then
+		SUFFIX=${SUFFIX}_b${BETA1}_${BETA2}_$BETA3
+	fi
+	if [[ $ALPHA != 5 ]]; then
+		SUFFIX=${SUFFIX}_a$ALPHA
+	fi
+fi
+
+if [[ $WEIGHT_DECAY != 0.1 ]]; then
+	SUFFIX=$SUFFIX-wd$WEIGHT_DECAY
+fi
+
+if [[ $HYPERBALL != false ]]; then
+	SUFFIX=$SUFFIX-HB${HYPERBALL}${HB_R}_$HB_KIND
+	OPT_ARGS+=(--hyperball-mode $HYPERBALL --hyperball-kind $HB_KIND --hyperball-radius $HB_R)
+	if [[ $HB_NOUPDATE = true ]]; then
+		SUFFIX=${SUFFIX}_nu
+		OPT_ARGS+=(--hyperball-no-update)
+	fi
+fi
+
+if [[ $OPT != muon ]] || [[ $OPT != dmuon ]]; then
 	OPT_ARGS+=(--overlap-grad-reduce --use-distributed-optimizer)
 fi
 
@@ -281,8 +351,13 @@ TRAINING_ARGS=(
 	--eval-interval $((ITERS + 1))
 	--eval-iters 1
 	--weight-decay $WEIGHT_DECAY
-	--adam-beta1 0.9 
-	--adam-beta2 0.95
+	--adam-beta1 $BETA1
+	--muon-momentum $BETA1
+	--adam-beta2 $BETA2
+	--ademamix-beta3 $BETA3
+	--ademamix-alpha $ALPHA
+	--ademamix-beta3-warmup $ITERS
+	--ademamix-alpha-warmup $ITERS
 	--init-method-std $INIT_STD
 	--clip-grad 1.0
 	--lr $LR

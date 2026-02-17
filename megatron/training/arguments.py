@@ -49,6 +49,12 @@ from megatron.core.quantization.utils import (
 
 from megatron.training.argument_utils import ArgumentGroupFactory
 
+def _float_or_str(val: str) -> float | str:
+    try:
+        return float(val)
+    except ValueError:
+        return val
+
 def add_megatron_arguments(parser: argparse.ArgumentParser):
     """"Add Megatron-LM arguments to the given parser."""
 
@@ -2167,6 +2173,10 @@ def _add_regularization_args(parser):
                        help='How to perform NS calculation for tensor model parallel weights')
     group.add_argument('--muon-extra-scale-factor', type=float, default=1.0,
                        help='Additional scale factor for the muon update')
+    group.add_argument('--hyperball-mode', type=_float_or_str)
+    group.add_argument('--hyperball-kind', type=_float_or_str, default="l2")
+    group.add_argument('--hyperball-radius', type=_float_or_str, default=1.0)
+    group.add_argument('--hyperball-no-update', action="store_false", dest="hyperball_update")
     return parser
 
 
