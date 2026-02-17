@@ -1,5 +1,6 @@
 # TODO split qkv normalization.
 import math
+
 import torch
 from typing import List, Dict, Optional, Callable, Tuple, Any, Literal
 
@@ -43,6 +44,7 @@ class AdEMAMix(torch.optim.Optimizer):
         hyperball_radius: Literal["learnable"] | float = 1.0,
         hyperball_eps: float = 1e-8,
         hyperball_update: float = True,
+        qkv_split_shapes: Optional[tuple[int, int, int]] = None,
     ):
 
         if not 0.0 <= lr:
@@ -58,6 +60,8 @@ class AdEMAMix(torch.optim.Optimizer):
         if not 0.0 <= alpha:
             raise ValueError(f"Invalid alpha value: {alpha}")
 
+        self.qkv_split_shapes = qkv_split_shapes
+
         defaults = dict(
             lr=lr,
             betas=betas,
@@ -72,6 +76,7 @@ class AdEMAMix(torch.optim.Optimizer):
             hyperball_radius=hyperball_radius,
             hyperball_eps=hyperball_eps,
             hyperball_update=hyperball_update,
+            is_qkv=False,
         )
         super().__init__(params, defaults)
 
@@ -93,6 +98,7 @@ class AdEMAMix(torch.optim.Optimizer):
             alpha_final = group["alpha"]
             alpha_warmup = group["alpha_warmup"]
             step = group["step"]
+            is_qkv = group["is_qkv"]
 
             hyperball_kwargs = {
                 "hyperball_mode": group["hyperball_mode"],
@@ -163,9 +169,29 @@ class AdEMAMix(torch.optim.Optimizer):
                 if lmbda != 0.0:
                     update.add_(p, alpha=lmbda)
                 
-                self.pre_weight_update_fn_inplace(p, update, **hyperball_kwargs)
-                p.add_(update, alpha=-lr)
-                self.post_weight_update_fn_inplace(p, update, **hyperball_kwargs)
+                if is_qkv and group["hyperball_mode"] is not None:
+                    assert self.qkv_split_shapes is not None
+                    qkv = split_qkv(update, self.qkv_split_shapes)
+                    for g in qkv:
+                        self.pre_weight_update_fn_inplace(p, g, **hyperball_kwargs)
+                    update = merge_qkv(qkv, p.shape, self.qkv_split_shapes)
+                    p.add_(update, alpha=-lr)
+
+                    # Now do the same but this time with the parameter.
+                    # Note that we are still calling the pre_weight_update_fn_inplace
+                    # instead of post_weight_update_fn_inplace because it would
+                    # look for R in the state[p] and since p is a sharded view
+                    # it wouldn't be able to find it.
+                    qkv = split_qkv(p, self.qkv_split_shapes)
+                    hyperball_kwargs["hyperball_update"] = True
+                    for g in qkv:
+                        self.pre_weight_update_fn_inplace(p, g, **hyperball_kwargs)
+                    update = merge_qkv(qkv, p.shape, self.qkv_split_shapes)
+                    p.mul_(0).add_(update)
+                else:
+                    self.pre_weight_update_fn_inplace(p, update, **hyperball_kwargs)
+                    p.add_(update, alpha=-lr)
+                    self.post_weight_update_fn_inplace(p, update, **hyperball_kwargs)
 
         return loss
 
@@ -232,4 +258,20 @@ class AdEMAMix(torch.optim.Optimizer):
             p.add_(mu).mul_(R / std)
 
 
+def split_qkv(x, shapes: tuple[int, int, int]) -> list[torch.Tensor]:
+    # split grouped attention parameters (e.g., QKV, GQA, etc.)
+    shape = x.shape
+    num_query_groups = shape[0] // sum(shapes)
+    qkv = torch.split(
+        x.view(num_query_groups, sum(shapes), -1),
+        shapes,
+        dim=1,
+    )
+    qkv = [g.reshape(-1, shape[-1]) for g in qkv]
+    return qkv
 
+
+def merge_qkv(qkv, xshape: tuple[int, int], shapes: tuple[int, int, int]) -> list[torch.Tensor]:
+    num_query_groups = xshape[0] // sum(shapes)
+    qkv = [g.view(num_query_groups, -1, xshape[-1]) for g in qkv]
+    return torch.cat(qkv, dim=1).view(xshape)

@@ -140,8 +140,6 @@ def _get_param_groups(
         for name, param in model_chunk.named_parameters():
             if not param.requires_grad:
                 continue
-            if 'linear_qkv.weight' in name and len(param.shape) == 2:
-                param.is_qkv = True
 
             uses_default_config = False
             # Get optimizer config overrides for this parameter.
@@ -394,6 +392,17 @@ def _get_megatron_optimizer_based_on_param_groups(
                                 opt.initialize_state(p)
 
         elif config.optimizer == 'ademamix':
+            # use config to determine qkv split shapes.
+            # no need to check tp since tp splits by head and this is per head(group) dimension
+            num_attention_heads = model_chunks[0].config.num_attention_heads
+            num_query_groups = model_chunks[0].config.num_query_groups
+            kv_channels = model_chunks[0].config.kv_channels
+            qkv_split_shapes = [
+                num_attention_heads // num_query_groups * kv_channels,
+                kv_channels,
+                kv_channels,
+            ]
+
             kwargs = {
                 "params": param_groups,
                 "lr": config.lr,
@@ -407,6 +416,7 @@ def _get_megatron_optimizer_based_on_param_groups(
                 "hyperball_kind": config.hyperball_kind,
                 "hyperball_radius": config.hyperball_radius,
                 "hyperball_update": config.hyperball_update,
+                "qkv_split_shapes": qkv_split_shapes,
             }
 
             if config.use_precision_aware_optimizer:
@@ -557,11 +567,18 @@ def get_megatron_optimizer(
     if config.optimizer == "ademamix" and config.hyperball_mode is not None:
         # We need to override the opt state defaults to disable hyperball normalization of 
         # non-matrix weights and embeddings.
+        def no_hyperball(param):
+            if len(param.shape) != 2:
+                return True
+            if getattr(param, "is_embedding_or_output_parameter", False) and not config.hyperball_embeddings:
+                return True
+            return False
+
         if config_overrides is None:
             config_overrides = get_standard_config_overrides()
-        pred = ParamPredicate("no_hyperball",
-                              fn=lambda param: len(param.shape) != 2 or getattr(param, 'is_embedding_or_output_parameter', False))
+        pred = ParamPredicate("no_hyperball", fn=no_hyperball)
         config_overrides[ParamKey(predicate=pred)] = ParamGroupOverride(hyperball_mode=None)
+        config_overrides[ParamKey(name="*linear_qkv.weight")] = ParamGroupOverride(is_qkv=True)
 
     log_single_rank(logger, logging.INFO, f'Setting up optimizer with config {config}')
 

@@ -499,7 +499,7 @@ def validate_args(args, defaults={}):
             del args.external_cuda_graph
 
     if args.optimizer == "ademamix" and args.hyperball_mode is not None:
-        assert not args.distributed_optimizer
+        assert not args.use_distributed_optimizer
 
     # Set input defaults.
     for key in defaults:
@@ -2180,6 +2180,7 @@ def _add_regularization_args(parser):
     group.add_argument('--hyperball-kind', type=_float_or_str, default="l2")
     group.add_argument('--hyperball-radius', type=_float_or_str, default=1.0)
     group.add_argument('--hyperball-no-update', action="store_false", dest="hyperball_update")
+    group.add_argument('--hyperball-embeddings', action="store_true")
     return parser
 
 

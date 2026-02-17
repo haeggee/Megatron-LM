@@ -62,7 +62,7 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
         pg_collection: Optional[ProcessGroupCollection] = None,
         mode: Literal["blockwise", "duplicated", "distributed"] = "duplicated",
         hyperball_mode: Optional[Literal["row", "col", "rowcol", "flat"]] = None,
-        hyperball_kind: Optional[Literal["l2", "standard", "spectral"]] = None,
+        hyperball_kind: Optional[Literal["l2", "standard", "spectral", "orthogonal"]] = None,
         hyperball_radius: Literal["learnable"] | float = 1.0,
         hyperball_eps: float = 1e-8,
         hyperball_update: float = True,
@@ -112,8 +112,8 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
         if self.hyperball_mode is not None:
             assert self.hyperball_kind is not None
             assert self.hyperball_mode in {"row", "col", "rowcol", "flat"}
-            assert self.hyperball_kind in {"l2", "standard", "spectral"}
-            assert self.hyperball_kind != "spectral" or self.hyperball_mode == "flat"
+            assert self.hyperball_kind in {"l2", "standard", "spectral", "orthogonal"}
+            assert self.hyperball_kind not in {"spectral", "orthogonal"} or self.hyperball_mode == "flat"
 
         weight_decay_method = "decoupled" if use_decoupled_weight_decay else "l2"
         super().__init__(
@@ -214,6 +214,9 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
             update_norm = update.norm(dim=dim, keepdim=True).clamp_min(self.hyperball_eps)
             update.mul_(R / update_norm)
         elif self.hyperball_kind == "spectral":
+            update_norm = spectral_norm(update).clamp_min(self.hyperball_eps)
+            update.mul_(R / update_norm)
+        elif self.hyperball_kind == "orthogonal":
             update_normalized = R * self.orthogonalize(p, update, ignore_scale=True)
             update.mul_(0).add_(update_normalized)
         else:  # standardization.
@@ -240,6 +243,9 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
             p_norm = p.norm(dim=dim, keepdim=True).clamp_min(self.hyperball_eps)
             p.mul_(R / p_norm)
         elif self.hyperball_kind == "spectral":
+            p_norm = spectral_norm(p).clamp_min(self.hyperball_eps)
+            p.mul_(R / p_norm)
+        elif self.hyperball_kind == "orthogonal":
             p_normalized = R * self.orthogonalize(p, p, ignore_scale=True)
             p.mul_(0).add_(p_normalized)
         else:
@@ -438,3 +444,23 @@ def get_megatron_muon_optimizer(
             optimizers, config, pg_collection, init_state_fn_list=init_fns
         )
     return ChainedOptimizer(optimizers)
+
+
+def spectral_norm(X, num_iters=5):
+    """
+    Returns spectral norm approximation using power iteration.
+    """
+    # Initialize random vector
+    u = torch.randn(X.shape[0], 1, device=X.device)
+    u = u / torch.norm(u)
+
+    # Power iteration: u converges to the left singular vector
+    for _ in range(num_iters):
+        v = X.T @ u
+        v = v / torch.norm(v)
+        u = X @ v
+        u = u / torch.norm(u)
+
+    # Approximate spectral norm
+    sigma_max = (u.T @ X @ v)
+    return sigma_max

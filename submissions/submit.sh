@@ -39,6 +39,9 @@ HYPERBALL=false
 HB_KIND=l2
 HB_R=1
 HB_NOUPDATE=false
+HB_EMBED=false
+
+NO_WARMUP=false
 
 # Misc. defaults.
 EXTRA_LOG=true
@@ -57,6 +60,7 @@ usage () {
 	# Training settings..
 	echo " --tokens <int>: Amount of tokens to train with (in B)."
 	echo " --lr <float>: Learning rate."
+	echo " --no-warmup: Deactivates learning rate warmup"
 	# Architecture settings.
 	echo " --init <float>: Change init std."
 	# Optimizer settings.
@@ -70,6 +74,7 @@ usage () {
 	echo " --hb-kind <l2/standard/spectral>: hyperball kind"
 	echo " --hb-r <learnable/float>: hyperball radius"
 	echo " --hb-nu: hyperball dont normalize update"
+	echo " --hb-embed: hyperball normalize embeddings"
 	# Logs.
 	echo " --wandb-name <str>: Specify wandb name."
 	echo " --no-extra-log"
@@ -165,6 +170,8 @@ while [[ $# -gt 0 ]]; do
 			LR=$2; 
 			CHANGED_LR=true
 			shift 2;;
+		--no-warmup)
+			NO_WARMUP=true; shift;;
 		# Architecture settings.
 		--init)
 			NEW_INIT_STD=$2; shift 2;;
@@ -189,6 +196,8 @@ while [[ $# -gt 0 ]]; do
 			HB_R=$2; shift 2;;
 		--hb-nu)
 			HB_NOUPDATE=true; shift;;
+		--hb-embed)
+			HB_EMBED=true; shift;;
 		# Logs.
 		--wandb-name)
 			WANDB_NAME=$2; shift 2;;
@@ -204,9 +213,6 @@ done
 #= MIDDLE: Set up arguments. =#
 # Opt settings.
 OPT_ARGS=()
-if [[ $OPT != muon ]] || [[ $OPT != dmuon ]]; then
-fi
-
 if [[ $OPT = adam ]]; then
 	OPT_ARGS+=(--overlap-grad-reduce --use-distributed-optimizer)
 	if [[ $HYPERBALL != false ]]; then
@@ -249,6 +255,10 @@ if [[ $HYPERBALL != false ]]; then
 		SUFFIX=${SUFFIX}_nu
 		OPT_ARGS+=(--hyperball-no-update)
 	fi
+	if [[ $HB_EMBED = true ]]; then
+		SUFFIX=${SUFFIX}_emb
+		OPT_ARGS+=(--hyperball-embeddings)
+	fi
 fi
 
 if [[ $CHANGED_LR = true ]]; then
@@ -271,7 +281,12 @@ fi
 
 
 # Training settings.
-WARMUP=$((5*ITERS_PER_BT/2))  # 2.5BT.
+if [[ $NO_WARMUP = true ]]; then
+	SUFFIX=$SUFFIX-nw
+	WARMUP=0
+else
+	WARMUP=$((5*ITERS_PER_BT/2))  # 2.5BT.
+fi
 if [[ $TOKENS != $DEF_TOKENS ]]; then
 	SUFFIX=$SUFFIX-${TOKENS}BT
 fi

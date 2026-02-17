@@ -236,6 +236,9 @@ class OptimizerConfig:
     hyperball_update: bool = True
     """If enabled, then updates will also be projected to the hyperball."""
 
+    hyperball_embeddings: bool = False
+    """If enabled, then embeddings will also be normalized."""
+
     # AdEMAMix
     ademamix_alpha: float = 2.0
     """AdEMAMix alpha coefficient mixing the slow and fast EMAs."""
