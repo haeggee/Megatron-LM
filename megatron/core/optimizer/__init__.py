@@ -560,7 +560,6 @@ def get_megatron_optimizer(
         if config_overrides is None:
             config_overrides = get_standard_config_overrides()
         pred = ParamPredicate("no_hyperball",
-                              #fn=lambda param: False)
                               fn=lambda param: len(param.shape) != 2 or getattr(param, 'is_embedding_or_output_parameter', False))
         config_overrides[ParamKey(predicate=pred)] = ParamGroupOverride(hyperball_mode=None)
 

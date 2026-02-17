@@ -204,7 +204,11 @@ done
 #= MIDDLE: Set up arguments. =#
 # Opt settings.
 OPT_ARGS=()
+if [[ $OPT != muon ]] || [[ $OPT != dmuon ]]; then
+fi
+
 if [[ $OPT = adam ]]; then
+	OPT_ARGS+=(--overlap-grad-reduce --use-distributed-optimizer)
 	if [[ $HYPERBALL != false ]]; then
 		echo "Adam hypersphere NYI"
 		exit 1
@@ -222,11 +226,15 @@ elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
 	fi
 elif [[ $OPT = ademamix ]]; then
 	SUFFIX=$SUFFIX-$OPT
+	OPT_ARGS+=(--overlap-grad-reduce)
 	if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.95 ]] || [[ $BETA3 != 0.999 ]]; then
 		SUFFIX=${SUFFIX}_b${BETA1}_${BETA2}_$BETA3
 	fi
 	if [[ $ALPHA != 5 ]]; then
 		SUFFIX=${SUFFIX}_a$ALPHA
+	fi
+	if [[ $HYPERBALL != false ]]; then
+		OPT_ARGS+=(--overlap-grad-reduce)
 	fi
 fi
 
@@ -241,10 +249,6 @@ if [[ $HYPERBALL != false ]]; then
 		SUFFIX=${SUFFIX}_nu
 		OPT_ARGS+=(--hyperball-no-update)
 	fi
-fi
-
-if [[ $OPT != muon ]] || [[ $OPT != dmuon ]]; then
-	OPT_ARGS+=(--overlap-grad-reduce --use-distributed-optimizer)
 fi
 
 if [[ $CHANGED_LR = true ]]; then
