@@ -233,8 +233,8 @@ elif [[ $OPT = ademamix ]]; then
 	if [[ $ALPHA != 5 ]]; then
 		SUFFIX=${SUFFIX}_a$ALPHA
 	fi
-	if [[ $HYPERBALL != false ]]; then
-		OPT_ARGS+=(--overlap-grad-reduce)
+	if [[ $HYPERBALL = false ]]; then
+		OPT_ARGS+=(--use-distributed-optimizer)
 	fi
 fi
 
