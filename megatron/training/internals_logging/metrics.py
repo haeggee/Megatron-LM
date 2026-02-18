@@ -3,7 +3,7 @@
 """Metric computation functions for model internals logging."""
 
 import math
-from typing import Dict, Optional
+from typing import Dict
 import torch
 from torch import Tensor
 
@@ -40,47 +40,6 @@ def compute_activation_stats(tensor: Tensor) -> Dict[str, float]:
         'min': min_val,
         'max': max_val,
         'kurtosis': kurtosis,
-    }
-
-
-def compute_attention_metrics(attention_weights: Tensor) -> Dict[str, float]:
-    """Compute attention pattern metrics: entropy, sparsity.
-
-    Args:
-        attention_weights: Attention probability tensor [batch, heads, seq_q, seq_k]
-            or similar shape where last dimension sums to 1.
-
-    Returns:
-        Dictionary with attention metrics.
-    """
-    with torch.no_grad():
-        # Ensure we're working with float for numerical stability
-        attn = attention_weights.float()
-
-        # Entropy: -sum(p * log(p)) over the key dimension
-        # High entropy = diffuse attention, Low entropy = focused attention
-        eps = 1e-10
-        log_attn = (attn + eps).log()
-        entropy = -(attn * log_attn).sum(dim=-1).mean().item()
-
-        # Sparsity: fraction of attention weights below threshold
-        # High sparsity = most attention is concentrated on few tokens
-        threshold = 0.01
-        sparsity = (attn < threshold).float().mean().item()
-
-        # Top-k concentration: how much probability mass is in top-k positions
-        k = min(10, attn.size(-1))
-        topk_values = attn.topk(k, dim=-1).values
-        topk_concentration = topk_values.sum(dim=-1).mean().item()
-
-        # Max attention: average of max attention weight per query
-        max_attention = attn.max(dim=-1).values.mean().item()
-
-    return {
-        'entropy': entropy,
-        'sparsity': sparsity,
-        'topk_concentration': topk_concentration,
-        'max_attention': max_attention,
     }
 
 
@@ -211,37 +170,6 @@ def compute_weight_delta_per_neuron(
             result['per_neuron_min'] = full_delta
 
         return result
-
-
-def compute_activation_delta(
-    current: Tensor,
-    previous: Tensor,
-) -> float:
-    """Compute relative activation change: ||Y_t - Y_{t-1}|| / ||Y_{t-1}||.
-
-    Args:
-        current: Current activation tensor.
-        previous: Previous activation tensor.
-
-    Returns:
-        Relative L2 norm of the activation change.
-    """
-    with torch.no_grad():
-        # Move to same device if needed
-        if previous.device != current.device:
-            previous = previous.to(current.device)
-
-        # Sample same batch size for comparison
-        min_batch = min(current.size(0), previous.size(0))
-        curr_sample = current[:min_batch].float()
-        prev_sample = previous[:min_batch].float()
-
-        delta_norm = (curr_sample - prev_sample).norm().item()
-        prev_norm = prev_sample.norm().item()
-
-        if prev_norm > 1e-10:
-            return delta_norm / prev_norm
-        return 0.0
 
 
 def compute_angular_update(

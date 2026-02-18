@@ -13,16 +13,14 @@ class InternalsLoggingConfig:
     Attributes:
         enabled: Master switch to enable/disable internals logging.
         log_activation_stats: Log activation statistics (mean, std, min, max, kurtosis).
-        log_attention_patterns: Log attention pattern metrics (entropy, sparsity).
         log_gradient_stats: Log per-layer gradient statistics.
-        log_relative_updates: Log relative weight and activation changes.
+        log_relative_updates: Log relative weight changes (delta_W).
         log_angular_metrics: Log angular updates and gradient-weight alignment.
         layers_to_log: List of layer indices to log, or None for all layers.
         log_interval: How often to log (in iterations).
     """
     enabled: bool = False
     log_activation_stats: bool = True
-    log_attention_patterns: bool = True
     log_gradient_stats: bool = True
     log_relative_updates: bool = True
     log_angular_metrics: bool = True
@@ -43,7 +41,6 @@ class InternalsLoggingConfig:
         return cls(
             enabled=getattr(args, 'log_model_internals', False),
             log_activation_stats=getattr(args, 'log_activation_stats', False),
-            log_attention_patterns=getattr(args, 'log_attention_patterns', False),
             log_gradient_stats=getattr(args, 'log_gradient_stats', False),
             log_relative_updates=getattr(args, 'log_relative_updates', False),
             log_angular_metrics=getattr(args, 'log_angular_metrics', False),

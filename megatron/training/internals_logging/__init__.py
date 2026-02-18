@@ -3,8 +3,8 @@
 """Model internals logging module for Megatron-LM.
 
 This module provides comprehensive logging of model internals during training,
-including activation statistics, attention patterns, gradient statistics,
-and relative update sizes (delta_W, delta_Y).
+including activation statistics, gradient statistics, relative weight updates
+(delta_W), and angular metrics.
 
 Example usage:
     from megatron.training.internals_logging import (

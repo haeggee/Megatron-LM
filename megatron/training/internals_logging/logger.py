@@ -13,7 +13,6 @@ from .hooks import InternalsHookManager
 from .state_manager import InternalsStateManager
 from .metrics import (
     compute_activation_stats,
-    compute_attention_metrics,
     compute_gradient_norm,
     compute_gradient_weight_alignment,
     get_param_grad,
@@ -74,29 +73,17 @@ class InternalsLogger:
             activation_metrics = self._compute_activation_metrics()
             metrics.update(activation_metrics)
 
-        # 2. Log attention patterns
-        if self.config.log_attention_patterns:
-            attention_metrics = self._compute_attention_metrics()
-            metrics.update(attention_metrics)
-
-        # 3. Log gradient statistics
+        # 2. Log gradient statistics
         if self.config.log_gradient_stats:
             gradient_metrics = self._compute_gradient_metrics(model)
             metrics.update(gradient_metrics)
 
-        # 4. Log relative updates (delta_W, delta_Y)
+        # 3. Log relative weight updates (delta_W)
         if self.config.log_relative_updates:
-            # Weight deltas
             weight_delta_metrics = self.state_manager.compute_weight_deltas(model)
             metrics.update(weight_delta_metrics)
 
-            # Activation deltas
-            activation_delta_metrics = self.state_manager.compute_activation_deltas(
-                self.hook_manager.captured_activations
-            )
-            metrics.update(activation_delta_metrics)
-
-        # 5. Log angular metrics (direction changes, gradient-weight alignment)
+        # 4. Log angular metrics (direction changes, gradient-weight alignment)
         if self.config.log_angular_metrics:
             # Angular updates (direction changes between iterations)
             angular_metrics = self.state_manager.compute_angular_updates(model)
@@ -113,7 +100,6 @@ class InternalsLogger:
         # Update state for next iteration
         if self.config.log_relative_updates or self.config.log_angular_metrics:
             self.state_manager.update_weights(model)
-            self.state_manager.update_activations(self.hook_manager.captured_activations)
 
         # Clear captured data to free memory
         self.hook_manager.clear_captured_data()
@@ -130,21 +116,6 @@ class InternalsLogger:
             stats = compute_activation_stats(activation)
             for stat_name, value in stats.items():
                 metrics[f'activations/layer_{layer_num}/{stat_name}'] = value
-
-        return metrics
-
-    def _compute_attention_metrics(self) -> Dict[str, float]:
-        """Compute attention pattern metrics for all captured layers.
-
-        Returns:
-            Dictionary mapping metric names to values.
-        """
-        metrics = {}
-
-        for layer_num, attn_weights in self.hook_manager.captured_attention.items():
-            attn_stats = compute_attention_metrics(attn_weights)
-            for stat_name, value in attn_stats.items():
-                metrics[f'attention/layer_{layer_num}/{stat_name}'] = value
 
         return metrics
 

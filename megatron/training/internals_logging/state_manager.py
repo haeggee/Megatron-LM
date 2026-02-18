@@ -10,7 +10,6 @@ import torch.nn as nn
 from .metrics import (
     compute_weight_delta,
     compute_weight_delta_per_neuron,
-    compute_activation_delta,
     compute_angular_update,
 )
 
@@ -18,13 +17,11 @@ from .metrics import (
 class InternalsStateManager:
     """Manages state for computing delta metrics across training iterations.
 
-    This class caches previous weights and activations to compute relative
-    changes (delta_W, delta_Y) between iterations. Weights are stored on CPU
-    to conserve GPU memory.
+    This class caches previous weights to compute relative changes (delta_W)
+    between iterations. Weights are stored on CPU to conserve GPU memory.
 
     Attributes:
         previous_weights: Dictionary mapping parameter names to their previous values.
-        previous_activations: Dictionary mapping layer numbers to previous activation samples.
         initialized: Whether the first iteration's state has been captured.
         weights_on_gpu: Whether to keep previous weights on GPU (faster but uses more memory).
     """
@@ -38,7 +35,6 @@ class InternalsStateManager:
                 performance variance from PCIe transfers.
         """
         self.previous_weights: Dict[str, Tensor] = {}
-        self.previous_activations: Dict[int, Tensor] = {}
         self.initialized = False
         self.weights_on_gpu = weights_on_gpu
 
@@ -62,18 +58,6 @@ class InternalsStateManager:
                 if subset_params is not None and count >= subset_params:
                     break
         self.initialized = True
-
-    def update_activations(self, activations: Dict[int, Tensor]) -> None:
-        """Cache activation samples for delta_Y computation.
-
-        Args:
-            activations: Dictionary mapping layer numbers to activation tensors.
-        """
-        self.previous_activations.clear()
-        for layer_num, activation in activations.items():
-            # Sample first element and move to CPU to save GPU memory
-            sampled = activation[:1].detach().clone().cpu() if activation.dim() >= 1 else activation.detach().clone().cpu()
-            self.previous_activations[layer_num] = sampled
 
     def compute_weight_deltas(self, model: nn.Module) -> Dict[str, float]:
         """Compute relative weight updates for all cached parameters.
@@ -149,32 +133,6 @@ class InternalsStateManager:
 
         return metrics
 
-    def compute_activation_deltas(
-        self,
-        current_activations: Dict[int, Tensor],
-    ) -> Dict[str, float]:
-        """Compute relative activation changes for all cached layers.
-
-        Args:
-            current_activations: Dictionary mapping layer numbers to current activations.
-
-        Returns:
-            Dictionary mapping metric names to relative activation changes.
-        """
-        if not self.initialized:
-            return {}
-
-        metrics = {}
-        for layer_num, curr_act in current_activations.items():
-            if layer_num in self.previous_activations:
-                delta = compute_activation_delta(
-                    curr_act,
-                    self.previous_activations[layer_num]
-                )
-                metrics[f'delta_Y/layer_{layer_num}'] = delta
-
-        return metrics
-
     def compute_angular_updates(self, model: nn.Module) -> Dict[str, float]:
         """Compute angular changes (direction changes) for all cached parameters.
 
@@ -234,5 +192,4 @@ class InternalsStateManager:
     def clear(self) -> None:
         """Clear all cached state."""
         self.previous_weights.clear()
-        self.previous_activations.clear()
         self.initialized = False
