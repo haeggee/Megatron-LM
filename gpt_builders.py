@@ -96,6 +96,12 @@ def gpt_builder(args, pre_process, post_process, vp_stage=None, config=None, pg_
             pg_collection=pg_collection,
         )
 
+    print_rank_0("Built model:")
+    print_rank_0(model)
+    print_rank_0(f"type: {type(model)}")
+    print_rank_0("Config:")
+    print_rank_0(config)
+
     return model
 
 
@@ -128,6 +134,7 @@ def _get_transformer_layer_spec(use_te, config):
             differential_transformer=args.differential_attention,
             use_kitchen_attention=config.use_kitchen_attention,
             kitchen_attention_backend=config.kitchen_attention_backend,
+            config=config,
         )
     elif config.transformer_impl == "inference_optimized":
         return get_gpt_layer_with_inference_spec(

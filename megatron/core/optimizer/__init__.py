@@ -417,6 +417,8 @@ def _get_megatron_optimizer_based_on_param_groups(
                 "hyperball_radius": config.hyperball_radius,
                 "hyperball_update": config.hyperball_update,
                 "qkv_split_shapes": qkv_split_shapes,
+                "hyperball_split_heads": config.hyperball_split_heads,
+                "qkv_dim": kv_channels,
             }
 
             if config.use_precision_aware_optimizer:

@@ -270,7 +270,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         self,
         config: TransformerConfig,
         spec: Union[TransformerBlockSubmodules, ModuleSpec],
-        post_layer_norm: bool = True,
         pre_process: bool = True,
         post_process: bool = True,
         pg_collection: Optional[ProcessGroupCollection] = None,
@@ -287,7 +286,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         pp_rank = get_pg_rank(pp_group)
 
         self.submodules = _get_block_submodules(config, spec, vp_stage, pp_rank)
-        self.post_layer_norm = post_layer_norm
         self.pre_process = pre_process
         self.post_process = post_process
         self.vp_stage = vp_stage
@@ -373,8 +371,8 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
 
         # @TODO: add back account_for_embedding_in_pipeline_split (see issue #293)
         # In pipeline parallelism, we want to add this LN only to the last stage of the pipeline
-        # self.post_process and self.post_layer_norm guide this behavior
-        if self.submodules.layer_norm and self.post_process and self.post_layer_norm:
+        # self.post_process guide this behavior
+        if self.submodules.layer_norm and self.post_process and self.config.final_layernorm:
             self.final_layernorm = build_module(
                 self.submodules.layer_norm,
                 config=self.config,

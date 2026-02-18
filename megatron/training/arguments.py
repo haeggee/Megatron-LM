@@ -1476,6 +1476,15 @@ def core_transformer_config_from_args(args, config_class=None):
     if hasattr(args, "kitchen_attention_backend"):
         kw_args['kitchen_attention_backend'] = args.kitchen_attention_backend
 
+    if args.mlp_layer_scale is not None:
+        # We don't support TP yet because fc1 is column parallel, thus the input
+        # of the layerscale has size hidden_dim/tp, so we need to actually pass
+        # that hidden_size in the kwargs when constructing it.
+        assert args.tensor_model_parallel_size < 2
+        if args.mlp_layer_scale_gate_scale is not None:
+            assert args.swiglu
+            assert not kw_args['bias_activation_fusion']
+
     # Return config.
     return config_class(**kw_args)
 
@@ -1830,8 +1839,23 @@ def _add_network_size_args(parser):
                        help='Pad the vocab size to be divisible by this value.'
                        'This is added for computational efficieny reasons.')
     group.add_argument('--normalization', default='LayerNorm',
-                       choices=['LayerNorm', 'RMSNorm', 'SeeDNorm'],
+                       choices=['LayerNorm', 'RMSNorm', 'SeeDNorm', 'L2Norm'],
                        help='Which normalization technique to use.')
+    group.add_argument('--no-pre-norm', action='store_false', dest='pre_norm')
+    group.add_argument('--post-norm', action='store_true')
+    group.add_argument('--post-block-norm', action='store_true')
+    group.add_argument('--no-learnable-norms', action='store_false', dest='learnable_norms')
+    group.add_argument('--qk-layer-scale', type=float)
+    group.add_argument('--qk-layer-scale-scale', type=float)
+    group.add_argument('--layer-scale', type=float)
+    group.add_argument('--layer-scale-scale', type=float)
+    group.add_argument('--use-stream-minus-residual', action='store_true')
+    group.add_argument('--no-final-layernorm', action='store_false', dest='final_layernorm')
+    group.add_argument('--logits-layer-scale', type=float)
+    group.add_argument('--logits-layer-scale-scale', type=float)
+    group.add_argument('--mlp-layer-scale', type=float)
+    group.add_argument('--mlp-layer-scale-gate-scale', type=float)
+    group.add_argument('--softmax-scale', type=float)
     group.add_argument('--seednorm-init', type=float, default=1.0,
                           help='Initial value for the seednorm scaling parameter.')
     group.add_argument('--seednorm-activation', type=str, default='tanh',
@@ -2181,6 +2205,7 @@ def _add_regularization_args(parser):
     group.add_argument('--hyperball-radius', type=_float_or_str, default=1.0)
     group.add_argument('--hyperball-no-update', action="store_false", dest="hyperball_update")
     group.add_argument('--hyperball-embeddings', action="store_true")
+    group.add_argument('--hyperball-split-heads', action="store_true")
     return parser
 
 

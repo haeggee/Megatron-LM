@@ -45,6 +45,8 @@ class AdEMAMix(torch.optim.Optimizer):
         hyperball_eps: float = 1e-8,
         hyperball_update: float = True,
         qkv_split_shapes: Optional[tuple[int, int, int]] = None,
+        qkv_dim: Optional[int] = None,
+        hyperball_split_heads: bool = False,
     ):
 
         if not 0.0 <= lr:
@@ -61,6 +63,9 @@ class AdEMAMix(torch.optim.Optimizer):
             raise ValueError(f"Invalid alpha value: {alpha}")
 
         self.qkv_split_shapes = qkv_split_shapes
+        self.qkv_dim = qkv_dim
+        self.hyperball_split_heads = hyperball_split_heads
+        assert not self.hyperball_split_heads or self.qkv_dim is not None
 
         defaults = dict(
             lr=lr,
@@ -173,7 +178,14 @@ class AdEMAMix(torch.optim.Optimizer):
                     assert self.qkv_split_shapes is not None
                     qkv = split_qkv(update, self.qkv_split_shapes)
                     for g in qkv:
-                        self.pre_weight_update_fn_inplace(p, g, **hyperball_kwargs)
+                        if self.hyperball_split_heads:
+                            xs = split_heads(g, self.qkv_dim)
+                            for x in xs:
+                                self.pre_weight_update_fn_inplace(p, x, **hyperball_kwargs)
+                            x = merge_heads(xs, self.qkv_dim)
+                            g.mul_(0).add_(x)
+                        else:
+                            self.pre_weight_update_fn_inplace(p, g, **hyperball_kwargs)
                     update = merge_qkv(qkv, p.shape, self.qkv_split_shapes)
                     p.add_(update, alpha=-lr)
 
@@ -185,9 +197,21 @@ class AdEMAMix(torch.optim.Optimizer):
                     qkv = split_qkv(p, self.qkv_split_shapes)
                     hyperball_kwargs["hyperball_update"] = True
                     for g in qkv:
-                        self.pre_weight_update_fn_inplace(p, g, **hyperball_kwargs)
+                        if self.hyperball_split_heads:
+                            xs = split_heads(g, self.qkv_dim)
+                            for x in xs:
+                                self.pre_weight_update_fn_inplace(p, x, **hyperball_kwargs)
+                            #print(f"len xs: {len(xs)}. norms: {xs[0].norm(dim=0)}")
+                            x = merge_heads(xs, self.qkv_dim)
+                            g.mul_(0).add_(x)
+                            #print(f"g norms: {g.norm(dim=0)}")
+                        else:
+                            self.pre_weight_update_fn_inplace(p, g, **hyperball_kwargs)
+                            #print(f"g norms: {g.norm(dim=0)}")
                     update = merge_qkv(qkv, p.shape, self.qkv_split_shapes)
                     p.mul_(0).add_(update)
+                    #print(f"p norms: {p.norm(dim=0)}")
+                    #print("---")
                 else:
                     self.pre_weight_update_fn_inplace(p, update, **hyperball_kwargs)
                     p.add_(update, alpha=-lr)
@@ -271,7 +295,16 @@ def split_qkv(x, shapes: tuple[int, int, int]) -> list[torch.Tensor]:
     return qkv
 
 
-def merge_qkv(qkv, xshape: tuple[int, int], shapes: tuple[int, int, int]) -> list[torch.Tensor]:
+def split_heads(x, head_dim: int) -> tuple[torch.Tensor]:
+    # x.shape = (heads*head_dim, ?).
+    return torch.split(x, head_dim, dim=1)
+
+
+def merge_qkv(qkv, xshape: tuple[int, int], shapes: tuple[int, int, int]) -> torch.Tensor:
     num_query_groups = xshape[0] // sum(shapes)
     qkv = [g.view(num_query_groups, -1, xshape[-1]) for g in qkv]
     return torch.cat(qkv, dim=1).view(xshape)
+
+
+def merge_heads(xs, head_dim: int) -> torch.Tensor:
+    return torch.cat(xs, dim=1)

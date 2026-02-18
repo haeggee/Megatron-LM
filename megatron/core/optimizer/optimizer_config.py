@@ -239,6 +239,9 @@ class OptimizerConfig:
     hyperball_embeddings: bool = False
     """If enabled, then embeddings will also be normalized."""
 
+    hyperball_split_heads: bool = False
+    """If enabled, then each q,k,v head matrix will be normalized separately."""
+
     # AdEMAMix
     ademamix_alpha: float = 2.0
     """AdEMAMix alpha coefficient mixing the slow and fast EMAs."""

@@ -25,6 +25,9 @@ PYTHON_CACHE_DIR=/tmp/.python_cache
 NODES=1
 TIME=12:00:00
 
+# Arch defaults.
+NORMALIZATION=RMSNorm
+
 # Opt defaults.
 WEIGHT_DECAY=0.1
 MIN_LR=1e-8
@@ -40,6 +43,7 @@ HB_KIND=l2
 HB_R=1
 HB_NOUPDATE=false
 HB_EMBED=false
+HB_SPLIT_HEADS=false
 
 NO_WARMUP=false
 
@@ -63,6 +67,21 @@ usage () {
 	echo " --no-warmup: Deactivates learning rate warmup"
 	# Architecture settings.
 	echo " --init <float>: Change init std."
+	echo " --no-pre-norm"
+	echo " --no-final-layernorm"
+	echo " --normalization <RMSNorm/L2Norm>"
+	echo " --no-learnable-norms"
+	echo " --post-norm"
+	echo " --post-block-norm"
+	echo " --use-stream-minus-residual"
+	echo " --layer-scale <float>"
+	echo " --layer-scale-scale <float>"
+	echo " --softmax-scale <float>"
+	echo " --qk-norm <RMSNorm/L2Norm>"
+	echo " --mlp-layer-scale <float>"
+	echo " --mlp-layer-scale-gate-scale <float>"
+	echo " --logits-layer-scale <float>"
+	echo " --logits-layer-scale-scale <float>"
 	# Optimizer settings.
 	echo " --opt <adam/dmuon/muon/ademamix> (default=$OPT)"
 	echo " --b1: beta1 (adam,muon&ademamix)"
@@ -75,6 +94,7 @@ usage () {
 	echo " --hb-r <learnable/float>: hyperball radius"
 	echo " --hb-nu: hyperball dont normalize update"
 	echo " --hb-embed: hyperball normalize embeddings"
+	echo " --hb-split-heads: hyperball normalize q,k,v heads separately"
 	# Logs.
 	echo " --wandb-name <str>: Specify wandb name."
 	echo " --no-extra-log"
@@ -175,6 +195,40 @@ while [[ $# -gt 0 ]]; do
 		# Architecture settings.
 		--init)
 			NEW_INIT_STD=$2; shift 2;;
+		--no-pre-norm)
+			NO_PRE_NORM=true; shift;;
+		--no-final-layernorm)
+			NO_FINAL_LAYERNORM=true; shift;;
+		--normalization)
+			NORMALIZATION=$2; shift 2;;
+		--no-learnable-norms)
+			NO_LEARNABLE_NORMS=true; shift;;
+		--post-norm)
+			POST_NORM=true; shift;;
+		--post-block-norm)
+			POST_BLOCK_NORM=true; shift;;
+		--use-stream-minus-residual)
+			USE_STREAM_MINUS_RESIDUAL=true; shift;;
+		--layer-scale)
+			LAYER_SCALE=$2; shift 2;;
+		--layer-scale-scale)
+			LAYER_SCALE_SCALE=$2; shift 2;;
+		--softmax-scale)
+			SOFT_MAX_SCALE=$2; shift 2;;
+		--qk-norm)
+			QK_NORM=$2; shift 2;;
+		--qk-layer-scale)
+			QK_LAYER_SCALE=$2; shift 2;;
+		--qk-layer-scale-scale)
+			QK_LAYER_SCALE_SCALE=$2; shift 2;;
+		--mlp-layer-scale)
+			MLP_LAYER_SCALE=$2; shift 2;;
+		--mlp-layer-scale-gate-scale)
+			MLP_LAYER_SCALE_GATE_SCALE=$2; shift 2;;
+		--logits-layer-scale)
+			LOGITS_LAYER_SCALE=$2; shift 2;;
+		--logits-layer-scale-scale)
+			LOGITS_LAYER_SCALE_SCALE=$2; shift 2;;
 		# Opt settings.
 		--opt)
 			OPT=$2; shift 2;;
@@ -198,6 +252,8 @@ while [[ $# -gt 0 ]]; do
 			HB_NOUPDATE=true; shift;;
 		--hb-embed)
 			HB_EMBED=true; shift;;
+		--hb-split-heads)
+			HB_SPLIT_HEADS=true; shift;;
 		# Logs.
 		--wandb-name)
 			WANDB_NAME=$2; shift 2;;
@@ -231,7 +287,7 @@ elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
 		OPT=dist_muon
 	fi
 elif [[ $OPT = ademamix ]]; then
-	SUFFIX=$SUFFIX-$OPT
+	SUFFIX=$SUFFIX-amix
 	OPT_ARGS+=(--overlap-grad-reduce)
 	if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.95 ]] || [[ $BETA3 != 0.999 ]]; then
 		SUFFIX=${SUFFIX}_b${BETA1}_${BETA2}_$BETA3
@@ -259,6 +315,10 @@ if [[ $HYPERBALL != false ]]; then
 		SUFFIX=${SUFFIX}_emb
 		OPT_ARGS+=(--hyperball-embeddings)
 	fi
+	if [[ $HB_SPLIT_HEADS = true ]]; then
+		SUFFIX=${SUFFIX}_sh
+		OPT_ARGS+=(--hyperball-split-heads)
+	fi
 fi
 
 if [[ $CHANGED_LR = true ]]; then
@@ -279,6 +339,84 @@ if [[ ! -z ${NEW_INIT_STD+x} ]]; then
 	INIT_STD=$NEW_INIT_STD
 fi
 
+if [[ $NORMALIZATION != RMSNorm ]]; then
+	SUFFIX=$SUFFIX-$NORMALIZATION
+fi
+if [[ $NO_LEARNABLE_NORMS = true ]]; then
+	SUFFIX=$SUFFIX-fz
+	ARCH_ARGS+=(--no-learnable-norms)
+fi
+if [[ ! -z "${QK_NORM+xxx}" ]]; then
+	if [[ $QK_NORM = RMSNorm ]]; then
+		if [[ $NORMALIZATION != RMSNorm ]]; then
+			echo When using qkRMSNorm you must also use --normalization RMSNorm
+			exit 1
+		fi
+		SUFFIX=$SUFFIX-qkRMS
+		ARCH_ARGS+=(--qk-layernorm)
+	elif [[ $QK_NORM = L2Norm ]]; then
+		SUFFIX=$SUFFIX-qkL2
+		ARCH_ARGS+=(--qk-l2-norm)
+	fi
+fi
+
+if [[ $NO_PRE_NORM = true ]]; then
+	SUFFIX=$SUFFIX-nPre
+	ARCH_ARGS+=(--no-pre-norm)
+fi
+if [[ $NO_FINAL_LAYERNORM = true ]]; then
+	SUFFIX=$SUFFIX-nFin
+	ARCH_ARGS+=(--no-final-layernorm)
+fi
+if [[ $POST_NORM = true ]]; then
+	SUFFIX=$SUFFIX-pst
+	ARCH_ARGS+=(--post-norm)
+fi
+if [[ $POST_BLOCK_NORM = true ]]; then
+	SUFFIX=$SUFFIX-ppst
+	ARCH_ARGS+=(--post-block-norm)
+fi
+if [[ $USE_STREAM_MINUS_RESIDUAL = true ]]; then
+	SUFFIX=$SUFFIX-usmr
+	ARCH_ARGS+=(--use-stream-minus-residual)
+fi
+if [[ ! -z "${SOFT_MAX_SCALE+xxx}" ]]; then
+	SUFFIX=$SUFFIX-ss
+	ARCH_ARGS+=(--softmax-scale $SOFT_MAX_SCALE)
+fi
+
+if [[ ! -z "${LAYER_SCALE+xxx}" ]]; then
+	SUFFIX=$SUFFIX-ls
+	ARCH_ARGS+=(--layer-scale $LAYER_SCALE)
+	if [[ ! -z "${LAYER_SCALE_SCALE+xxx}" ]]; then
+		SUFFIX=${SUFFIX}S
+		ARCH_ARGS+=(--layer-scale-scale $LAYER_SCALE_SCALE)
+	fi
+fi
+if [[ ! -z "${QK_LAYER_SCALE+xxx}" ]]; then
+	SUFFIX=$SUFFIX-qkls
+	ARCH_ARGS+=(--qk-layer-scale $QK_LAYER_SCALE)
+	if [[ ! -z "${QK_LAYER_SCALE_SCALE+xxx}" ]]; then
+		SUFFIX=${SUFFIX}S
+		ARCH_ARGS+=(--qk-layer-scale-scale $QK_LAYER_SCALE_SCALE)
+	fi
+fi
+if [[ ! -z "${MLP_LAYER_SCALE+xxx}" ]]; then
+	SUFFIX=$SUFFIX-mlpls
+	ARCH_ARGS+=(--mlp-layer-scale $MLP_LAYER_SCALE)
+	if [[ ! -z "${MLP_LAYER_SCALE_GATE_SCALE+xxx}" ]]; then
+		SUFFIX=${SUFFIX}G
+		ARCH_ARGS+=(--mlp-layer-scale-gate-scale $MLP_LAYER_SCALE_GATE_SCALE --no-bias-swiglu-fusion)
+	fi
+fi
+if [[ ! -z "${LOGITS_LAYER_SCALE+xxx}" ]]; then
+	SUFFIX=$SUFFIX-lgsls
+	ARCH_ARGS+=(--logits-layer-scale $LOGITS_LAYER_SCALE)
+	if [[ ! -z "${LOGITS_LAYER_SCALE_SCALE+xxx}" ]]; then
+		SUFFIX=${SUFFIX}S
+		ARCH_ARGS+=(--logits-layer-scale-scale $LOGITS_LAYER_SCALE_SCALE)
+	fi
+fi
 
 # Training settings.
 if [[ $NO_WARMUP = true ]]; then
@@ -322,8 +460,9 @@ if [[ -z ${WANDB_NAME+x} ]]; then
 	WANDB_NAME=$EXP_NAME
 fi
 
-if [[ ${#WANDB_NAME} -gt 128 ]]; then
-	>&2 echo "WANDB_NAME is too long (it shouldn't exceed 128 characters): $WANDB_NAME"
+if [[ ${#WANDB_NAME} -gt 116 ]]; then
+	# We compare against 116 because WANDB_NAME gets appended -n$NODE_COUNT-j$JOB_ID in the final sbatch.
+	>&2 echo "WANDB_NAME is too long (it shouldn't exceed 116 characters): $WANDB_NAME"
 	exit 1
 fi
 
@@ -337,7 +476,7 @@ LLAMA_ARGS=(
 	--max-position-embeddings $SEQ_LEN
 	--tokenizer-type HuggingFaceTokenizer
 	--tokenizer-model $TOKENIZER
-	--normalization RMSNorm
+	--normalization $NORMALIZATION
 	--position-embedding-type rope
 	--attention-softmax-in-fp32
 	--disable-bias-linear

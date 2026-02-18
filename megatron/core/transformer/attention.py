@@ -122,7 +122,9 @@ class SelfAttentionSubmodules:
     core_attention: Union[ModuleSpec, type] = None
     linear_proj: Union[ModuleSpec, type] = None
     q_layernorm: Union[ModuleSpec, type] = None
+    q_layer_scale: Union[ModuleSpec, type] = None
     k_layernorm: Union[ModuleSpec, type] = None
+    k_layer_scale: Union[ModuleSpec, type] = None
     subln: Union[ModuleSpec, type] = None
 
 
@@ -1160,6 +1162,17 @@ class SelfAttention(Attention):
             )
         else:
             self.q_layernorm = None
+        if submodules.q_layer_scale is not None:
+            # TODO: What about TP>1? Can setting sequence_parallel here fix it?
+            self.q_layer_scale = build_module(
+                submodules.q_layer_scale,
+                hidden_size=self.hidden_size_per_attention_head,
+                initial_value=self.config.qk_layer_scale,
+                scale=self.config.qk_layer_scale_scale,
+            )
+        else:
+            self.q_layer_scale = None
+
 
         if submodules.k_layernorm is not None:
             self.k_layernorm = build_module(
@@ -1170,6 +1183,16 @@ class SelfAttention(Attention):
             )
         else:
             self.k_layernorm = None
+        if submodules.k_layer_scale is not None:
+            # TODO: What about TP>1? Can setting sequence_parallel here fix it?
+            self.k_layer_scale = build_module(
+                submodules.k_layer_scale,
+                hidden_size=self.hidden_size_per_attention_head,
+                initial_value=self.config.qk_layer_scale,
+                scale=self.config.qk_layer_scale_scale,
+            )
+        else:
+            self.k_layer_scale = None
 
     def run_realtime_tests(self):
         """Performs a consistency check.
@@ -1347,9 +1370,13 @@ class SelfAttention(Attention):
 
         if self.q_layernorm is not None:
             query = self.q_layernorm(query)
+        if self.q_layer_scale is not None:
+            query = self.q_layer_scale(query)
 
         if self.k_layernorm is not None:
             key = self.k_layernorm(key)
+        if self.k_layer_scale is not None:
+            key = self.k_layer_scale(key)
 
         if self.config.test_mode:
             self.run_realtime_tests()
