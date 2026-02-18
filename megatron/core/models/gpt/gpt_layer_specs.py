@@ -331,11 +331,10 @@ def get_gpt_layer_with_transformer_engine_spec(
                         q_layernorm=(
                             L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
                         ),
-                        q_layer_scale=LayerScale if config.qk_layer_scale is not None else IdentityOp,
                         k_layernorm=(
                             L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
                         ),
-                        k_layer_scale=LayerScale if config.qk_layer_scale is not None else IdentityOp,
+                        qk_layer_scale=LayerScale if config.qk_layer_scale is not None else IdentityOp,
                         subln=(
                             IdentityOp if not differential_transformer else qk_norm
                         ),
