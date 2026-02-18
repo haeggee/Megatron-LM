@@ -285,8 +285,9 @@ def _set_internals_logger(args):
     global _GLOBAL_INTERNALS_LOGGER
     _ensure_var_is_not_initialized(_GLOBAL_INTERNALS_LOGGER, 'internals logger')
 
-    if getattr(args, 'log_model_internals', False) and args.rank == (args.world_size - 1):
-        # Only initialize on the last rank (consistent with W&B writer)
+    if getattr(args, 'log_model_internals', False):
+        # Initialize on ALL ranks so all DP ranks can participate in gradient
+        # metric all-reduce. Only the logging rank (last rank) writes to W&B.
         from megatron.training.internals_logging import (
             InternalsLoggingConfig,
             InternalsHookManager,
@@ -294,10 +295,13 @@ def _set_internals_logger(args):
             InternalsLogger,
         )
 
+        is_logging_rank = (args.rank == (args.world_size - 1))
         config = InternalsLoggingConfig.from_args(args)
         hook_manager = InternalsHookManager(config)
         state_manager = InternalsStateManager(weights_on_gpu=config.weights_on_gpu)
-        _GLOBAL_INTERNALS_LOGGER = InternalsLogger(config, hook_manager, state_manager)
+        _GLOBAL_INTERNALS_LOGGER = InternalsLogger(
+            config, hook_manager, state_manager, is_logging_rank=is_logging_rank,
+        )
 
         if args.rank == 0:
             print('> setting up model internals logger ...', flush=True)

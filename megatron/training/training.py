@@ -2270,6 +2270,8 @@ def train(
     if internals_logger is not None:
         for model_chunk in model:
             internals_logger.hook_manager.register_hooks(model_chunk)
+        # Bind optimizer for distributed gradient metric computation.
+        internals_logger.bind_optimizer(optimizer)
 
     # Tracking loss.
     total_loss_dict = {}
@@ -2667,11 +2669,10 @@ def train(
         )
 
         # Log model internals to W&B if enabled.
+        # All DP ranks must call log_internals for distributed gradient collectives.
         if internals_logger is not None and iteration % args.log_interval == 0:
-            wandb_writer = get_wandb_writer()
-            if wandb_writer is not None:
-                # Use first model chunk for logging
-                internals_logger.log_internals(model[0], iteration, wandb_writer)
+            wandb_writer = get_wandb_writer()  # None on non-logging ranks
+            internals_logger.log_internals(model[0], iteration, wandb_writer)
             internals_logger.hook_manager.disable_capture()
 
         # Evaluation.

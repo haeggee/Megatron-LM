@@ -3,7 +3,7 @@
 """Metric computation functions for model internals logging."""
 
 import math
-from typing import Dict
+from typing import Dict, Optional
 import torch
 from torch import Tensor
 
@@ -273,3 +273,50 @@ def compute_gradient_weight_alignment(param: Tensor) -> Dict[str, float]:
         'radial_component': radial,
         'tangential_component': tangential,
     }
+
+
+def compute_grad_shard_norm_sq(param: Tensor, param_range) -> Tensor:
+    """Compute squared L2 norm of the gradient shard owned by this DP rank.
+
+    For distributed optimizer, each DP rank owns a sub-range of each parameter's
+    gradient. This computes ||grad[start:end]||^2 as a scalar CUDA tensor,
+    suitable for batched all-reduce across the DP group.
+
+    Args:
+        param: Model parameter with main_grad attribute.
+        param_range: Range object with .start and .end indicating the
+                     sub-range of the flattened parameter this rank owns.
+
+    Returns:
+        Scalar CUDA tensor containing ||grad_shard||^2.
+    """
+    grad = get_param_grad(param)
+    if grad is None:
+        return torch.zeros(1, dtype=torch.float32, device=torch.cuda.current_device())
+    with torch.no_grad():
+        shard = grad.view(-1)[param_range.start:param_range.end].float()
+        return (shard * shard).sum().unsqueeze(0)
+
+
+def compute_grad_weight_dot_shard(param: Tensor, param_range) -> Tensor:
+    """Compute dot product of gradient shard and weight shard owned by this DP rank.
+
+    For gradient-weight alignment, we need grad . weight. With distributed optimizer,
+    weights are all-gathered (identical on all ranks), and the gradient shard
+    corresponds to the same sub-range. We compute the partial dot product on the
+    owned shard and all-reduce later.
+
+    Args:
+        param: Model parameter with main_grad and data attributes.
+        param_range: Range object indicating owned sub-range.
+
+    Returns:
+        Scalar CUDA tensor containing grad_shard . weight_shard.
+    """
+    grad = get_param_grad(param)
+    if grad is None:
+        return torch.zeros(1, dtype=torch.float32, device=torch.cuda.current_device())
+    with torch.no_grad():
+        grad_shard = grad.view(-1)[param_range.start:param_range.end].float()
+        weight_shard = param.data.view(-1)[param_range.start:param_range.end].float()
+        return (grad_shard * weight_shard).sum().unsqueeze(0)
