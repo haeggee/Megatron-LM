@@ -9,37 +9,53 @@ from torch import Tensor
 
 
 def compute_activation_stats(tensor: Tensor) -> Dict[str, float]:
-    """Compute activation statistics: mean, std, min, max, kurtosis.
+    """Compute activation statistics per vector along the last dimension.
+
+    For a tensor of shape [..., d], each slice along the last dimension is
+    one activation vector. Returns the average of per-vector statistics
+    (mean, std, kurtosis) and the global min/max.
+
+    In distributed training, each rank calls this on its local micro-batch
+    and the results are all-reduced (AVG for mean/std/kurtosis, MIN/MAX
+    for extremes).
 
     Args:
-        tensor: Activation tensor of any shape.
+        tensor: Activation tensor of shape [..., d].
 
     Returns:
-        Dictionary with activation statistics.
+        Dictionary with mean, std, min, max, kurtosis.
     """
     with torch.no_grad():
-        flat = tensor.flatten().float()
+        d = tensor.shape[-1]
+        tensor_2d = tensor.reshape(-1, d).float()  # [N, d]
 
-        mean = flat.mean().item()
-        std = flat.std().item()
-        min_val = flat.min().item()
-        max_val = flat.max().item()
+        mean = tensor_2d.mean()
 
-        # Kurtosis: E[(X-mu)^4] / sigma^4 - 3 (excess kurtosis)
-        # Normal distribution has kurtosis = 0
-        if std > 1e-8:
-            centered = flat - mean
-            fourth_moment = centered.pow(4).mean()
-            kurtosis = (fourth_moment / (std ** 4) - 3).item()
-        else:
-            kurtosis = 0.0
+        var = tensor_2d.pow(2).mean()
+
+        act_rms = tensor_2d.pow(2).mean(-1).sqrt() # [N]
+        act_rms = act_rms.mean()
+
+        tensor_min = tensor_2d.min()
+        tensor_max = tensor_2d.max()
+
+        # kurtosis
+        act_rms_per_neuron = tensor_2d.pow(2).mean(0).sqrt() # [d]
+        denom = act_rms_per_neuron.pow(2).mean().pow(2)
+        kurtosis = act_rms_per_neuron.pow(4).mean() / (denom + 1e-8)
+
+        # all_rms = (tensor_2d**2).mean().sqrt()
+        # normed_acts = tensor_2d / (all_rms + 1e-8)
+        # alt_kurtosis = (normed_acts**2).mean(0).var()
+        # print(f"Kurtosis: {kurtosis.item()} versus {alt_kurtosis.item()}")
 
     return {
-        'mean': mean,
-        'std': std,
-        'min': min_val,
-        'max': max_val,
-        'kurtosis': kurtosis,
+        'mean': mean.item(),
+        'var': var.item(),
+        'min': tensor_min.item(),
+        'max': tensor_max.item(),
+        'kurtosis': kurtosis.item(),
+        'rms': act_rms.item(),
     }
 
 

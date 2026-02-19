@@ -78,13 +78,15 @@ class InternalsHookManager:
 
             # Detach and sample to save memory (take first sample from batch)
             if isinstance(hidden_states, Tensor):
-                # Sample: take first token position and first batch element
-                # Shape is typically [seq, batch, hidden] or [batch, seq, hidden]
-                sampled = hidden_states.detach()
-                # Only keep a small sample to reduce memory
-                if sampled.dim() >= 2:
-                    sampled = sampled[:min(8, sampled.size(0))]
-                self.captured_activations[layer_num] = sampled
+                # Shape is [seq, batch, hidden]
+                sampled = hidden_states
+                # TODO: Potentially only keep a small sample to reduce memory
+                # if sampled.dim() >= 2:
+                #     sampled = sampled[:min(8, sampled.size(0))]
+
+                # Only store if we haven't captured this layer yet
+                if self.captured_activations.get(layer_num, None) is None:
+                    self.captured_activations[layer_num] = sampled
 
         return hook
 

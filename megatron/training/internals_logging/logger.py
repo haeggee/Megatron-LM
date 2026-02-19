@@ -160,9 +160,10 @@ class InternalsLogger:
     def _compute_activation_metrics(self) -> Dict[str, float]:
         """Compute activation statistics with DP reduction.
 
-        Each DP rank captures activations from a different micro-batch.
-        We all-reduce sufficient statistics (count, sum, sum_sq, sum_4th, min, max)
-        so the final mean/std/kurtosis/min/max reflect the global batch.
+        Each DP rank calls compute_activation_stats on its local micro-batch.
+        For DP > 1 the per-rank results are all-reduced (AVG for mean/std/
+        kurtosis, MIN/MAX for extremes). This is exact when every rank has
+        the same number of activation vectors (uniform micro-batch size).
 
         ALL DP ranks must call this method when DP > 1.
         Only the logging rank returns populated metrics.
@@ -171,19 +172,13 @@ class InternalsLogger:
             Dictionary mapping metric names to values.
         """
         captured = self.hook_manager.captured_activations
-
-        # Determine canonical layer ordering across all DP ranks.
-        # All ranks should have the same set of layers (same hooks registered),
-        # so use sorted keys directly.
         layer_nums = sorted(captured.keys())
 
-        # If no DP group or single-GPU, compute directly on logging rank
         dp_world_size = 1
         if self._dp_group is not None:
             dp_world_size = torch.distributed.get_world_size(group=self._dp_group)
 
         if dp_world_size <= 1:
-            # No DP reduction needed
             if not self.is_logging_rank:
                 return {}
             metrics = {}
@@ -193,15 +188,14 @@ class InternalsLogger:
                     metrics[f'activations/layer_{layer_num}/{stat_name}'] = value
             return metrics
 
-        # DP reduction: 5 sum-reducible stats + min + max per layer.
-        # Raw moments allow exact global computation of mean, std, kurtosis.
-        # Sum-reducible: [count, sum_x, sum_x2, sum_x3, sum_x4]
         n_layers = len(layer_nums)
         if n_layers == 0:
             return {}
 
-        S = 5  # sum-reducible stats per layer
-        sum_stats = torch.zeros(n_layers * S, dtype=torch.float64,
+        # Each rank computes local per-vector stats, then we all-reduce.
+        # Pack: 4 AVG-reducible stats per layer (mean, var, kurtosis, rms)
+        A = 4
+        avg_stats = torch.zeros(n_layers * A, dtype=torch.float64,
                                 device=torch.cuda.current_device())
         min_stats = torch.full((n_layers,), float('inf'), dtype=torch.float64,
                                device=torch.cuda.current_device())
@@ -210,58 +204,31 @@ class InternalsLogger:
 
         for idx, layer_num in enumerate(layer_nums):
             if layer_num in captured:
-                activation = captured[layer_num]
-                with torch.no_grad():
-                    flat = activation.flatten().to(torch.float64)
-                    off = idx * S
-                    sum_stats[off + 0] = flat.numel()
-                    sum_stats[off + 1] = flat.sum()
-                    sum_stats[off + 2] = (flat * flat).sum()
-                    sum_stats[off + 3] = (flat * flat * flat).sum()
-                    sum_stats[off + 4] = (flat ** 4).sum()
-                    min_stats[idx] = flat.min()
-                    max_stats[idx] = flat.max()
+                stats = compute_activation_stats(captured[layer_num])
+                off = idx * A
+                avg_stats[off + 0] = stats['mean']
+                avg_stats[off + 1] = stats['var']
+                avg_stats[off + 2] = stats['kurtosis']
+                avg_stats[off + 3] = stats['rms']
+                min_stats[idx] = stats['min']
+                max_stats[idx] = stats['max']
 
-        # Three all-reduces: SUM, MIN, MAX
-        torch.distributed.all_reduce(sum_stats, op=torch.distributed.ReduceOp.SUM, group=self._dp_group)
+        torch.distributed.all_reduce(avg_stats, op=torch.distributed.ReduceOp.AVG, group=self._dp_group)
         torch.distributed.all_reduce(min_stats, op=torch.distributed.ReduceOp.MIN, group=self._dp_group)
         torch.distributed.all_reduce(max_stats, op=torch.distributed.ReduceOp.MAX, group=self._dp_group)
 
         if not self.is_logging_rank:
             return {}
 
-        # Derive final metrics from reduced sufficient statistics
         metrics = {}
         for idx, layer_num in enumerate(layer_nums):
-            off = idx * S
-            count = sum_stats[off + 0].item()
-            if count < 1:
-                continue
-
-            # Raw moments
-            ex1 = sum_stats[off + 1].item() / count   # E[X]
-            ex2 = sum_stats[off + 2].item() / count   # E[X^2]
-            ex3 = sum_stats[off + 3].item() / count   # E[X^3]
-            ex4 = sum_stats[off + 4].item() / count   # E[X^4]
-
-            mean = ex1
-            variance = ex2 - ex1 * ex1
-            std = max(0.0, variance) ** 0.5
-
-            # Excess kurtosis from raw moments:
-            # E[(X-mu)^4] = E[X^4] - 4*mu*E[X^3] + 6*mu^2*E[X^2] - 3*mu^4
-            if std > 1e-8:
-                mu = mean
-                central_4th = ex4 - 4*mu*ex3 + 6*mu*mu*ex2 - 3*mu**4
-                kurtosis = central_4th / (std ** 4) - 3.0
-            else:
-                kurtosis = 0.0
-
-            metrics[f'activations/layer_{layer_num}/mean'] = mean
-            metrics[f'activations/layer_{layer_num}/std'] = std
+            off = idx * A
+            metrics[f'activations/layer_{layer_num}/mean'] = avg_stats[off + 0].item()
+            metrics[f'activations/layer_{layer_num}/var'] = avg_stats[off + 1].item()
+            metrics[f'activations/layer_{layer_num}/kurtosis'] = avg_stats[off + 2].item()
+            metrics[f'activations/layer_{layer_num}/rms'] = avg_stats[off + 3].item()
             metrics[f'activations/layer_{layer_num}/min'] = min_stats[idx].item()
             metrics[f'activations/layer_{layer_num}/max'] = max_stats[idx].item()
-            metrics[f'activations/layer_{layer_num}/kurtosis'] = kurtosis
 
         return metrics
 
