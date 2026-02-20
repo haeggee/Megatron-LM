@@ -1138,7 +1138,6 @@ class SelfAttention(Attention):
         self.linear_qkv_out_dim = self.query_projection_size + 2 * self.kv_projection_size
         if self.config.attention_output_gate:
             self.linear_qkv_out_dim += self.config.kv_channels * self.config.num_attention_heads
-
         self.linear_qkv = build_module(
             submodules.linear_qkv,
             self.config.hidden_size,
@@ -1184,7 +1183,6 @@ class SelfAttention(Attention):
             )
         else:
             self.qk_layer_scale = None
-
 
     def run_realtime_tests(self):
         """Performs a consistency check.

@@ -103,7 +103,6 @@ class L2Norm(torch.nn.Module):
             torch.Tensor: The L2-normalized tensor.
         """
         x_float = x.float()
-        #return (x_float * torch.rsqrt(x_float.pow(2).mean(-1, keepdim=True) + self.eps)).type_as(x)
         return (x_float * torch.rsqrt(x_float.pow(2).sum(-1, keepdim=True) + self.eps)).type_as(x)
 
     def forward(self, x):

@@ -417,6 +417,7 @@ def _get_megatron_optimizer_based_on_param_groups(
                         if len(opt.state[p]) == 0:
                             if config.adam_beta1 != 0:
                                 opt.state[p]['exp_avg_fast'] = torch.zeros_like(p.data)
+                            opt.state[p]['exp_avg_slow'] = torch.zeros_like(p.data)
                             opt.state[p]['exp_avg_sq'] = torch.zeros_like(p.data)
                         else:
                             opt.initialize_state(p)

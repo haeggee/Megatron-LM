@@ -650,7 +650,6 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
                 )
         nvtx_range_pop(suffix="self_attn_bda")
 
-
         # Residual connection.
         residual = hidden_states
 
@@ -676,7 +675,6 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             )
 
         hidden_states = self.post_attention_block_layernorm(hidden_states)
-
         return hidden_states, context
 
     def _forward_mlp(self, hidden_states, inference_context=None):
@@ -826,7 +824,6 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         )
 
         output = self.post_mlp_block_layernorm(output)
-
         return output
 
     def sharded_state_dict(
