@@ -35,29 +35,25 @@ class InternalsStateManager:
                 performance variance from PCIe transfers.
         """
         self.previous_weights: Dict[str, Tensor] = {}
-        self.initialized = False
         self.weights_on_gpu = weights_on_gpu
 
-    def update_weights(self, model: nn.Module, subset_params: Optional[int] = None) -> None:
-        """Cache current weights for next iteration's delta computation.
+    def snapshot_weights(self, model: nn.Module) -> None:
+        """Snapshot current weights before the training step.
+
+        Called at the start of a logging iteration (before forward/backward/
+        optimizer) so that delta metrics measure the single-step change.
+        The snapshot is cleared after logging via clear().
 
         Args:
-            model: The model whose weights to cache.
-            subset_params: If set, only cache this many parameters (for memory efficiency).
+            model: The model whose weights to snapshot.
         """
         self.previous_weights.clear()
-        count = 0
         for name, param in model.named_parameters():
             if param.requires_grad:
-                # Clone weights - keep on GPU if configured, otherwise move to CPU
                 cloned = param.data.detach().clone()
                 if not self.weights_on_gpu:
                     cloned = cloned.cpu()
                 self.previous_weights[name] = cloned
-                count += 1
-                if subset_params is not None and count >= subset_params:
-                    break
-        self.initialized = True
 
     def compute_weight_deltas(self, model: nn.Module) -> Dict[str, float]:
         """Compute relative weight updates for all cached parameters.
@@ -68,7 +64,7 @@ class InternalsStateManager:
         Returns:
             Dictionary mapping metric names to relative weight changes.
         """
-        if not self.initialized:
+        if not self.previous_weights:
             return {}
 
         metrics = {}
@@ -144,7 +140,7 @@ class InternalsStateManager:
         Returns:
             Dictionary mapping metric names to angular change values.
         """
-        if not self.initialized:
+        if not self.previous_weights:
             return {}
 
         metrics = {}
@@ -190,6 +186,5 @@ class InternalsStateManager:
         return metrics
 
     def clear(self) -> None:
-        """Clear all cached state."""
+        """Clear all cached state to free memory."""
         self.previous_weights.clear()
-        self.initialized = False

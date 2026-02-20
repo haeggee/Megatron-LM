@@ -60,6 +60,19 @@ class InternalsLogger:
         self._dist_optimizer = None
         self._dp_group = None
 
+    def snapshot_weights(self, model: nn.Module) -> None:
+        """Snapshot current weights before the training step.
+
+        Called at the start of a logging iteration so that delta_W and angular
+        metrics measure the single-step weight change. Only the logging rank
+        needs the snapshot (delta/angular metrics are logging-rank-only).
+
+        Args:
+            model: The model whose weights to snapshot.
+        """
+        if self.is_logging_rank and (self.config.log_relative_updates or self.config.log_angular_metrics):
+            self.state_manager.snapshot_weights(model)
+
     def bind_optimizer(self, optimizer) -> None:
         """Bind optimizer for distributed gradient metric computation.
 
@@ -152,12 +165,9 @@ class InternalsLogger:
             metrics = prettify_metric_keys(metrics)
             wandb_writer.log(metrics, step=iteration)
 
-        # Update state for next iteration (logging rank only)
-        if self.is_logging_rank and (self.config.log_relative_updates or self.config.log_angular_metrics):
-            self.state_manager.update_weights(model)
-
-        # Clear captured data to free memory
+        # Clear captured data and weight snapshot to free memory
         self.hook_manager.clear_captured_data()
+        self.state_manager.clear()
 
     def _compute_activation_metrics(self) -> Dict[str, float]:
         """Compute activation statistics with DP reduction.

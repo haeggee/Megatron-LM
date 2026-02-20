@@ -2523,6 +2523,7 @@ def train(
         # Enable internals capture if this is a logging iteration.
         if internals_logger is not None and (iteration + 1) % args.log_interval == 0:
             internals_logger.hook_manager.enable_capture()
+            internals_logger.snapshot_weights(model[0])
 
         # For GRPO, we keep the data for a few epochs. DeepSeekMath paper calls this number $\mu$.
         # It is similar to a PPO epoch.
