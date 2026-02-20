@@ -37,7 +37,7 @@ $$\|G\|_2 = \sqrt{\sum_i G_i^2}$$
 
 ### Per-Layer Aggregates
 
-**Logged as:** `gradients_per_layer/<metric>/layer_{N:02d}`
+**Logged as:** `per_layer_gradients/<metric>/layer_{N:02d}`
 
 | Metric | Definition |
 |--------|------------|
@@ -97,7 +97,7 @@ These metrics measure directional changes in weight space, particularly useful f
 
 ### Per-Layer Aggregates
 
-**Logged as:** `angular_avg/<metric>/layer_{N:02d}`
+**Logged as:** `per_layer_angular/<metric>/layer_{N:02d}`
 
 | Metric | Definition |
 |--------|------------|
@@ -141,7 +141,7 @@ These metrics decompose the gradient into components parallel and perpendicular 
 
 ### Per-Layer Aggregates
 
-**Logged as:** `grad_weight_align_avg/<metric>/layer_{N:02d}`
+**Logged as:** `per_layer_grad_weight_align/<metric>/layer_{N:02d}`
 
 | Metric | Definition |
 |--------|------------|

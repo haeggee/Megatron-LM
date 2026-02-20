@@ -123,9 +123,9 @@ class InternalsStateManager:
         #         # Per-neuron aggregates at layer level
         #         pn_stats = layer_per_neuron_stats.get(layer_idx, {})
         #         if pn_stats.get('means'):
-        #             metrics[f'delta_W_per_neuron_avg/layer_{layer_idx}/mean'] = sum(pn_stats['means']) / len(pn_stats['means'])
-        #             metrics[f'delta_W_per_neuron_avg/layer_{layer_idx}/max'] = max(pn_stats['maxs'])
-        #             metrics[f'delta_W_per_neuron_avg/layer_{layer_idx}/std'] = sum(pn_stats['stds']) / len(pn_stats['stds'])
+        #             metrics[f'per_layer_delta_W_per_neuron/mean/layer_{layer_idx}/mean'] = sum(pn_stats['means']) / len(pn_stats['means'])
+        #             metrics[f'per_layer_delta_W_per_neuron/max/layer_{layer_idx}/max'] = max(pn_stats['maxs'])
+        #             metrics[f'per_layer_delta_W_per_neuron/std/layer_{layer_idx}/std'] = sum(pn_stats['stds']) / len(pn_stats['stds'])
 
         return metrics
 
