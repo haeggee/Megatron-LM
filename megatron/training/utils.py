@@ -664,8 +664,8 @@ def calc_params_l2_norm_per_param(model):
                 # For MoE parameters, always use the parameter's raw data (converted to fp32 if bf16).
                 value = tensor.data.float() if args.bf16 else tensor.data
                 local_norm_sq = torch.norm(value, p=2) ** 2
-                moe_group = mpu.get_expert_tensor_model_pipeline_parallel_group()
-                # Synchronize across the expert, model, and pipeline parallel group.
+                moe_group = mpu.get_expert_tensor_parallel_group()
+                # Synchronize across the expert and tensor parallel group (not PP).
                 torch.distributed.all_reduce(
                     local_norm_sq,
                     op=torch.distributed.ReduceOp.SUM,
@@ -691,14 +691,28 @@ def calc_params_l2_norm_per_param(model):
                         op=torch.distributed.ReduceOp.SUM,
                         group=dp_group
                     )
-                # Next, all-reduce across the model parallel (tensor and pipeline) group.
+                # Next, all-reduce across the tensor-model-parallel group only.
+                # We must NOT include PP here because different PP stages hold different
+                # parameters — per-parameter all-reduces would be mismatched across PP ranks.
                 torch.distributed.all_reduce(
                     local_norm_sq,
                     op=torch.distributed.ReduceOp.SUM,
-                    group=mpu.get_model_parallel_group()
+                    group=mpu.get_tensor_model_parallel_group()
                 )
                 final_norm = local_norm_sq.sqrt().item()
                 norm_dict[name] = final_norm
+
+    # Merge norm dicts across PP stages. Each PP rank holds a disjoint set of
+    # parameters, so we gather and merge rather than reduce.
+    pp_world_size = mpu.get_pipeline_model_parallel_world_size()
+    if pp_world_size > 1:
+        gathered = [None] * pp_world_size
+        torch.distributed.all_gather_object(
+            gathered, norm_dict, group=mpu.get_pipeline_model_parallel_group()
+        )
+        norm_dict = {}
+        for d in gathered:
+            norm_dict.update(d)
 
     norm_dict = {k.replace('.', '/'): v for k, v in norm_dict.items()}
     return prettify_metric_keys(norm_dict)
