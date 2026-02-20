@@ -88,48 +88,48 @@ class InternalsStateManager:
 
                 # Log per-neuron stats for weight matrices (2D+)
                 if param.dim() >= 2:
-                    metrics[f'delta_W_per_neuron/{clean_name}/mean'] = delta_stats['per_neuron_mean']
-                    metrics[f'delta_W_per_neuron/{clean_name}/std'] = delta_stats['per_neuron_std']
-                    metrics[f'delta_W_per_neuron/{clean_name}/max'] = delta_stats['per_neuron_max']
-                    metrics[f'delta_W_per_neuron/{clean_name}/min'] = delta_stats['per_neuron_min']
+                    metrics[f'delta_W_per_neuron/mean/{clean_name}'] = delta_stats['per_neuron_mean']
+                    # metrics[f'delta_W_per_neuron/std/{clean_name}'] = delta_stats['per_neuron_std']
+                    # metrics[f'delta_W_per_neuron/max/{clean_name}'] = delta_stats['per_neuron_max']
+                    # metrics[f'delta_W_per_neuron/min/{clean_name}'] = delta_stats['per_neuron_min']
 
-                # Aggregate by layer for summary metrics
-                if 'layers' in name:
-                    # Extract layer index from name like 'decoder.layers.0.self_attention.linear_qkv.weight'
-                    parts = name.split('.')
-                    for i, part in enumerate(parts):
-                        if part == 'layers' and i + 1 < len(parts):
-                            try:
-                                layer_idx = int(parts[i + 1])
-                                if layer_idx not in layer_deltas:
-                                    layer_deltas[layer_idx] = []
-                                    layer_per_neuron_stats[layer_idx] = {
-                                        'means': [], 'stds': [], 'maxs': [], 'mins': []
-                                    }
-                                layer_deltas[layer_idx].append(delta_stats['full'])
-                                if param.dim() >= 2:
-                                    layer_per_neuron_stats[layer_idx]['means'].append(delta_stats['per_neuron_mean'])
-                                    layer_per_neuron_stats[layer_idx]['stds'].append(delta_stats['per_neuron_std'])
-                                    layer_per_neuron_stats[layer_idx]['maxs'].append(delta_stats['per_neuron_max'])
-                                    layer_per_neuron_stats[layer_idx]['mins'].append(delta_stats['per_neuron_min'])
-                            except ValueError:
-                                pass
-                            break
+        #         # Aggregate by layer for summary metrics
+        #         if 'layers' in name:
+        #             # Extract layer index from name like 'decoder.layers.0.self_attention.linear_qkv.weight'
+        #             parts = name.split('.')
+        #             for i, part in enumerate(parts):
+        #                 if part == 'layers' and i + 1 < len(parts):
+        #                     try:
+        #                         layer_idx = int(parts[i + 1])
+        #                         if layer_idx not in layer_deltas:
+        #                             layer_deltas[layer_idx] = []
+        #                             layer_per_neuron_stats[layer_idx] = {
+        #                                 'means': [], 'stds': [], 'maxs': [], 'mins': []
+        #                             }
+        #                         layer_deltas[layer_idx].append(delta_stats['full'])
+        #                         if param.dim() >= 2:
+        #                             layer_per_neuron_stats[layer_idx]['means'].append(delta_stats['per_neuron_mean'])
+        #                             # layer_per_neuron_stats[layer_idx]['stds'].append(delta_stats['per_neuron_std'])
+        #                             # layer_per_neuron_stats[layer_idx]['maxs'].append(delta_stats['per_neuron_max'])
+        #                             # layer_per_neuron_stats[layer_idx]['mins'].append(delta_stats['per_neuron_min'])
+        #                     except ValueError:
+        #                         pass
+        #                     break
 
-        # Compute per-layer aggregate deltas
-        for layer_idx, deltas in layer_deltas.items():
-            if deltas:
-                avg_delta = sum(deltas) / len(deltas)
-                max_delta = max(deltas)
-                metrics[f'delta_W_avg/layer_{layer_idx}'] = avg_delta
-                metrics[f'delta_W_max/layer_{layer_idx}'] = max_delta
+        # # Compute per-layer aggregate deltas
+        # for layer_idx, deltas in layer_deltas.items():
+        #     if deltas:
+        #         avg_delta = sum(deltas) / len(deltas)
+        #         max_delta = max(deltas)
+        #         metrics[f'delta_W_avg/layer_{layer_idx}'] = avg_delta
+        #         metrics[f'delta_W_max/layer_{layer_idx}'] = max_delta
 
-                # Per-neuron aggregates at layer level
-                pn_stats = layer_per_neuron_stats.get(layer_idx, {})
-                if pn_stats.get('means'):
-                    metrics[f'delta_W_per_neuron_avg/layer_{layer_idx}/mean'] = sum(pn_stats['means']) / len(pn_stats['means'])
-                    metrics[f'delta_W_per_neuron_avg/layer_{layer_idx}/max'] = max(pn_stats['maxs'])
-                    metrics[f'delta_W_per_neuron_avg/layer_{layer_idx}/std'] = sum(pn_stats['stds']) / len(pn_stats['stds'])
+        #         # Per-neuron aggregates at layer level
+        #         pn_stats = layer_per_neuron_stats.get(layer_idx, {})
+        #         if pn_stats.get('means'):
+        #             metrics[f'delta_W_per_neuron_avg/layer_{layer_idx}/mean'] = sum(pn_stats['means']) / len(pn_stats['means'])
+        #             metrics[f'delta_W_per_neuron_avg/layer_{layer_idx}/max'] = max(pn_stats['maxs'])
+        #             metrics[f'delta_W_per_neuron_avg/layer_{layer_idx}/std'] = sum(pn_stats['stds']) / len(pn_stats['stds'])
 
         return metrics
 
@@ -156,8 +156,8 @@ class InternalsStateManager:
 
                 # Create a clean metric name
                 clean_name = name.replace('.', '/')
-                metrics[f'angular/{clean_name}/cos_similarity'] = angular_stats['cos_similarity']
-                metrics[f'angular/{clean_name}/degrees'] = angular_stats['angular_change_degrees']
+                metrics[f'angular/cos_similarity/{clean_name}'] = angular_stats['cos_similarity']
+                metrics[f'angular/degrees/{clean_name}'] = angular_stats['angular_change_degrees']
 
                 # Aggregate by layer for summary metrics
                 if 'layers' in name:
@@ -183,9 +183,9 @@ class InternalsStateManager:
                 avg_degrees = sum(stats['degrees']) / len(stats['degrees'])
                 max_degrees = max(stats['degrees'])
                 avg_cos = sum(stats['cos_sims']) / len(stats['cos_sims'])
-                metrics[f'angular_avg/layer_{layer_idx}/degrees'] = avg_degrees
-                metrics[f'angular_avg/layer_{layer_idx}/max_degrees'] = max_degrees
-                metrics[f'angular_avg/layer_{layer_idx}/cos_similarity'] = avg_cos
+                metrics[f'angular_avg/degrees/layer_{layer_idx:02d}'] = avg_degrees
+                metrics[f'angular_avg/max_degrees/layer_{layer_idx:02d}'] = max_degrees
+                metrics[f'angular_avg/cos_similarity/layer_{layer_idx:02d}'] = avg_cos
 
         return metrics
 

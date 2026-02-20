@@ -13,11 +13,11 @@ def compute_activation_stats(tensor: Tensor) -> Dict[str, float]:
 
     For a tensor of shape [..., d], each slice along the last dimension is
     one activation vector. Returns the average of per-vector statistics
-    (mean, std, kurtosis) and the global min/max.
+    (mean, std, kurtosis, min, max, rms).
 
-    In distributed training, each rank calls this on its local micro-batch
-    and the results are all-reduced (AVG for mean/std/kurtosis, MIN/MAX
-    for extremes).
+    min/max are the expectation of per-vector extremes: min(-1).mean() and
+    max(-1).mean(). In distributed training, all stats are AVG-reduced
+    across DP groups.
 
     Args:
         tensor: Activation tensor of shape [..., d].
@@ -36,8 +36,8 @@ def compute_activation_stats(tensor: Tensor) -> Dict[str, float]:
         act_rms = tensor_2d.pow(2).mean(-1).sqrt() # [N]
         act_rms = act_rms.mean()
 
-        tensor_min = tensor_2d.min()
-        tensor_max = tensor_2d.max()
+        tensor_min = tensor_2d.min(-1).values.mean()
+        tensor_max = tensor_2d.max(-1).values.mean()
 
         # kurtosis
         act_rms_per_neuron = tensor_2d.pow(2).mean(0).sqrt() # [d]
@@ -150,7 +150,7 @@ def compute_weight_delta_per_neuron(
 
         current_f = current.float()
         previous_f = previous.float()
-
+        
         # Full matrix relative change
         delta_norm = (current_f - previous_f).norm().item()
         prev_norm = previous_f.norm().item()
@@ -175,15 +175,9 @@ def compute_weight_delta_per_neuron(
             relative_delta[mask] = delta_per_neuron[mask] / prev_per_neuron[mask]
 
             result['per_neuron_mean'] = relative_delta.mean().item()
-            result['per_neuron_std'] = relative_delta.std().item() if num_neurons > 1 else 0.0
-            result['per_neuron_max'] = relative_delta.max().item()
-            result['per_neuron_min'] = relative_delta.min().item()
-        else:
-            # For 1D tensors (biases), just use the full delta
-            result['per_neuron_mean'] = full_delta
-            result['per_neuron_std'] = 0.0
-            result['per_neuron_max'] = full_delta
-            result['per_neuron_min'] = full_delta
+            # result['per_neuron_std'] = relative_delta.std().item() if num_neurons > 1 else 0.0
+            # result['per_neuron_max'] = relative_delta.max().item()
+            # result['per_neuron_min'] = relative_delta.min().item()
 
         return result
 

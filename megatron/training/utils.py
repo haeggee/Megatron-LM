@@ -3,6 +3,7 @@
 """General utilities."""
 import json
 import os
+import re
 import sys
 import warnings
 from contextlib import contextmanager
@@ -699,7 +700,32 @@ def calc_params_l2_norm_per_param(model):
                 final_norm = local_norm_sq.sqrt().item()
                 norm_dict[name] = final_norm
 
-    return norm_dict
+    norm_dict = {k.replace('.', '/'): v for k, v in norm_dict.items()}
+    return prettify_metric_keys(norm_dict)
+
+
+_LAYER_PATTERN = re.compile(r'/layers/(\d+)/')
+
+
+def prettify_metric_keys(metrics: dict) -> dict:
+    """Rewrite metric keys so layer indices sort lexicographically.
+
+    Moves the ``layers/<N>`` segment to the end as a zero-padded
+    ``layer_NN`` suffix.  Keys must use ``'/'`` separators.
+
+    Example:
+        ``decoder/layers/0/self_attention/linear_qkv/weight``
+        → ``decoder/self_attention/linear_qkv/weight/layer_00``
+    """
+    out = {}
+    for key, value in metrics.items():
+        m = _LAYER_PATTERN.search(key)
+        if m:
+            layer_id = int(m.group(1))
+            key = key[:m.start()] + key[m.end():]
+            key = f"{key}/layer_{layer_id:02d}"
+        out[key] = value
+    return out
 
 
 def to_empty_if_meta_device(module: torch.nn.Module, *, device: torch.device, recurse=True):

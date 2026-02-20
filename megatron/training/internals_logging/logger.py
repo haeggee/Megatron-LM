@@ -20,6 +20,7 @@ from .metrics import (
     get_param_grad,
 )
 
+from megatron.training.utils import prettify_metric_keys
 
 class InternalsLogger:
     """Main logger class that orchestrates model internals logging to W&B.
@@ -148,6 +149,7 @@ class InternalsLogger:
 
         # Log all metrics to W&B (logging rank only)
         if self.is_logging_rank and metrics and wandb_writer is not None:
+            metrics = prettify_metric_keys(metrics)
             wandb_writer.log(metrics, step=iteration)
 
         # Update state for next iteration (logging rank only)
@@ -185,7 +187,7 @@ class InternalsLogger:
             for layer_num, activation in captured.items():
                 stats = compute_activation_stats(activation)
                 for stat_name, value in stats.items():
-                    metrics[f'activations/layer_{layer_num}/{stat_name}'] = value
+                    metrics[f'activations/{stat_name}/layer_{layer_num}'] = value
             return metrics
 
         n_layers = len(layer_nums)
@@ -193,14 +195,10 @@ class InternalsLogger:
             return {}
 
         # Each rank computes local per-vector stats, then we all-reduce.
-        # Pack: 4 AVG-reducible stats per layer (mean, var, kurtosis, rms)
-        A = 4
+        # Pack: 6 AVG-reducible stats per layer (mean, var, kurtosis, rms, min, max)
+        A = 6
         avg_stats = torch.zeros(n_layers * A, dtype=torch.float64,
                                 device=torch.cuda.current_device())
-        min_stats = torch.full((n_layers,), float('inf'), dtype=torch.float64,
-                               device=torch.cuda.current_device())
-        max_stats = torch.full((n_layers,), float('-inf'), dtype=torch.float64,
-                               device=torch.cuda.current_device())
 
         for idx, layer_num in enumerate(layer_nums):
             if layer_num in captured:
@@ -210,12 +208,10 @@ class InternalsLogger:
                 avg_stats[off + 1] = stats['var']
                 avg_stats[off + 2] = stats['kurtosis']
                 avg_stats[off + 3] = stats['rms']
-                min_stats[idx] = stats['min']
-                max_stats[idx] = stats['max']
+                avg_stats[off + 4] = stats['min']
+                avg_stats[off + 5] = stats['max']
 
         torch.distributed.all_reduce(avg_stats, op=torch.distributed.ReduceOp.AVG, group=self._dp_group)
-        torch.distributed.all_reduce(min_stats, op=torch.distributed.ReduceOp.MIN, group=self._dp_group)
-        torch.distributed.all_reduce(max_stats, op=torch.distributed.ReduceOp.MAX, group=self._dp_group)
 
         if not self.is_logging_rank:
             return {}
@@ -223,12 +219,12 @@ class InternalsLogger:
         metrics = {}
         for idx, layer_num in enumerate(layer_nums):
             off = idx * A
-            metrics[f'activations/layer_{layer_num}/mean'] = avg_stats[off + 0].item()
-            metrics[f'activations/layer_{layer_num}/var'] = avg_stats[off + 1].item()
-            metrics[f'activations/layer_{layer_num}/kurtosis'] = avg_stats[off + 2].item()
-            metrics[f'activations/layer_{layer_num}/rms'] = avg_stats[off + 3].item()
-            metrics[f'activations/layer_{layer_num}/min'] = min_stats[idx].item()
-            metrics[f'activations/layer_{layer_num}/max'] = max_stats[idx].item()
+            metrics[f'activations/mean/layer_{layer_num:02d}'] = avg_stats[off + 0].item()
+            metrics[f'activations/var/layer_{layer_num:02d}'] = avg_stats[off + 1].item()
+            metrics[f'activations/kurtosis/layer_{layer_num:02d}'] = avg_stats[off + 2].item()
+            metrics[f'activations/rms/layer_{layer_num:02d}'] = avg_stats[off + 3].item()
+            metrics[f'activations/min/layer_{layer_num:02d}'] = avg_stats[off + 4].item()
+            metrics[f'activations/max/layer_{layer_num:02d}'] = avg_stats[off + 5].item()
 
         return metrics
 
@@ -252,7 +248,7 @@ class InternalsLogger:
                 grad_norm = compute_gradient_norm(param)
 
                 clean_name = name.replace('.', '/')
-                metrics[f'gradients/{clean_name}/norm'] = grad_norm
+                metrics[f'gradients/norm/{clean_name}'] = grad_norm
 
                 # Aggregate by layer
                 if 'layers' in name:
@@ -317,7 +313,7 @@ class InternalsLogger:
             grad_norm = local_norm_sqs[i].sqrt().item()
 
             clean_name = name.replace('.', '/')
-            metrics[f'gradients/{clean_name}/norm'] = grad_norm
+            metrics[f'gradients/norm/{clean_name}'] = grad_norm
 
             if 'layers' in name:
                 parts = name.split('.')
@@ -354,9 +350,9 @@ class InternalsLogger:
                 align_stats = compute_gradient_weight_alignment(param)
 
                 clean_name = name.replace('.', '/')
-                metrics[f'grad_weight_align/{clean_name}/cos'] = align_stats['cos_alignment']
-                metrics[f'grad_weight_align/{clean_name}/radial'] = align_stats['radial_component']
-                metrics[f'grad_weight_align/{clean_name}/tangential'] = align_stats['tangential_component']
+                metrics[f'grad_weight_align/cos/{clean_name}'] = align_stats['cos_alignment']
+                metrics[f'grad_weight_align/radial/{clean_name}'] = align_stats['radial_component']
+                metrics[f'grad_weight_align/tangential/{clean_name}'] = align_stats['tangential_component']
 
                 if 'layers' in name:
                     parts = name.split('.')
@@ -440,9 +436,9 @@ class InternalsLogger:
                 tangential = grad_norm * max(0.0, 1.0 - cos_align ** 2) ** 0.5
 
             clean_name = name.replace('.', '/')
-            metrics[f'grad_weight_align/{clean_name}/cos'] = cos_align
-            metrics[f'grad_weight_align/{clean_name}/radial'] = radial
-            metrics[f'grad_weight_align/{clean_name}/tangential'] = tangential
+            metrics[f'grad_weight_align/cos/{clean_name}'] = cos_align
+            metrics[f'grad_weight_align/radial/{clean_name}'] = radial
+            metrics[f'grad_weight_align/tangential/{clean_name}'] = tangential
 
             if 'layers' in name:
                 parts = name.split('.')
@@ -502,9 +498,9 @@ class InternalsLogger:
                 avg_norm = sum(norms) / len(norms)
                 max_norm = max(norms)
 
-                metrics[f'gradients_per_layer/layer_{layer_idx}/total_norm'] = total_norm
-                metrics[f'gradients_per_layer/layer_{layer_idx}/avg_norm'] = avg_norm
-                metrics[f'gradients_per_layer/layer_{layer_idx}/max_norm'] = max_norm
+                metrics[f'gradients_per_layer/total_norm/layer_{layer_idx:02d}'] = total_norm
+                metrics[f'gradients_per_layer/avg_norm/layer_{layer_idx:02d}'] = avg_norm
+                metrics[f'gradients_per_layer/max_norm/layer_{layer_idx:02d}'] = max_norm
 
         sorted_layers = sorted(layer_grad_norms.keys())
         for i in range(len(sorted_layers) - 1):
@@ -517,7 +513,7 @@ class InternalsLogger:
                 total_l2 = (sum(n ** 2 for n in norms_l2)) ** 0.5
 
                 if total_l1 > 1e-10:
-                    metrics[f'gradient_flow/layer_{l1}_to_{l2}'] = total_l2 / total_l1
+                    metrics[f'gradient_flow/layer_{l1:02d}_to_{l2:02d}'] = total_l2 / total_l1
 
     @staticmethod
     def _add_layer_alignment_metrics(
@@ -527,12 +523,12 @@ class InternalsLogger:
         """Add per-layer aggregate alignment metrics."""
         for layer_idx, stats in layer_alignments.items():
             if stats['cos']:
-                metrics[f'grad_weight_align_avg/layer_{layer_idx}/cos'] = (
+                metrics[f'grad_weight_align_avg/cos/layer_{layer_idx:02d}'] = (
                     sum(stats['cos']) / len(stats['cos'])
                 )
-                metrics[f'grad_weight_align_avg/layer_{layer_idx}/radial'] = (
+                metrics[f'grad_weight_align_avg/radial/layer_{layer_idx:02d}'] = (
                     sum(stats['radial']) / len(stats['radial'])
                 )
-                metrics[f'grad_weight_align_avg/layer_{layer_idx}/tangential'] = (
+                metrics[f'grad_weight_align_avg/tangential/layer_{layer_idx:02d}'] = (
                     sum(stats['tangential']) / len(stats['tangential'])
                 )

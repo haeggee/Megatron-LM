@@ -4,21 +4,26 @@ This document provides precise mathematical definitions for all metrics captured
 
 **Notation.** We write $G := \nabla_\theta \mathcal{L}$ for the gradient of the loss with respect to a parameter $\theta$.
 
+**Key format.** Per-parameter metrics use `/`-separated paths derived from `named_parameters()`. The `layers/<N>/` segment is moved to the end as a zero-padded `layer_NN` suffix so that metrics sort lexicographically by layer on dashboards.
+
+For example, a parameter named `decoder.layers.0.self_attention.linear_qkv.weight` is logged as `decoder/self_attention/linear_qkv/weight/layer_00` (with the appropriate metric prefix).
+
 ---
 
 ## 1. Activation Statistics
 
-**Logged as:** `activations/layer_{N}/<metric>`
+**Logged as:** `activations/<metric>/layer_{N:02d}`
 
 | Metric | Definition |
 |--------|------------|
 | `mean` | $\mu = \frac{1}{n}\sum_{i=1}^{n} x_i$ |
-| `std` | $\sigma = \sqrt{\frac{1}{n}\sum_{i=1}^{n}(x_i - \mu)^2}$ |
-| `min` | $\min(X)$ |
-| `max` | $\max(X)$ |
-| `kurtosis` | $\kappa = \frac{E[(X-\mu)^4]}{\sigma^4} - 3$ &nbsp;&nbsp; *(excess kurtosis; 0 for normal distribution)* |
+| `var` | $\sigma^2 = \frac{1}{n}\sum_{i=1}^{n}(x_i - \mu)^2$ |
+| `rms` | $\text{RMS} = \sqrt{\frac{1}{n}\sum_{i=1}^{n} x_i^2}$ |
+| `min` | $\frac{1}{N}\sum_{j=1}^{N} \min_k \; v_{j,k}$ &nbsp;&nbsp; *(expected per-vector minimum)* |
+| `max` | $\frac{1}{N}\sum_{j=1}^{N} \max_k \; v_{j,k}$ &nbsp;&nbsp; *(expected per-vector maximum)* |
+| `kurtosis` | $\kappa = \frac{E_k[s_k^2]}{E_k[s_k]^2}$ where $s_k = \frac{1}{N}\sum_j x_{j,k}^2$ &nbsp;&nbsp; *(per-neuron energy kurtosis; 1 = uniform, >1 = non-uniform)* |
 
-Where $X$ is the flattened activation tensor from the layer output.
+Where $X$ is the activation tensor reshaped to $[N, d]$ (N vectors of dimension d) from the layer output. Per-vector stats (min, max, rms) are computed along the last dimension and then averaged over vectors. All stats are AVG-reduced across DP ranks.
 
 ---
 
@@ -26,13 +31,13 @@ Where $X$ is the flattened activation tensor from the layer output.
 
 ### Per-Parameter Norms
 
-**Logged as:** `gradients/<param_name>/norm`
+**Logged as:** `gradients/norm/<param_path>/layer_NN`
 
 $$\|G\|_2 = \sqrt{\sum_i G_i^2}$$
 
 ### Per-Layer Aggregates
 
-**Logged as:** `gradients_per_layer/layer_{N}/<metric>`
+**Logged as:** `gradients_per_layer/<metric>/layer_{N:02d}`
 
 | Metric | Definition |
 |--------|------------|
@@ -42,7 +47,7 @@ $$\|G\|_2 = \sqrt{\sum_i G_i^2}$$
 
 ### Gradient Flow (Between Layers)
 
-**Logged as:** `gradient_flow/layer_{N}_to_{N+1}`
+**Logged as:** `gradient_flow/layer_{N:02d}_to_{N+1:02d}`
 
 $$\text{flow}_{N \to N+1} = \frac{\text{total\_norm}_{N+1}}{\text{total\_norm}_N}$$
 
@@ -54,13 +59,13 @@ Values $< 1$ indicate vanishing gradients; values $> 1$ indicate exploding gradi
 
 ### Per-Parameter
 
-**Logged as:** `delta_W/<param_name>`
+**Logged as:** `delta_W/<param_path>/layer_NN`
 
 $$\delta_W = \frac{\|W_t - W_{t-1}\|_2}{\|W_{t-1}\|_2}$$
 
 ### Per-Neuron Statistics
 
-**Logged as:** `delta_W_per_neuron/<param_name>/<metric>`
+**Logged as:** `delta_W_per_neuron/mean/<param_path>/layer_NN`
 
 For a weight matrix $W \in \mathbb{R}^{m \times n}$, compute per-row (per-neuron) relative changes:
 
@@ -69,13 +74,6 @@ $$\delta_{W,j} = \frac{\|W_{t,j} - W_{t-1,j}\|_2}{\|W_{t-1,j}\|_2} \quad \text{f
 | Metric | Definition |
 |--------|------------|
 | `mean` | $\frac{1}{m}\sum_{j=1}^{m} \delta_{W,j}$ |
-| `std` | $\sqrt{\frac{1}{m}\sum_{j=1}^{m}(\delta_{W,j} - \bar{\delta}_W)^2}$ |
-| `max` | $\max_j(\delta_{W,j})$ |
-| `min` | $\min_j(\delta_{W,j})$ |
-
-### Per-Layer Aggregates
-
-**Logged as:** `delta_W_avg/layer_{N}`, `delta_W_max/layer_{N}`
 
 ---
 
@@ -85,7 +83,7 @@ These metrics measure directional changes in weight space, particularly useful f
 
 ### Per-Parameter
 
-**Logged as:** `angular/<param_name>/<metric>`
+**Logged as:** `angular/<metric>/<param_path>/layer_NN`
 
 | Metric | Definition |
 |--------|------------|
@@ -99,7 +97,7 @@ These metrics measure directional changes in weight space, particularly useful f
 
 ### Per-Layer Aggregates
 
-**Logged as:** `angular_avg/layer_{N}/<metric>`
+**Logged as:** `angular_avg/<metric>/layer_{N:02d}`
 
 | Metric | Definition |
 |--------|------------|
@@ -115,7 +113,7 @@ These metrics decompose the gradient into components parallel and perpendicular 
 
 ### Per-Parameter
 
-**Logged as:** `grad_weight_align/<param_name>/<metric>`
+**Logged as:** `grad_weight_align/<metric>/<param_path>/layer_NN`
 
 | Metric | Definition |
 |--------|------------|
@@ -143,7 +141,7 @@ These metrics decompose the gradient into components parallel and perpendicular 
 
 ### Per-Layer Aggregates
 
-**Logged as:** `grad_weight_align_avg/layer_{N}/<metric>`
+**Logged as:** `grad_weight_align_avg/<metric>/layer_{N:02d}`
 
 | Metric | Definition |
 |--------|------------|
@@ -153,20 +151,29 @@ These metrics decompose the gradient into components parallel and perpendicular 
 
 ---
 
+## 6. Parameter Norms (from `training.py`)
+
+**Logged as:** `params-norm/<param_path>/layer_NN`
+
+$$\|\theta\|_2 = \sqrt{\sum_i \theta_i^2}$$
+
+Computed with proper synchronization across data-parallel groups (unsure about tensor-parallel and pipeline-parallel).
+---
+
 ## Summary
 
 | Category | Metrics per Layer | W&B Prefix |
 |----------|-------------------|------------|
-| Activation Statistics | 5 | `activations/layer_{N}/` |
-| Gradient Statistics (per-param) | per-param | `gradients/` |
+| Activation Statistics | 6 | `activations/<metric>/layer_NN` |
+| Gradient Statistics (per-param) | per-param | `gradients/norm/` |
 | Gradient Statistics (per-layer) | 3 | `gradients_per_layer/` |
 | Gradient Flow | 1 (per layer pair) | `gradient_flow/` |
-| Weight Updates (per-param) | per-param | `delta_W/`, `delta_W_per_neuron/` |
-| Weight Updates (per-layer) | 5 | `delta_W_avg/`, `delta_W_max/`, `delta_W_per_neuron_avg/` |
+| Weight Updates (per-param) | per-param | `delta_W/`, `delta_W_per_neuron/mean/` |
 | Angular Metrics (per-param) | per-param | `angular/` |
 | Angular Metrics (per-layer) | 3 | `angular_avg/` |
 | Gradient-Weight Alignment (per-param) | per-param | `grad_weight_align/` |
 | Gradient-Weight Alignment (per-layer) | 3 | `grad_weight_align_avg/` |
+| Parameter Norms (per-param) | per-param | `params-norm/` |
 
 ---
 
