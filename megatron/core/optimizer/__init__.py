@@ -392,17 +392,6 @@ def _get_megatron_optimizer_based_on_param_groups(
                                 opt.initialize_state(p)
 
         elif config.optimizer == 'ademamix':
-            # use config to determine qkv split shapes.
-            # no need to check tp since tp splits by head and this is per head(group) dimension
-            num_attention_heads = model_chunks[0].config.num_attention_heads
-            num_query_groups = model_chunks[0].config.num_query_groups
-            kv_channels = model_chunks[0].config.kv_channels
-            qkv_split_shapes = [
-                num_attention_heads // num_query_groups * kv_channels,
-                kv_channels,
-                kv_channels,
-            ]
-
             kwargs = {
                 "params": param_groups,
                 "lr": config.lr,
@@ -412,13 +401,6 @@ def _get_megatron_optimizer_based_on_param_groups(
                 "beta3_warmup": config.ademamix_beta3_warmup,
                 "alpha_warmup": config.ademamix_alpha_warmup,
                 "eps": config.adam_eps,
-                "hyperball_mode": config.hyperball_mode,
-                "hyperball_kind": config.hyperball_kind,
-                "hyperball_radius": config.hyperball_radius,
-                "hyperball_update": config.hyperball_update,
-                "qkv_split_shapes": qkv_split_shapes,
-                "hyperball_split_heads": config.hyperball_split_heads,
-                "qkv_dim": kv_channels,
             }
 
             if config.use_precision_aware_optimizer:
@@ -435,8 +417,6 @@ def _get_megatron_optimizer_based_on_param_groups(
                         if len(opt.state[p]) == 0:
                             if config.adam_beta1 != 0:
                                 opt.state[p]['exp_avg_fast'] = torch.zeros_like(p.data)
-                            if config.alpha != 0:
-                                opt.state[p]['exp_avg_slow'] = torch.zeros_like(p.data)
                             opt.state[p]['exp_avg_sq'] = torch.zeros_like(p.data)
                         else:
                             opt.initialize_state(p)
@@ -565,22 +545,6 @@ def get_megatron_optimizer(
     Returns:
         Instance of MegatronOptimizer.
     """
-
-    if config.optimizer == "ademamix" and config.hyperball_mode is not None:
-        # We need to override the opt state defaults to disable hyperball normalization of 
-        # non-matrix weights and embeddings.
-        def no_hyperball(param):
-            if len(param.shape) != 2:
-                return True
-            if getattr(param, "is_embedding_or_output_parameter", False) and not config.hyperball_embeddings:
-                return True
-            return False
-
-        if config_overrides is None:
-            config_overrides = get_standard_config_overrides()
-        pred = ParamPredicate("no_hyperball", fn=no_hyperball)
-        config_overrides[ParamKey(predicate=pred)] = ParamGroupOverride(hyperball_mode=None)
-        config_overrides[ParamKey(name="*linear_qkv.weight")] = ParamGroupOverride(is_qkv=True)
 
     log_single_rank(logger, logging.INFO, f'Setting up optimizer with config {config}')
 
