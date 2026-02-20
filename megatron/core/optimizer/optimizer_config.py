@@ -224,22 +224,22 @@ class OptimizerConfig:
     muon_extra_scale_factor: float = 1.0
     """Additional scale factor for the muon update."""
 
-    hyperball_mode: Optional[Literal["row", "col", "rowcol", "flat"]] = None
-    """When specified, enables hyperball constraint of the parameters, either row-wise, column-wise, row+column-wise or of the flattened vector."""
+    hypersphere_mode: Optional[Literal["row", "col", "rowcol", "flat"]] = None
+    """When specified, enables hypersphere constraint of the parameters, either row-wise, column-wise, row+column-wise or of the flattened vector."""
 
-    hyperball_kind: Optional[Literal["l2", "standard", "spectral"]] = "l2"
-    """When hyperball constraint is enabled, specified the normalization to perform, either l2 normalization, (x-mu)/std standardization or spectral norm."""
+    hypersphere_kind: Optional[Literal["l2", "standard", "spectral"]] = "l2"
+    """When hypersphere constraint is enabled, specified the normalization to perform, either l2 normalization, (x-mu)/std standardization or spectral norm."""
 
-    hyperball_radius: Literal["learnable"] | float = 1.0
-    """When hyperball constraint is enabled, sets the hyperball radius (float), or sets it as a learnable scale."""
+    hypersphere_radius: Literal["learnable"] | float = 1.0
+    """When hypersphere constraint is enabled, sets the hypersphere radius (float), or sets it as a learnable scale."""
 
-    hyperball_update: bool = True
-    """If enabled, then updates will also be projected to the hyperball."""
+    hypersphere_update: bool = True
+    """If enabled, then updates will also be projected to the hypersphere."""
 
-    hyperball_embeddings: bool = False
+    hypersphere_embeddings: bool = False
     """If enabled, then embeddings will also be normalized."""
 
-    hyperball_split_heads: bool = False
+    hypersphere_split_heads: bool = False
     """If enabled, then each q,k,v head matrix will be normalized separately."""
 
     weight_decay_method: Literal["decoupled", "independent"] = "decoupled"

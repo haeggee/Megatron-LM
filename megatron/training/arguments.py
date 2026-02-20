@@ -2197,12 +2197,12 @@ def _add_regularization_args(parser):
                        help='How to perform NS calculation for tensor model parallel weights')
     group.add_argument('--muon-extra-scale-factor', type=float, default=1.0,
                        help='Additional scale factor for the muon update')
-    group.add_argument('--hyperball-mode', type=_float_or_str)
-    group.add_argument('--hyperball-kind', type=_float_or_str, default="l2")
-    group.add_argument('--hyperball-radius', type=_float_or_str, default=1.0)
-    group.add_argument('--hyperball-no-update', action="store_false", dest="hyperball_update")
-    group.add_argument('--hyperball-embeddings', action="store_true")
-    group.add_argument('--hyperball-split-heads', action="store_true")
+    group.add_argument('--hypersphere-mode', type=_float_or_str)
+    group.add_argument('--hypersphere-kind', type=_float_or_str, default="l2")
+    group.add_argument('--hypersphere-radius', type=_float_or_str, default=1.0)
+    group.add_argument('--hypersphere-no-update', action="store_false", dest="hypersphere_update")
+    group.add_argument('--hypersphere-embeddings', action="store_true")
+    group.add_argument('--hypersphere-split-heads', action="store_true")
     group.add_argument('--weight-decay-method', choices=["decoupled", "independent"], default="decoupled")
     group.add_argument('--use-orthogonal-updates', action="store_true")
     return parser

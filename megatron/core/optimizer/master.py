@@ -48,18 +48,18 @@ class MasterOptimizer(torch.optim.Optimizer):
         alpha_warmup: Optional[int] = None,
         eps: float = 1e-8,
 
-        # Hyperball optimization.
-        hyperball_mode: Optional[Literal["row", "col", "rowcol", "flat"]] = None,
-        hyperball_kind: Optional[Literal["l2", "standard", "spectral", "orthogonal"]] = None,
-        hyperball_radius: Literal["learnable"] | float = 1.0,
-        hyperball_eps: float = 1e-8,
-        hyperball_update: float = True,
+        # Hypersphere optimization.
+        hypersphere_mode: Optional[Literal["row", "col", "rowcol", "flat"]] = None,
+        hypersphere_kind: Optional[Literal["l2", "standard", "spectral", "orthogonal"]] = None,
+        hypersphere_radius: Literal["learnable"] | float = 1.0,
+        hypersphere_eps: float = 1e-8,
+        hypersphere_update: float = True,
 
         # Muon.
         use_orthogonal_updates: bool = False,  # Enable or disable muon entirely.
         use_nesterov: bool = True,
-        split_qkv: bool = True,  # Also applies to hyperball optimization.
-        split_qkv_heads: bool = True,  # Also applies to hyperball optimization.
+        split_qkv: bool = True,  # Also applies to hypersphere optimization.
+        split_qkv_heads: bool = True,  # Also applies to hypersphere optimization.
         qkv_split_shapes: Optional[tuple[int, int, int]] = None,
         qkv_dim: Optional[int] = None,
         is_qkv_fn: Callable[[torch.Tensor], bool] | None = None,
@@ -77,11 +77,11 @@ class MasterOptimizer(torch.optim.Optimizer):
         self.use_nesterov = use_nesterov
         self.weight_decay_method = weight_decay_method
 
-        self.hyperball_mode = hyperball_mode
-        self.hyperball_kind = hyperball_kind
-        self.hyperball_radius = hyperball_radius
-        self.hyperball_eps = hyperball_eps
-        self.hyperball_update = hyperball_update
+        self.hypersphere_mode = hypersphere_mode
+        self.hypersphere_kind = hypersphere_kind
+        self.hypersphere_radius = hypersphere_radius
+        self.hypersphere_eps = hypersphere_eps
+        self.hypersphere_update = hypersphere_update
 
         self.split_qkv = split_qkv
         self.split_qkv_heads  = split_qkv_heads
@@ -210,7 +210,7 @@ class MasterOptimizer(torch.optim.Optimizer):
             self._apply_weight_decay_inplace(p, update, group)
 
         # Optionally, normalize update.
-        if self.hyperball_mode is not None and self.hyperball_update:
+        if self.hypersphere_mode is not None and self.hypersphere_update:
             self._normalize(p, update, is_qkv=is_qkv)
 
         # Update parameter.
@@ -219,7 +219,7 @@ class MasterOptimizer(torch.optim.Optimizer):
         p.add_(update, alpha=-lr)
 
         # Optionally, normalize parameter.
-        if self.hyperball_mode is not None:
+        if self.hypersphere_mode is not None:
             self._normalize(p, p, is_qkv=is_qkv)
 
     def _apply_weight_decay_inplace(self, p, update, group):
@@ -313,11 +313,11 @@ class MasterOptimizer(torch.optim.Optimizer):
 
 
     def _normalize(self, p: torch.Tensor, x: torch.Tensor, is_qkv: bool = False):
-        if self.hyperball_mode is None:
+        if self.hypersphere_mode is None:
             return
         if is_qkv and self.split_qkv:
             qs, ks, vs = split_qkv(x, self.qkv_split_shapes)
-            if self.split_qkv_heads and self.hyperball_mode in {"col", "rowcol", "flat"}:
+            if self.split_qkv_heads and self.hypersphere_mode in {"col", "rowcol", "flat"}:
                 # When splitting heads using torch.split, we only get views of the
                 # original tensor, meaning the qs tensor gets modified in-place,
                 # no need to copy the updated q to qs after.
@@ -328,7 +328,7 @@ class MasterOptimizer(torch.optim.Optimizer):
                 for v in split_heads(vs, self.qkv_dim):
                     self._normalize(p, v)
             else:
-                # If hyperball_mode is row, we don't need to split heads manually as before
+                # If hypersphere_mode is row, we don't need to split heads manually as before
                 # because each head are just contiguous *rows* in qs, splitting is unnecessary.
                 self._normalize(p, qs)
                 self._normalize(p, ks)
@@ -337,38 +337,38 @@ class MasterOptimizer(torch.optim.Optimizer):
             return
 
 
-        if self.hyperball_radius == "learnable":
-            raise NotImplementedError(f"Learnable hyperball NYI")
+        if self.hypersphere_radius == "learnable":
+            raise NotImplementedError(f"Learnable hypersphere NYI")
 
-        if self.hyperball_mode == "col":
+        if self.hypersphere_mode == "col":
             dim = 0
-        elif self.hyperball_mode == "row":
+        elif self.hypersphere_mode == "row":
             dim = 1
-        elif self.hyperball_mode == "flat":
+        elif self.hypersphere_mode == "flat":
             dim = None
-        elif self.hyperball_mode == "rowcol":
-            raise NotImplementedError(f"Rowcol hyperball NYI")
+        elif self.hypersphere_mode == "rowcol":
+            raise NotImplementedError(f"Rowcol hypersphere NYI")
         else:
-            raise ValueError(f"Unknown normalization {self.hyperball_mode}")
+            raise ValueError(f"Unknown normalization {self.hypersphere_mode}")
 
-        if self.hyperball_kind == "l2":
-            norm = torch.norm(x, dim=dim, keepdim=True).clamp_min(self.hyperball_eps)
+        if self.hypersphere_kind == "l2":
+            norm = torch.norm(x, dim=dim, keepdim=True).clamp_min(self.hypersphere_eps)
             #print(f"l2 {norm}")
-            x.mul_(self.hyperball_radius / norm)
-        elif self.hyperball_kind == "spectral":
-            assert self.hyperball_mode == "flat"
-            norm = spectral_norm(x).clamp_min(self.hyperball_eps)
-            x.mul_(self.hyperball_radius / norm)
-        elif self.hyperball_kind == "orthogonal":  # TODO verify lol.
-            assert self.hyperball_mode == "flat"
-            x_normalized = self.hyperball_radius * self.orthogonalize(p, x, ignore_scale=True, is_qkv=is_qkv)
+            x.mul_(self.hypersphere_radius / norm)
+        elif self.hypersphere_kind == "spectral":
+            assert self.hypersphere_mode == "flat"
+            norm = spectral_norm(x).clamp_min(self.hypersphere_eps)
+            x.mul_(self.hypersphere_radius / norm)
+        elif self.hypersphere_kind == "orthogonal":  # TODO verify lol.
+            assert self.hypersphere_mode == "flat"
+            x_normalized = self.hypersphere_radius * self.orthogonalize(p, x, ignore_scale=True, is_qkv=is_qkv)
             x.copy_(x_normalized)
-        elif self.hyperball_kind == "standard":
+        elif self.hypersphere_kind == "standard":
             mu = x.mean(dim=dim, keepdim=True)
-            std = x.std(dim=dim, keepdim=True).clamp_min(self.hyperball_eps)
-            x.add_(mu).mul_(self.hyperball_radius / std)
+            std = x.std(dim=dim, keepdim=True).clamp_min(self.hypersphere_eps)
+            x.add_(mu).mul_(self.hypersphere_radius / std)
         else:
-            raise ValueError(f"Unknown hyperball_kind {self.hyperball_kind}")
+            raise ValueError(f"Unknown hypersphere_kind {self.hypersphere_kind}")
 
 
 def split_qkv(x, shapes: tuple[int, int, int]) -> list[torch.Tensor]:
@@ -510,7 +510,7 @@ def get_megatron_master_optimizer(
                 param.is_qkv = True
             # TODO(deyuf): currently only allow 2D non-embedding weight to avoid breaking
             if (
-                (config.hyperball_embeddings or not getattr(param, 'is_embedding_or_output_parameter', False))
+                (config.hypersphere_embeddings or not getattr(param, 'is_embedding_or_output_parameter', False))
                 and len(param.shape) == 2
             ):
                 linear_params.append(param)
@@ -530,17 +530,17 @@ def get_megatron_master_optimizer(
         "alpha_warmup": config.ademamix_alpha_warmup,
         "eps": config.adam_eps,
 
-        # Hyperball optimization.
-        "hyperball_mode": config.hyperball_mode,
-        "hyperball_kind": config.hyperball_kind,
-        "hyperball_radius": config.hyperball_radius,
-        "hyperball_update": config.hyperball_update,
+        # Hypersphere optimization.
+        "hypersphere_mode": config.hypersphere_mode,
+        "hypersphere_kind": config.hypersphere_kind,
+        "hypersphere_radius": config.hypersphere_radius,
+        "hypersphere_update": config.hypersphere_update,
 
         # Muon.
         "use_orthogonal_updates": config.use_orthogonal_updates,
         "use_nesterov": config.muon_use_nesterov,
         "split_qkv": config.muon_split_qkv,
-        "split_qkv_heads": config.hyperball_split_heads,
+        "split_qkv_heads": config.hypersphere_split_heads,
         "is_qkv_fn": lambda p: getattr(p, "is_qkv", False),
         "fp32_matmul_prec": config.muon_fp32_matmul_prec,
         "num_ns_steps": config.muon_num_ns_steps,

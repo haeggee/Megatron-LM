@@ -39,11 +39,11 @@ BETA3=0.999
 ALPHA=5
 
 HYPERBALL=false
-HB_KIND=l2
-HB_R=1
-HB_UPDATE=false
-HB_EMBED=false
-HB_SPLIT_HEADS=false
+HS_KIND=l2
+HS_R=1
+HS_UPDATE=false
+HS_EMBED=false
+HS_SPLIT_HEADS=false
 
 NO_WARMUP=false
 
@@ -92,12 +92,12 @@ usage () {
 	echo " --alpha: ademamix alpha"
 	echo " --wd: weight decay"
 	echo " --wd-method (decoupled/independent): weight decay method"
-	echo " --hb <row/col/rowcol/flat>: Enables hyperball training"
-	echo " --hb-kind <l2/standard/spectral>: hyperball kind"
-	echo " --hb-r <learnable/float>: hyperball radius"
-	echo " --hb-u: hyperball normalize update"
-	echo " --hb-embed: hyperball normalize embeddings"
-	echo " --hb-split-heads: hyperball normalize q,k,v heads separately"
+	echo " --hs <row/col/rowcol/flat>: Enables hypersphere training"
+	echo " --hs-kind <l2/standard/spectral>: hypersphere kind"
+	echo " --hs-r <learnable/float>: hypersphere radius"
+	echo " --hs-u: hypersphere normalize update"
+	echo " --hs-embed: hypersphere normalize embeddings"
+	echo " --hs-split-heads: hypersphere normalize q,k,v heads separately"
 	# Logs.
 	echo " --wandb-name <str>: Specify wandb name."
 	echo " --no-extra-log"
@@ -249,18 +249,18 @@ while [[ $# -gt 0 ]]; do
 			WEIGHT_DECAY=$2; shift 2;;
 		--wd-method)
 			WEIGHT_DECAY_METHOD=$2; shift 2;;
-		--hb)
+		--hs)
 			HYPERBALL=$2; shift 2;;
-		--hb-kind)
-			HB_KIND=$2; shift 2;;
-		--hb-r)
-			HB_R=$2; shift 2;;
-		--hb-u)
-			HB_UPDATE=true; shift;;
-		--hb-embed)
-			HB_EMBED=true; shift;;
-		--hb-split-heads)
-			HB_SPLIT_HEADS=true; shift;;
+		--hs-kind)
+			HS_KIND=$2; shift 2;;
+		--hs-r)
+			HS_R=$2; shift 2;;
+		--hs-u)
+			HS_UPDATE=true; shift;;
+		--hs-embed)
+			HS_EMBED=true; shift;;
+		--hs-split-heads)
+			HS_SPLIT_HEADS=true; shift;;
 		# Logs.
 		--wandb-name)
 			WANDB_NAME=$2; shift 2;;
@@ -335,20 +335,20 @@ if [[ $HYPERBALL != false ]]; then
 		echo "hypersphere only implemented for master optimizer"
 		exit 1
 	fi
-	SUFFIX=$SUFFIX-HB${HYPERBALL}${HB_R}_$HB_KIND
-	OPT_ARGS+=(--hyperball-mode $HYPERBALL --hyperball-kind $HB_KIND --hyperball-radius $HB_R)
-	if [[ $HB_UPDATE = true ]]; then
+	SUFFIX=$SUFFIX-HS${HYPERBALL}${HS_R}_$HS_KIND
+	OPT_ARGS+=(--hypersphere-mode $HYPERBALL --hypersphere-kind $HS_KIND --hypersphere-radius $HS_R)
+	if [[ $HS_UPDATE = true ]]; then
 		SUFFIX=${SUFFIX}_u
 	else
-		OPT_ARGS+=(--hyperball-no-update)
+		OPT_ARGS+=(--hypersphere-no-update)
 	fi
-	if [[ $HB_EMBED = true ]]; then
+	if [[ $HS_EMBED = true ]]; then
 		SUFFIX=${SUFFIX}_emb
-		OPT_ARGS+=(--hyperball-embeddings)
+		OPT_ARGS+=(--hypersphere-embeddings)
 	fi
-	if [[ $HB_SPLIT_HEADS = true ]]; then
+	if [[ $HS_SPLIT_HEADS = true ]]; then
 		SUFFIX=${SUFFIX}_sh
-		OPT_ARGS+=(--hyperball-split-heads)
+		OPT_ARGS+=(--hypersphere-split-heads)
 	fi
 fi
 
