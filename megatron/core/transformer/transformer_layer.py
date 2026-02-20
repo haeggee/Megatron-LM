@@ -17,7 +17,7 @@ from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.cuda_graphs import is_graph_capturing
 from megatron.core.transformer.enums import CudaGraphScope, LayerType
-from megatron.core.transformer.identity_op import IdentityFuncOp, IdentityOp
+from megatron.core.transformer.identity_op import IdentityFuncOp, IdentityOp, LoggingProbe
 from megatron.core.transformer.mlp import MLP
 from megatron.core.transformer.module import GraphableMegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
@@ -452,6 +452,12 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         # self.bias_dropout_add_exec_handler = nullcontext if use_nvfuser else torch.enable_grad
         self.bias_dropout_add_exec_handler = torch.enable_grad
 
+        # Logging probes: identity ops that mark points for activation capture.
+        # Hook managers detect these via isinstance(module, LoggingProbe).
+        self.log_after_attention = LoggingProbe("attention", self.layer_number)
+        self.log_after_mlp = LoggingProbe("mlp", self.layer_number)
+        self.log_after_layer = LoggingProbe("layer", self.layer_number)
+
     @staticmethod
     def _get_layer_offset(config: TransformerConfig):
         """
@@ -564,6 +570,11 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             sequence_len_offset=sequence_len_offset,
         )
         nvtx_range_pop(suffix="self_attention")
+
+        # Probe raw attention output (before residual addition)
+        attention_output_with_bias = (
+            self.log_after_attention(attention_output_with_bias[0]),
+        ) + attention_output_with_bias[1:]
 
         if self.recompute_input_layernorm:
             # discard the output of the input layernorm and register the recompute
@@ -694,6 +705,11 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             )
         nvtx_range_pop(suffix="mlp")
 
+        # Probe raw MLP output (before residual addition)
+        mlp_output_with_bias = (
+            self.log_after_mlp(mlp_output_with_bias[0]),
+        ) + mlp_output_with_bias[1:]
+
         if (
             self.is_moe_layer
             and self.config.cuda_graph_impl == "transformer_engine"
@@ -752,6 +768,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
         )
 
+        output = self.log_after_layer(output)
         return output
 
     def sharded_state_dict(

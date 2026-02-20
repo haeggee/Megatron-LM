@@ -184,7 +184,8 @@ class InternalsLogger:
             Dictionary mapping metric names to values.
         """
         captured = self.hook_manager.captured_activations
-        layer_nums = sorted(captured.keys())
+        # Keys are (module_name, layer_num) tuples, e.g. ("layer", 0), ("attention", 0), ("mlp", 0)
+        sorted_keys = sorted(captured.keys())
 
         dp_world_size = 1
         if self._dp_group is not None:
@@ -194,32 +195,31 @@ class InternalsLogger:
             if not self.is_logging_rank:
                 return {}
             metrics = {}
-            for layer_num, activation in captured.items():
+            for (module_name, layer_num), activation in captured.items():
                 stats = compute_activation_stats(activation)
                 for stat_name, value in stats.items():
-                    metrics[f'activations/{stat_name}/layer_{layer_num}'] = value
+                    metrics[f'activations/{stat_name}/{module_name}/layer_{layer_num:02d}'] = value
             return metrics
 
-        n_layers = len(layer_nums)
-        if n_layers == 0:
+        n_entries = len(sorted_keys)
+        if n_entries == 0:
             return {}
 
         # Each rank computes local per-vector stats, then we all-reduce.
-        # Pack: 6 AVG-reducible stats per layer (mean, var, kurtosis, rms, min, max)
+        # Pack: 6 AVG-reducible stats per entry (mean, var, kurtosis, rms, min, max)
         A = 6
-        avg_stats = torch.zeros(n_layers * A, dtype=torch.float64,
+        avg_stats = torch.zeros(n_entries * A, dtype=torch.float64,
                                 device=torch.cuda.current_device())
 
-        for idx, layer_num in enumerate(layer_nums):
-            if layer_num in captured:
-                stats = compute_activation_stats(captured[layer_num])
-                off = idx * A
-                avg_stats[off + 0] = stats['mean']
-                avg_stats[off + 1] = stats['var']
-                avg_stats[off + 2] = stats['kurtosis']
-                avg_stats[off + 3] = stats['rms']
-                avg_stats[off + 4] = stats['min']
-                avg_stats[off + 5] = stats['max']
+        for idx, key in enumerate(sorted_keys):
+            stats = compute_activation_stats(captured[key])
+            off = idx * A
+            avg_stats[off + 0] = stats['mean']
+            avg_stats[off + 1] = stats['var']
+            avg_stats[off + 2] = stats['kurtosis']
+            avg_stats[off + 3] = stats['rms']
+            avg_stats[off + 4] = stats['min']
+            avg_stats[off + 5] = stats['max']
 
         torch.distributed.all_reduce(avg_stats, op=torch.distributed.ReduceOp.AVG, group=self._dp_group)
 
@@ -227,14 +227,14 @@ class InternalsLogger:
             return {}
 
         metrics = {}
-        for idx, layer_num in enumerate(layer_nums):
+        for idx, (module_name, layer_num) in enumerate(sorted_keys):
             off = idx * A
-            metrics[f'activations/mean/layer_{layer_num:02d}'] = avg_stats[off + 0].item()
-            metrics[f'activations/var/layer_{layer_num:02d}'] = avg_stats[off + 1].item()
-            metrics[f'activations/kurtosis/layer_{layer_num:02d}'] = avg_stats[off + 2].item()
-            metrics[f'activations/rms/layer_{layer_num:02d}'] = avg_stats[off + 3].item()
-            metrics[f'activations/min/layer_{layer_num:02d}'] = avg_stats[off + 4].item()
-            metrics[f'activations/max/layer_{layer_num:02d}'] = avg_stats[off + 5].item()
+            metrics[f'activations/mean/{module_name}/layer_{layer_num:02d}'] = avg_stats[off + 0].item()
+            metrics[f'activations/var/{module_name}/layer_{layer_num:02d}'] = avg_stats[off + 1].item()
+            metrics[f'activations/kurtosis/{module_name}/layer_{layer_num:02d}'] = avg_stats[off + 2].item()
+            metrics[f'activations/rms/{module_name}/layer_{layer_num:02d}'] = avg_stats[off + 3].item()
+            metrics[f'activations/min/{module_name}/layer_{layer_num:02d}'] = avg_stats[off + 4].item()
+            metrics[f'activations/max/{module_name}/layer_{layer_num:02d}'] = avg_stats[off + 5].item()
 
         return metrics
 
