@@ -41,15 +41,15 @@ $$\|G\|_2 = \sqrt{\sum_i G_i^2}$$
 
 | Metric | Definition |
 |--------|------------|
-| `total_norm` | $\sqrt{\sum_{j \in \text{layer}_N} \|G_j\|_2^2}$ |
-| `avg_norm` | $\frac{1}{m}\sum_{j \in \text{layer}_N} \|G_j\|_2$ |
-| `max_norm` | $\max_{j \in \text{layer}_N} \|G_j\|_2$ |
+| `total_norm` | $\sqrt{\sum_{j \in \text{layer}_N} \lVert G_j\rVert_2^2}$ |
+| `avg_norm` | $\frac{1}{m}\sum_{j \in \text{layer}_N} \lVert G_j\rVert_2$ |
+| `max_norm` | $\max_{j \in \text{layer}_N} \lVert G_j\rVert_2$ |
 
 ### Gradient Flow (Between Layers)
 
 **Logged as:** `gradient_flow/layer_{N:02d}_to_{N+1:02d}`
 
-$$\text{flow}_{N \to N+1} = \frac{\text{total\_norm}_{N+1}}{\text{total\_norm}_N}$$
+$$\text{flow}_{N \to N+1} = \frac{\text{total norm}_{N+1}}{\text{total norm}_N}$$
 
 Values $< 1$ indicate vanishing gradients; values $> 1$ indicate exploding gradients.
 
@@ -87,7 +87,7 @@ These metrics measure directional changes in weight space, particularly useful f
 
 | Metric | Definition |
 |--------|------------|
-| `cos_similarity` | $\cos(\theta) = \frac{W_t \cdot W_{t-1}}{\|W_t\|_2 \cdot \|W_{t-1}\|_2}$ |
+| `cos_similarity` | $\cos(\theta) = \frac{W_t \cdot W_{t-1}}{\lVert W_t\rVert_2 \cdot \lVert W_{t-1}\rVert_2}$ |
 | `degrees` | $\theta = \arccos(\cos(\theta)) \times \frac{180}{\pi}$ |
 
 **Interpretation:**
@@ -117,9 +117,9 @@ These metrics decompose the gradient into components parallel and perpendicular 
 
 | Metric | Definition |
 |--------|------------|
-| `cos` | $\cos(G, W) = \frac{G \cdot W}{\|G\|_2 \cdot \|W\|_2}$ |
-| `radial` | $r = \|G\|_2 \cdot \cos(G, W)$ |
-| `tangential` | $t = \|G\|_2 \cdot \sqrt{1 - \cos^2(G, W)}$ |
+| `cos` | $\cos(G, W) = \frac{G \cdot W}{\lVert G\rVert_2 \cdot \lVert W\rVert_2}$ |
+| `radial` | $r = \lVert G\rVert_2 \cdot \cos(G, W)$ |
+| `tangential` | $t = \lVert G\rVert_2 \cdot \sqrt{1 - \cos^2(G, W)}$ |
 
 ### Geometric Interpretation
 
@@ -158,6 +158,7 @@ These metrics decompose the gradient into components parallel and perpendicular 
 $$\|\theta\|_2 = \sqrt{\sum_i \theta_i^2}$$
 
 Computed with proper synchronization across data-parallel groups (unsure about tensor-parallel and pipeline-parallel).
+
 ---
 
 ## Summary
