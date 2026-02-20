@@ -22,6 +22,21 @@ class IdentityOp(torch.nn.Module):
         return x
 
 
+class LoggingProbe(IdentityOp):
+    """Identity op that marks a point in the forward pass for activation logging.
+
+    When placed in a model's forward path, hook managers can detect instances of
+    this class via isinstance() and register forward hooks on them. The probe
+    stores metadata (logging_name, layer_number) so hook registration doesn't
+    need hardcoded knowledge of the model architecture.
+    """
+
+    def __init__(self, logging_name: str, layer_number: int):
+        super().__init__()
+        self.logging_name = logging_name
+        self.layer_number = layer_number
+
+
 class IdentityFuncOp(IdentityOp):
     """
     This is a placeholder for IdentityFuncOp(...)(x) -> IdentityOp(x) -> x.

@@ -2122,12 +2122,10 @@ def _add_logging_args(parser):
                        'gradients, weight updates) to W&B.')
     group.add_argument('--log-activation-stats', action='store_true',
                        help='Log activation statistics per layer (mean, std, min, max, kurtosis).')
-    group.add_argument('--log-attention-patterns', action='store_true',
-                       help='Log attention pattern metrics (entropy, sparsity).')
     group.add_argument('--log-gradient-stats', action='store_true',
                        help='Log per-layer gradient statistics.')
     group.add_argument('--log-relative-updates', action='store_true',
-                       help='Log relative weight and activation changes (delta_W, delta_Y).')
+                       help='Log relative weight changes (delta_W) between iterations.')
     group.add_argument('--log-angular-metrics', action='store_true',
                        help='Log angular updates and gradient-weight alignment '
                        '(useful for spherical/normalized training analysis).')

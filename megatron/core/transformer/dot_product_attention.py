@@ -115,12 +115,6 @@ class DotProductAttention(MegatronModule):
             self.config.attention_dropout if attention_dropout is None else attention_dropout
         )
 
-        # Attention probability capture for internals logging.
-        # When capture_attention_probs is True, attention_probs are stored
-        # in last_attention_probs for logging purposes.
-        self.capture_attention_probs = False
-        self.last_attention_probs = None
-
         if self.config.softmax_type == "vanilla":
             self.softmax_offset = None
         elif self.config.softmax_type == "off-by-one":
@@ -216,10 +210,6 @@ class DotProductAttention(MegatronModule):
         attention_probs: Tensor = self.scale_mask_softmax(
             attention_scores, attention_mask, self.softmax_offset
         )
-
-        # Capture attention probs for internals logging (before dropout).
-        if self.capture_attention_probs:
-            self.last_attention_probs = attention_probs.detach()
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.

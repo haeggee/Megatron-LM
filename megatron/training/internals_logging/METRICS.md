@@ -2,82 +2,70 @@
 
 This document provides precise mathematical definitions for all metrics captured by the internals logging system.
 
+**Notation.** We write $G := \nabla_\theta \mathcal{L}$ for the gradient of the loss with respect to a parameter $\theta$.
+
+**Key format.** Per-parameter metrics use `/`-separated paths derived from `named_parameters()`. The `layers/<N>/` segment is moved to the end as a zero-padded `layer_NN` suffix so that metrics sort lexicographically by layer on dashboards.
+
+For example, a parameter named `decoder.layers.0.self_attention.linear_qkv.weight` is logged as `decoder/self_attention/linear_qkv/weight/layer_00` (with the appropriate metric prefix).
+
 ---
 
 ## 1. Activation Statistics
 
-**Logged as:** `activations/layer_{N}/<metric>`
+**Logged as:** `activations/<metric>/layer_{N:02d}`
 
 | Metric | Definition |
 |--------|------------|
 | `mean` | $\mu = \frac{1}{n}\sum_{i=1}^{n} x_i$ |
-| `std` | $\sigma = \sqrt{\frac{1}{n}\sum_{i=1}^{n}(x_i - \mu)^2}$ |
-| `min` | $\min(X)$ |
-| `max` | $\max(X)$ |
-| `kurtosis` | $\kappa = \frac{E[(X-\mu)^4]}{\sigma^4} - 3$ &nbsp;&nbsp; *(excess kurtosis; 0 for normal distribution)* |
+| `var` | $\sigma^2 = \frac{1}{n}\sum_{i=1}^{n}(x_i - \mu)^2$ |
+| `rms` | $\text{RMS} = \sqrt{\frac{1}{n}\sum_{i=1}^{n} x_i^2}$ |
+| `min` | $\frac{1}{N}\sum_{j=1}^{N} \min_k \; v_{j,k}$ &nbsp;&nbsp; *(expected per-vector minimum)* |
+| `max` | $\frac{1}{N}\sum_{j=1}^{N} \max_k \; v_{j,k}$ &nbsp;&nbsp; *(expected per-vector maximum)* |
+| `kurtosis` | $\kappa = \frac{E_k[s_k^2]}{E_k[s_k]^2}$ where $s_k = \frac{1}{N}\sum_j x_{j,k}^2$ &nbsp;&nbsp; *(per-neuron energy kurtosis; 1 = uniform, >1 = non-uniform)* |
 
-Where $X$ is the flattened activation tensor from the layer output.
-
----
-
-## 2. Attention Pattern Metrics
-
-**Logged as:** `attention/layer_{N}/<metric>`
-
-Let $P \in \mathbb{R}^{Q \times K}$ be the attention probability matrix where $Q$ is the number of queries and $K$ is the number of keys.
-
-| Metric | Definition |
-|--------|------------|
-| `entropy` | $H = -\frac{1}{Q}\sum_{q=1}^{Q}\sum_{k=1}^{K} p_{q,k} \log(p_{q,k} + \epsilon)$ |
-| `sparsity` | $\text{sparsity} = \frac{1}{QK}\sum_{q,k}\mathbf{1}[p_{q,k} < 0.01]$ |
-| `topk_concentration` | $\text{conc} = \frac{1}{Q}\sum_{q=1}^{Q}\sum_{i=1}^{10} p_{q,(i)}$ &nbsp;&nbsp; *(sum of top-10 attention weights per query)* |
-| `max_attention` | $\frac{1}{Q}\sum_{q=1}^{Q}\max_{k}(p_{q,k})$ |
-
-**Interpretation:**
-- Entropy ranges from 0 (fully focused) to $\log(K)$ (uniform attention)
-- Sparsity measures the fraction of near-zero attention weights
+Where $X$ is the activation tensor reshaped to $[N, d]$ (N vectors of dimension d) from the layer output. Per-vector stats (min, max, rms) are computed along the last dimension and then averaged over vectors. All stats are AVG-reduced across DP ranks.
 
 ---
 
-## 3. Gradient Statistics
+## 2. Gradient Statistics
 
 ### Per-Parameter Norms
 
-**Logged as:** `gradients/<param_name>/norm`
+**Logged as:** `gradients/norm/<param_path>/layer_NN`
 
-$$\|\nabla_\theta \mathcal{L}\|_2 = \sqrt{\sum_i g_i^2}$$
+$$\|G\|_2 = \sqrt{\sum_i G_i^2}$$
 
 ### Per-Layer Aggregates
 
-**Logged as:** `gradients_per_layer/layer_{N}/<metric>`
+**Logged as:** `per_layer_gradients/<metric>/layer_{N:02d}`
 
 | Metric | Definition |
 |--------|------------|
-| `total_norm` | $\sqrt{\sum_{j \in \text{layer}_N} \|\nabla_{\theta_j} \mathcal{L}\|_2^2}$ |
-| `avg_norm` | $\frac{1}{m}\sum_{j \in \text{layer}_N} \|\nabla_{\theta_j} \mathcal{L}\|_2$ |
-| `max_norm` | $\max_{j \in \text{layer}_N} \|\nabla_{\theta_j} \mathcal{L}\|_2$ |
+| `total_norm` | $\sqrt{\sum_{j \in \text{layer}_N} \lVert G_j\rVert_2^2}$ |
+| `avg_norm` | $\frac{1}{m}\sum_{j \in \text{layer}_N} \lVert G_j\rVert_2$ |
+| `max_norm` | $\max_{j \in \text{layer}_N} \lVert G_j\rVert_2$ |
 
 ### Gradient Flow (Between Layers)
 
-**Logged as:** `gradient_flow/layer_{N}_to_{N+1}`
+**Logged as:** `gradient_flow/layer_{N:02d}_to_{N+1:02d}`
 
-$$\text{flow}_{N \to N+1} = \frac{\text{total\_norm}_{N+1}}{\text{total\_norm}_N}$$
+$$\text{flow}_{N \to N+1} = \frac{\text{total norm}_{N+1}}{\text{total norm}_N}$$
 
 Values $< 1$ indicate vanishing gradients; values $> 1$ indicate exploding gradients.
 
 ---
 
-## 4. Relative Weight Updates (δW)
+## 3. Relative Weight Updates (δW)
 
 ### Per-Parameter
 
-**Logged as:** `delta_W/<param_name>`
+**Logged as:** `delta_W/<param_path>/layer_NN`
 
 $$\delta_W = \frac{\|W_t - W_{t-1}\|_2}{\|W_{t-1}\|_2}$$
 
 ### Per-Neuron Statistics
 
-**Logged as:** `delta_W_per_neuron/<param_name>/<metric>`
+**Logged as:** `delta_W_per_neuron/mean/<param_path>/layer_NN`
 
 For a weight matrix $W \in \mathbb{R}^{m \times n}$, compute per-row (per-neuron) relative changes:
 
@@ -86,37 +74,20 @@ $$\delta_{W,j} = \frac{\|W_{t,j} - W_{t-1,j}\|_2}{\|W_{t-1,j}\|_2} \quad \text{f
 | Metric | Definition |
 |--------|------------|
 | `mean` | $\frac{1}{m}\sum_{j=1}^{m} \delta_{W,j}$ |
-| `std` | $\sqrt{\frac{1}{m}\sum_{j=1}^{m}(\delta_{W,j} - \bar{\delta}_W)^2}$ |
-| `max` | $\max_j(\delta_{W,j})$ |
-| `min` | $\min_j(\delta_{W,j})$ |
-
-### Per-Layer Aggregates
-
-**Logged as:** `delta_W_avg/layer_{N}`, `delta_W_max/layer_{N}`
 
 ---
 
-## 5. Relative Activation Updates (δY)
-
-**Logged as:** `delta_Y/layer_{N}`
-
-$$\delta_Y = \frac{\|Y_t - Y_{t-1}\|_2}{\|Y_{t-1}\|_2}$$
-
-Where $Y_t$ and $Y_{t-1}$ are activation tensors from consecutive logging iterations.
-
----
-
-## 6. Angular Metrics
+## 4. Angular Metrics
 
 These metrics measure directional changes in weight space, particularly useful for spherical/normalized training methods (e.g., nGPT, EDM2).
 
 ### Per-Parameter
 
-**Logged as:** `angular/<param_name>/<metric>`
+**Logged as:** `angular/<metric>/<param_path>/layer_NN`
 
 | Metric | Definition |
 |--------|------------|
-| `cos_similarity` | $\cos(\theta) = \frac{W_t \cdot W_{t-1}}{\|W_t\|_2 \cdot \|W_{t-1}\|_2}$ |
+| `cos_similarity` | $\cos(\theta) = \frac{W_t \cdot W_{t-1}}{\lVert W_t\rVert_2 \cdot \lVert W_{t-1}\rVert_2}$ |
 | `degrees` | $\theta = \arccos(\cos(\theta)) \times \frac{180}{\pi}$ |
 
 **Interpretation:**
@@ -126,7 +97,7 @@ These metrics measure directional changes in weight space, particularly useful f
 
 ### Per-Layer Aggregates
 
-**Logged as:** `angular_avg/layer_{N}/<metric>`
+**Logged as:** `per_layer_angular/<metric>/layer_{N:02d}`
 
 | Metric | Definition |
 |--------|------------|
@@ -136,24 +107,24 @@ These metrics measure directional changes in weight space, particularly useful f
 
 ---
 
-## 7. Gradient-Weight Alignment
+## 5. Gradient-Weight Alignment
 
 These metrics decompose the gradient into components parallel and perpendicular to the current weight vector.
 
 ### Per-Parameter
 
-**Logged as:** `grad_weight_align/<param_name>/<metric>`
+**Logged as:** `grad_weight_align/<metric>/<param_path>/layer_NN`
 
 | Metric | Definition |
 |--------|------------|
-| `cos` | $\cos(\nabla \mathcal{L}, W) = \frac{\nabla \mathcal{L} \cdot W}{\|\nabla \mathcal{L}\|_2 \cdot \|W\|_2}$ |
-| `radial` | $r = \|\nabla \mathcal{L}\|_2 \cdot \cos(\nabla \mathcal{L}, W)$ |
-| `tangential` | $t = \|\nabla \mathcal{L}\|_2 \cdot \sqrt{1 - \cos^2(\nabla \mathcal{L}, W)}$ |
+| `cos` | $\cos(G, W) = \frac{G \cdot W}{\lVert G\rVert_2 \cdot \lVert W\rVert_2}$ |
+| `radial` | $r = \lVert G\rVert_2 \cdot \cos(G, W)$ |
+| `tangential` | $t = \lVert G\rVert_2 \cdot \sqrt{1 - \cos^2(G, W)}$ |
 
 ### Geometric Interpretation
 
 ```
-                    ∇L (gradient)
+                    G (gradient)
                    /|
                   / |
                  /  | tangential (t)
@@ -170,7 +141,7 @@ These metrics decompose the gradient into components parallel and perpendicular 
 
 ### Per-Layer Aggregates
 
-**Logged as:** `grad_weight_align_avg/layer_{N}/<metric>`
+**Logged as:** `per_layer_grad_weight_align/<metric>/layer_{N:02d}`
 
 | Metric | Definition |
 |--------|------------|
@@ -180,24 +151,30 @@ These metrics decompose the gradient into components parallel and perpendicular 
 
 ---
 
+## 6. Parameter Norms (from `training.py`)
+
+**Logged as:** `params-norm/<param_path>/layer_NN`
+
+$$\|\theta\|_2 = \sqrt{\sum_i \theta_i^2}$$
+
+Computed with proper synchronization across data-parallel groups (unsure about tensor-parallel and pipeline-parallel).
+
+---
+
 ## Summary
 
 | Category | Metrics per Layer | W&B Prefix |
 |----------|-------------------|------------|
-| Activation Statistics | 5 | `activations/layer_{N}/` |
-| Attention Patterns | 4 | `attention/layer_{N}/` |
-| Gradient Statistics (per-param) | per-param | `gradients/` |
-| Gradient Statistics (per-layer) | 3 | `gradients_per_layer/` |
+| Activation Statistics | 6 | `activations/<metric>/layer_NN` |
+| Gradient Statistics (per-param) | per-param | `gradients/norm/` |
+| Gradient Statistics (per-layer) | 3 | `per_layer_gradients/` |
 | Gradient Flow | 1 (per layer pair) | `gradient_flow/` |
-| Weight Updates (per-param) | per-param | `delta_W/`, `delta_W_per_neuron/` |
-| Weight Updates (per-layer) | 5 | `delta_W_avg/`, `delta_W_max/`, `delta_W_per_neuron_avg/` |
-| Activation Updates (δY) | 1 | `delta_Y/` |
+| Weight Updates (per-param) | per-param | `delta_W/`, `delta_W_per_neuron/mean/` |
 | Angular Metrics (per-param) | per-param | `angular/` |
-| Angular Metrics (per-layer) | 3 | `angular_avg/` |
+| Angular Metrics (per-layer) | 3 | `per_layer_angular/` |
 | Gradient-Weight Alignment (per-param) | per-param | `grad_weight_align/` |
-| Gradient-Weight Alignment (per-layer) | 3 | `grad_weight_align_avg/` |
-
-**Total: ~47+ metrics** (with additional per-parameter granularity for gradients, weight deltas, and angular metrics)
+| Gradient-Weight Alignment (per-layer) | 3 | `per_layer_grad_weight_align/` |
+| Parameter Norms (per-param) | per-param | `params-norm/` |
 
 ---
 

@@ -9,78 +9,53 @@ from torch import Tensor
 
 
 def compute_activation_stats(tensor: Tensor) -> Dict[str, float]:
-    """Compute activation statistics: mean, std, min, max, kurtosis.
+    """Compute activation statistics per vector along the last dimension.
+
+    For a tensor of shape [..., d], each slice along the last dimension is
+    one activation vector. Returns the average of per-vector statistics
+    (mean, std, kurtosis, min, max, rms).
+
+    min/max are the expectation of per-vector extremes: min(-1).mean() and
+    max(-1).mean(). In distributed training, all stats are AVG-reduced
+    across DP groups.
 
     Args:
-        tensor: Activation tensor of any shape.
+        tensor: Activation tensor of shape [..., d].
 
     Returns:
-        Dictionary with activation statistics.
+        Dictionary with mean, std, min, max, kurtosis.
     """
     with torch.no_grad():
-        flat = tensor.flatten().float()
+        d = tensor.shape[-1]
+        tensor_2d = tensor.reshape(-1, d).float()  # [N, d]
 
-        mean = flat.mean().item()
-        std = flat.std().item()
-        min_val = flat.min().item()
-        max_val = flat.max().item()
+        mean = tensor_2d.mean()
 
-        # Kurtosis: E[(X-mu)^4] / sigma^4 - 3 (excess kurtosis)
-        # Normal distribution has kurtosis = 0
-        if std > 1e-8:
-            centered = flat - mean
-            fourth_moment = centered.pow(4).mean()
-            kurtosis = (fourth_moment / (std ** 4) - 3).item()
-        else:
-            kurtosis = 0.0
+        var = tensor_2d.pow(2).mean()
 
-    return {
-        'mean': mean,
-        'std': std,
-        'min': min_val,
-        'max': max_val,
-        'kurtosis': kurtosis,
-    }
+        act_rms = tensor_2d.pow(2).mean(-1).sqrt() # [N]
+        act_rms = act_rms.mean()
 
+        tensor_min = tensor_2d.min(-1).values.mean()
+        tensor_max = tensor_2d.max(-1).values.mean()
 
-def compute_attention_metrics(attention_weights: Tensor) -> Dict[str, float]:
-    """Compute attention pattern metrics: entropy, sparsity.
+        # kurtosis
+        act_rms_per_neuron = tensor_2d.pow(2).mean(0).sqrt() # [d]
+        denom = act_rms_per_neuron.pow(2).mean().pow(2)
+        kurtosis = act_rms_per_neuron.pow(4).mean() / (denom + 1e-8)
 
-    Args:
-        attention_weights: Attention probability tensor [batch, heads, seq_q, seq_k]
-            or similar shape where last dimension sums to 1.
-
-    Returns:
-        Dictionary with attention metrics.
-    """
-    with torch.no_grad():
-        # Ensure we're working with float for numerical stability
-        attn = attention_weights.float()
-
-        # Entropy: -sum(p * log(p)) over the key dimension
-        # High entropy = diffuse attention, Low entropy = focused attention
-        eps = 1e-10
-        log_attn = (attn + eps).log()
-        entropy = -(attn * log_attn).sum(dim=-1).mean().item()
-
-        # Sparsity: fraction of attention weights below threshold
-        # High sparsity = most attention is concentrated on few tokens
-        threshold = 0.01
-        sparsity = (attn < threshold).float().mean().item()
-
-        # Top-k concentration: how much probability mass is in top-k positions
-        k = min(10, attn.size(-1))
-        topk_values = attn.topk(k, dim=-1).values
-        topk_concentration = topk_values.sum(dim=-1).mean().item()
-
-        # Max attention: average of max attention weight per query
-        max_attention = attn.max(dim=-1).values.mean().item()
+        # all_rms = (tensor_2d**2).mean().sqrt()
+        # normed_acts = tensor_2d / (all_rms + 1e-8)
+        # alt_kurtosis = (normed_acts**2).mean(0).var()
+        # print(f"Kurtosis: {kurtosis.item()} versus {alt_kurtosis.item()}")
 
     return {
-        'entropy': entropy,
-        'sparsity': sparsity,
-        'topk_concentration': topk_concentration,
-        'max_attention': max_attention,
+        'mean': mean.item(),
+        'var': var.item(),
+        'min': tensor_min.item(),
+        'max': tensor_max.item(),
+        'kurtosis': kurtosis.item(),
+        'rms': act_rms.item(),
     }
 
 
@@ -175,7 +150,7 @@ def compute_weight_delta_per_neuron(
 
         current_f = current.float()
         previous_f = previous.float()
-
+        
         # Full matrix relative change
         delta_norm = (current_f - previous_f).norm().item()
         prev_norm = previous_f.norm().item()
@@ -200,48 +175,11 @@ def compute_weight_delta_per_neuron(
             relative_delta[mask] = delta_per_neuron[mask] / prev_per_neuron[mask]
 
             result['per_neuron_mean'] = relative_delta.mean().item()
-            result['per_neuron_std'] = relative_delta.std().item() if num_neurons > 1 else 0.0
-            result['per_neuron_max'] = relative_delta.max().item()
-            result['per_neuron_min'] = relative_delta.min().item()
-        else:
-            # For 1D tensors (biases), just use the full delta
-            result['per_neuron_mean'] = full_delta
-            result['per_neuron_std'] = 0.0
-            result['per_neuron_max'] = full_delta
-            result['per_neuron_min'] = full_delta
+            # result['per_neuron_std'] = relative_delta.std().item() if num_neurons > 1 else 0.0
+            # result['per_neuron_max'] = relative_delta.max().item()
+            # result['per_neuron_min'] = relative_delta.min().item()
 
         return result
-
-
-def compute_activation_delta(
-    current: Tensor,
-    previous: Tensor,
-) -> float:
-    """Compute relative activation change: ||Y_t - Y_{t-1}|| / ||Y_{t-1}||.
-
-    Args:
-        current: Current activation tensor.
-        previous: Previous activation tensor.
-
-    Returns:
-        Relative L2 norm of the activation change.
-    """
-    with torch.no_grad():
-        # Move to same device if needed
-        if previous.device != current.device:
-            previous = previous.to(current.device)
-
-        # Sample same batch size for comparison
-        min_batch = min(current.size(0), previous.size(0))
-        curr_sample = current[:min_batch].float()
-        prev_sample = previous[:min_batch].float()
-
-        delta_norm = (curr_sample - prev_sample).norm().item()
-        prev_norm = prev_sample.norm().item()
-
-        if prev_norm > 1e-10:
-            return delta_norm / prev_norm
-        return 0.0
 
 
 def compute_angular_update(
@@ -345,3 +283,50 @@ def compute_gradient_weight_alignment(param: Tensor) -> Dict[str, float]:
         'radial_component': radial,
         'tangential_component': tangential,
     }
+
+
+def compute_grad_shard_norm_sq(param: Tensor, param_range) -> Tensor:
+    """Compute squared L2 norm of the gradient shard owned by this DP rank.
+
+    For distributed optimizer, each DP rank owns a sub-range of each parameter's
+    gradient. This computes ||grad[start:end]||^2 as a scalar CUDA tensor,
+    suitable for batched all-reduce across the DP group.
+
+    Args:
+        param: Model parameter with main_grad attribute.
+        param_range: Range object with .start and .end indicating the
+                     sub-range of the flattened parameter this rank owns.
+
+    Returns:
+        Scalar CUDA tensor containing ||grad_shard||^2.
+    """
+    grad = get_param_grad(param)
+    if grad is None:
+        return torch.zeros(1, dtype=torch.float32, device=torch.cuda.current_device())
+    with torch.no_grad():
+        shard = grad.view(-1)[param_range.start:param_range.end].float()
+        return (shard * shard).sum().unsqueeze(0)
+
+
+def compute_grad_weight_dot_shard(param: Tensor, param_range) -> Tensor:
+    """Compute dot product of gradient shard and weight shard owned by this DP rank.
+
+    For gradient-weight alignment, we need grad . weight. With distributed optimizer,
+    weights are all-gathered (identical on all ranks), and the gradient shard
+    corresponds to the same sub-range. We compute the partial dot product on the
+    owned shard and all-reduce later.
+
+    Args:
+        param: Model parameter with main_grad and data attributes.
+        param_range: Range object indicating owned sub-range.
+
+    Returns:
+        Scalar CUDA tensor containing grad_shard . weight_shard.
+    """
+    grad = get_param_grad(param)
+    if grad is None:
+        return torch.zeros(1, dtype=torch.float32, device=torch.cuda.current_device())
+    with torch.no_grad():
+        grad_shard = grad.view(-1)[param_range.start:param_range.end].float()
+        weight_shard = param.data.view(-1)[param_range.start:param_range.end].float()
+        return (grad_shard * weight_shard).sum().unsqueeze(0)
