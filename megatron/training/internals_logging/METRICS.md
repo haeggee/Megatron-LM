@@ -167,13 +167,13 @@ Computed with proper synchronization across data-parallel groups (unsure about t
 |----------|-------------------|------------|
 | Activation Statistics | 6 | `activations/<metric>/layer_NN` |
 | Gradient Statistics (per-param) | per-param | `gradients/norm/` |
-| Gradient Statistics (per-layer) | 3 | `gradients_per_layer/` |
+| Gradient Statistics (per-layer) | 3 | `per_layer_gradients/` |
 | Gradient Flow | 1 (per layer pair) | `gradient_flow/` |
 | Weight Updates (per-param) | per-param | `delta_W/`, `delta_W_per_neuron/mean/` |
 | Angular Metrics (per-param) | per-param | `angular/` |
-| Angular Metrics (per-layer) | 3 | `angular_avg/` |
+| Angular Metrics (per-layer) | 3 | `per_layer_angular/` |
 | Gradient-Weight Alignment (per-param) | per-param | `grad_weight_align/` |
-| Gradient-Weight Alignment (per-layer) | 3 | `grad_weight_align_avg/` |
+| Gradient-Weight Alignment (per-layer) | 3 | `per_layer_grad_weight_align/` |
 | Parameter Norms (per-param) | per-param | `params-norm/` |
 
 ---

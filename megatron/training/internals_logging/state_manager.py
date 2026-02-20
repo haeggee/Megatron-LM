@@ -117,7 +117,7 @@ class InternalsStateManager:
         #     if deltas:
         #         avg_delta = sum(deltas) / len(deltas)
         #         max_delta = max(deltas)
-        #         metrics[f'delta_W_avg/layer_{layer_idx}'] = avg_delta
+        #         metrics[f'per_layer_delta_W/avg/layer_{layer_idx}'] = avg_delta
         #         metrics[f'delta_W_max/layer_{layer_idx}'] = max_delta
 
         #         # Per-neuron aggregates at layer level
@@ -179,9 +179,9 @@ class InternalsStateManager:
                 avg_degrees = sum(stats['degrees']) / len(stats['degrees'])
                 max_degrees = max(stats['degrees'])
                 avg_cos = sum(stats['cos_sims']) / len(stats['cos_sims'])
-                metrics[f'angular_avg/degrees/layer_{layer_idx:02d}'] = avg_degrees
-                metrics[f'angular_avg/max_degrees/layer_{layer_idx:02d}'] = max_degrees
-                metrics[f'angular_avg/cos_similarity/layer_{layer_idx:02d}'] = avg_cos
+                metrics[f'per_layer_angular/degrees/layer_{layer_idx:02d}'] = avg_degrees
+                metrics[f'per_layer_angular/max_degrees/layer_{layer_idx:02d}'] = max_degrees
+                metrics[f'per_layer_angular/cos_similarity/layer_{layer_idx:02d}'] = avg_cos
 
         return metrics
 

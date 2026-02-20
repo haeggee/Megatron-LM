@@ -508,9 +508,9 @@ class InternalsLogger:
                 avg_norm = sum(norms) / len(norms)
                 max_norm = max(norms)
 
-                metrics[f'gradients_per_layer/total_norm/layer_{layer_idx:02d}'] = total_norm
-                metrics[f'gradients_per_layer/avg_norm/layer_{layer_idx:02d}'] = avg_norm
-                metrics[f'gradients_per_layer/max_norm/layer_{layer_idx:02d}'] = max_norm
+                metrics[f'per_layer_gradients/total_norm/layer_{layer_idx:02d}'] = total_norm
+                metrics[f'per_layer_gradients/avg_norm/layer_{layer_idx:02d}'] = avg_norm
+                metrics[f'per_layer_gradients/max_norm/layer_{layer_idx:02d}'] = max_norm
 
         sorted_layers = sorted(layer_grad_norms.keys())
         for i in range(len(sorted_layers) - 1):
@@ -533,12 +533,12 @@ class InternalsLogger:
         """Add per-layer aggregate alignment metrics."""
         for layer_idx, stats in layer_alignments.items():
             if stats['cos']:
-                metrics[f'grad_weight_align_avg/cos/layer_{layer_idx:02d}'] = (
+                metrics[f'per_layer_grad_weight_align/cos/layer_{layer_idx:02d}'] = (
                     sum(stats['cos']) / len(stats['cos'])
                 )
-                metrics[f'grad_weight_align_avg/radial/layer_{layer_idx:02d}'] = (
+                metrics[f'per_layer_grad_weight_align/radial/layer_{layer_idx:02d}'] = (
                     sum(stats['radial']) / len(stats['radial'])
                 )
-                metrics[f'grad_weight_align_avg/tangential/layer_{layer_idx:02d}'] = (
+                metrics[f'per_layer_grad_weight_align/tangential/layer_{layer_idx:02d}'] = (
                     sum(stats['tangential']) / len(stats['tangential'])
                 )
