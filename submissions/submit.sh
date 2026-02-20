@@ -6,7 +6,7 @@
 #CONTAINER=/iopsstor/scratch/cscs/ahernnde/ngc_25-12-alps1.toml
 CONTAINER=/iopsstor/scratch/cscs/ahernnde/ncg_new_v2.toml
 
-SCRIPT_VERSION=v0.1
+SCRIPT_VERSION=v1
 SEQ_LEN=4096
 TOKENIZER=mistralai/Mistral-Nemo-Base-2407
 TOKENIZED_DATA_PATH=/iopsstor/scratch/cscs/jpcoles/a06/swissai-fineweb-edu-filterrobots-merge
@@ -34,7 +34,7 @@ MIN_LR=1e-8
 OPT=adam
 
 BETA1=0.9
-BETA2=0.95
+BETA2=0.99
 BETA3=0.999
 ALPHA=5
 
@@ -278,7 +278,7 @@ done
 OPT_ARGS=()
 if [[ $OPT = adam ]]; then
 	OPT_ARGS+=(--overlap-grad-reduce --use-distributed-optimizer)
-	if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.95 ]]; then
+	if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.99 ]]; then
 		SUFFIX=${SUFFIX}-b${BETA1}_$BETA2
 	fi
 elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
@@ -292,15 +292,19 @@ elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
 elif [[ $OPT = dmaster ]] || [[ $OPT = master ]]; then
 	SUFFIX=$SUFFIX-$OPT
 	IS_MASTER_OPT=true
-	if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.95 ]] || [[ $BETA3 != 0.999 ]]; then
-		SUFFIX=${SUFFIX}_b${BETA1}_${BETA2}_$BETA3
-	fi
-	if [[ $ALPHA != 5 ]]; then
-		SUFFIX=${SUFFIX}_a$ALPHA
-	fi
 	if [[ $MASTER_ORTHOGONALIZE = true ]]; then
 		SUFFIX=${SUFFIX}_o
+		if [[ $BETA1 != 0.95 ]]; then
+			SUFFIX=${SUFFIX}_b$BETA1
+		fi
 		OPT_ARGS+=(--use-orthogonal-updates)
+	else
+		if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.99 ]] || [[ $BETA3 != 0.999 ]]; then
+			SUFFIX=${SUFFIX}_b${BETA1}_${BETA2}_$BETA3
+		fi
+		if [[ $ALPHA != 5 ]]; then
+			SUFFIX=${SUFFIX}_a$ALPHA
+		fi
 	fi
 	if [[ $OPT = dmaster ]]; then
 		OPT=dist_master
@@ -454,7 +458,7 @@ if [[ $NO_WARMUP = true ]]; then
 	SUFFIX=$SUFFIX-nw
 	WARMUP=0
 else
-	WARMUP=$((5*ITERS_PER_BT/2))  # 2.5BT.
+	WARMUP=5000
 fi
 if [[ $TOKENS != $DEF_TOKENS ]]; then
 	SUFFIX=$SUFFIX-${TOKENS}BT
@@ -471,13 +475,18 @@ if [[ $EXTRA_LOG = true ]]; then
 		--log-num-zeros-in-grad
 		--log-params-norm
 		--log-progress
+		--log-model-internals
+		--log-activation-stats
+		--log-gradient-stats
+		--log-angular-metrics
+		--log-relative-updates
 	)
 fi
 
 # Final preparations.
 WANDB_PROJECT=opt_$SCRIPT_VERSION
 EXP_NAME=$SIZE$SCALE$SUFFIX
-ROOT_PATH=$TRAIN_ROOT/$EXP_NAME
+ROOT_PATH=$TRAIN_ROOT/$SCRIPT_VERSION/$EXP_NAME
 DEBUG_ROOT=$ROOT_PATH/debug
 SAVE_PATH=$ROOT_PATH/checkpoints
 DIFFS_PATH=$ROOT_PATH/diffs
