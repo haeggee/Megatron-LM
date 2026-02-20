@@ -1,5 +1,4 @@
 # TODO: fp8dpa
-# TODO: ademamix parameters
 # TODO: extra logs
 
 #= Prelude =#
@@ -275,10 +274,6 @@ done
 OPT_ARGS=()
 if [[ $OPT = adam ]]; then
 	OPT_ARGS+=(--overlap-grad-reduce --use-distributed-optimizer)
-	if [[ $HYPERBALL != false ]]; then
-		echo "Adam hypersphere NYI"
-		exit 1
-	fi
 	if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.95 ]]; then
 		SUFFIX=${SUFFIX}-b${BETA1}_$BETA2
 	fi
@@ -324,6 +319,10 @@ if [[ $WEIGHT_DECAY != 0.1 ]]; then
 fi
 
 if [[ $HYPERBALL != false ]]; then
+	if [[ $OPT != master ]] || [[ $OPT != dist_master ]]; then
+		echo "hypersphere only implemented for master optimizer"
+		exit 1
+	fi
 	SUFFIX=$SUFFIX-HB${HYPERBALL}${HB_R}_$HB_KIND
 	OPT_ARGS+=(--hyperball-mode $HYPERBALL --hyperball-kind $HB_KIND --hyperball-radius $HB_R)
 	if [[ $HB_UPDATE = true ]]; then
@@ -580,7 +579,7 @@ EXTRA_ARGS+=(
 ARGS="${LLAMA_ARGS[@]} ${TRAINING_ARGS[@]} ${SCHEDULER_ARGS[@]} ${DATA_ARGS[@]} ${LOGGING[@]} ${EXTRA_ARGS[@]} ${FP8_ARGS[@]} ${ARCH_ARGS[@]} ${OPT_ARGS[@]}"
 
 #= RUNNING: Prepare and launch a slurm script =#
-CMD="python3 pretrain_gpt.py $ARGS"
+CMD="numactl --membind=0-3 env python3 pretrain_gpt.py $ARGS"
 
 mkdir -p $ROOT_PATH
 cat > $ROOT_PATH/submission.sbatch <<- EOM
@@ -597,8 +596,9 @@ cat > $ROOT_PATH/submission.sbatch <<- EOM
 #SBATCH --exclusive
 #SBATCH --account=a-infra01-1
 #SBATCH --partition=${PARTITION:-normal}
-#SBATCH --signal=SIGUSR2@180
+#SBATCH --signal=SIGUSR1@180
 #SBATCH --dependency=singleton
+#SBATCH --environment=$CONTAINER 
 
 # Wake up.
 echo [\$(date)] Starting job
@@ -639,7 +639,7 @@ pip list > \$DEBUG_DIR/pip.txt
 nvidia-smi > \$DEBUG_DIR/cuda
 printenv > \$DEBUG_DIR/env.sh
 
-srun -lu --cpus-per-task \$SLURM_CPUS_PER_TASK --mpi=pmix --environment=$CONTAINER bash -c "
+srun -lu --cpus-per-task \$SLURM_CPUS_PER_TASK bash -c "
 	cd $CODE_PATH
 	export PYTHONPATH=\$PWD:$EMERGING_OPTIMIZERS_PATH
 	export RANK=\\\$SLURM_PROCID
