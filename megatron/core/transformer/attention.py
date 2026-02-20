@@ -1180,6 +1180,7 @@ class SelfAttention(Attention):
                 hidden_size=self.hidden_size_per_attention_head,
                 initial_value=self.config.qk_layer_scale,
                 scale=self.config.qk_layer_scale_scale,
+                dtype=torch.float32,
             )
         else:
             self.qk_layer_scale = None

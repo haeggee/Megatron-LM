@@ -564,7 +564,7 @@ def get_mlp_module_spec_for_backend(
             module=module,
             submodules=MLPSubmodules(
                 linear_fc1=linear_fc1, linear_fc2=linear_fc2, activation_func=activation_func,
-                layer_scale=IdentityOp if config.mlp_layer_scale is None else LayerScale,
+                layer_scale=None if config.mlp_layer_scale is None else LayerScale,
             ),
         )
     else:

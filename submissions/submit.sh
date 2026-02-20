@@ -29,6 +29,7 @@ NORMALIZATION=RMSNorm
 
 # Opt defaults.
 WEIGHT_DECAY=0.1
+WEIGHT_DECAY_METHOD=decoupled
 MIN_LR=1e-8
 OPT=adam
 
@@ -90,6 +91,7 @@ usage () {
 	echo " --b3: beta3 (master&ademamix)"
 	echo " --alpha: ademamix alpha"
 	echo " --wd: weight decay"
+	echo " --wd-method (decoupled/independent): weight decay method"
 	echo " --hb <row/col/rowcol/flat>: Enables hyperball training"
 	echo " --hb-kind <l2/standard/spectral>: hyperball kind"
 	echo " --hb-r <learnable/float>: hyperball radius"
@@ -245,6 +247,8 @@ while [[ $# -gt 0 ]]; do
 			ALPHA=$2; shift 2;;
 		--wd)
 			WEIGHT_DECAY=$2; shift 2;;
+		--wd-method)
+			WEIGHT_DECAY_METHOD=$2; shift 2;;
 		--hb)
 			HYPERBALL=$2; shift 2;;
 		--hb-kind)
@@ -287,6 +291,7 @@ elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
 	fi
 elif [[ $OPT = dmaster ]] || [[ $OPT = master ]]; then
 	SUFFIX=$SUFFIX-$OPT
+	IS_MASTER_OPT=true
 	if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.95 ]] || [[ $BETA3 != 0.999 ]]; then
 		SUFFIX=${SUFFIX}_b${BETA1}_${BETA2}_$BETA3
 	fi
@@ -317,9 +322,16 @@ fi
 if [[ $WEIGHT_DECAY != 0.1 ]]; then
 	SUFFIX=$SUFFIX-wd$WEIGHT_DECAY
 fi
+if [[ $WEIGHT_DECAY_METHOD != decoupled ]]; then
+	if [[ $IS_MASTER_OPT != true ]]; then
+		echo "different weight decay method only implemented in the master opt"
+		exit 1
+	fi
+	SUFFIX=$SUFFIX-$WEIGHT_DECAY_METHOD
+fi
 
 if [[ $HYPERBALL != false ]]; then
-	if [[ $OPT != master ]] || [[ $OPT != dist_master ]]; then
+	if [[ $IS_MASTER_OPT != true ]]; then
 		echo "hypersphere only implemented for master optimizer"
 		exit 1
 	fi
@@ -528,6 +540,7 @@ TRAINING_ARGS=(
 	--eval-interval $((ITERS + 1))
 	--eval-iters 1
 	--weight-decay $WEIGHT_DECAY
+	--weight-decay-method $WEIGHT_DECAY_METHOD
 	--adam-beta1 $BETA1
 	--muon-momentum $BETA1
 	--adam-beta2 $BETA2
@@ -596,7 +609,7 @@ cat > $ROOT_PATH/submission.sbatch <<- EOM
 #SBATCH --exclusive
 #SBATCH --account=a-infra01-1
 #SBATCH --partition=${PARTITION:-normal}
-#SBATCH --signal=SIGUSR1@180
+#SBATCH --signal=SIGTERM@180
 #SBATCH --dependency=singleton
 #SBATCH --environment=$CONTAINER 
 

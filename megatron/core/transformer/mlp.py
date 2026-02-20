@@ -155,12 +155,15 @@ class MLP(MegatronModule):
             tp_group=tp_group,
         )
 
-        self.layer_scale = build_module(
-            submodules.layer_scale,
-            hidden_size=ffn_hidden_size,
-            initial_value=self.config.mlp_layer_scale,
-            scale=self.config.mlp_layer_scale_scale,
-        )
+        if submodules.layer_scale is not None:
+            self.layer_scale = build_module(
+                submodules.layer_scale,
+                hidden_size=ffn_hidden_size,
+                initial_value=self.config.mlp_layer_scale,
+                scale=self.config.mlp_layer_scale_scale,
+            )
+        else:
+            self.layer_scale = None
 
     def forward(self, hidden_states, per_token_scale=None):
         """Perform the forward pass through the MLP block."""
@@ -169,7 +172,8 @@ class MLP(MegatronModule):
         intermediate_parallel, bias_parallel = self.linear_fc1(hidden_states)
         nvtx_range_pop(suffix="linear_fc1")
 
-        intermediate_parallel = self.layer_scale(intermediate_parallel)
+        if self.layer_scale is not None:
+            intermediate_parallel = self.layer_scale(intermediate_parallel)
 
         nvtx_range_push(suffix="activation")
         if self.config.use_te_activation_func:
@@ -230,7 +234,7 @@ class MLP(MegatronModule):
 
                 def glu(x):
                     x_glu, x_linear = torch.chunk(x, 2, dim=-1)
-                    if self.config.mlp_layer_scale_gate_scale is not None:
+                    if self.layer_scale is not None and self.config.mlp_layer_scale_gate_scale is not None:
                         x_glu = self.config.mlp_layer_scale_gate_scale * x_glu
                     if (val := self.config.activation_func_clamp_value) is not None:
                         x_glu = x_glu.clamp(min=None, max=val)

@@ -14,3 +14,5 @@ bash submissions/submit.sh 110 \
 	--no-warmup --wd 0 \
 	--init $INV_SQRTMODELDIM \
 	$*
+
+#--opt dmaster --master-orthogonalize --hb flat --hb-kind spectral --hb-r 1 --hb-embed --hb-split-heads \

@@ -48,8 +48,7 @@ def all_gather_item(item, dtype, group=None, async_op=False, local_rank=None):
 
 
 class DistributedSignalHandler:
-    def __init__(self, sig: signal.Signals = signal.SIGUSR1):
-        print("signal handler spawned")
+    def __init__(self, sig: signal.Signals = signal.SIGTERM):
         self.sig = sig
 
     def signals_received(self):

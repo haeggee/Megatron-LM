@@ -143,10 +143,11 @@ class MasterOptimizer(torch.optim.Optimizer):
         # Initialization.
         if len(state) == 0:
             state["exp_avg"] = torch.zeros_like(grad)
-            if group["beta2"] != 0:  # Enables g^2 EMA as in adam & ademamix.
+            # TODO: Make it such that we can use ademamix-like updates with muon.
+            if not self.use_orthogonal_updates:  # Enables g^2 EMA as in adam & ademamix.
                 state["exp_avg_sq"] = torch.zeros_like(grad)
-            if group["alpha"] != 0:  # Enables slow momentum as in ademamix.
-                state["exp_avg_slow"] = torch.zeros_like(grad)
+                if group["alpha"] != 0:  # Enables slow momentum as in ademamix.
+                    state["exp_avg_slow"] = torch.zeros_like(grad)
 
         exp_avg = state["exp_avg"]
         beta1 = group["beta1"]
@@ -185,7 +186,6 @@ class MasterOptimizer(torch.optim.Optimizer):
             exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
             exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
             denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(group["eps"])
-            #print(f"denom {denom.norm()}")
 
             if group["alpha"] == 0:  # adam logic.
                 update = exp_avg.div(bias_correction1) / denom  # TODO original equation.
@@ -461,11 +461,15 @@ def get_megatron_master_optimizer(
     # TODO(boxiangw): Improve usability after optimizer refactor
     # TODO(boxiangw): support precision aware optimizer
     # TODO: do we need this anymore?
-    def muon_init_state_fn(opt, config=None):
+    def master_init_state_fn(opt, config=None):
         for group in opt.param_groups:
             for p in group['params']:
                 if len(opt.state[p]) == 0:
-                    opt.state[p]['momentum_buffer'] = torch.zeros_like(p.data)
+                    opt.state[p]["exp_avg"] = torch.zeros_like(p.data)
+                    if not config.use_orthogonal_updates:  # Enables g^2 EMA as in adam & ademamix.
+                        opt.state[p]["exp_avg_sq"] = torch.zeros_like(p.data)
+                        if group["alpha"] != 0:  # Enables slow momentum as in ademamix.
+                            opt.state[p]["exp_avg_slow"] = torch.zeros_like(p.data)
 
     def adam_init_state_fn(opt, config=None):
         for group in opt.param_groups:
@@ -572,10 +576,10 @@ def get_megatron_master_optimizer(
         else:
             # if not using layer_wise wrapper, just create master weight here is fine
             optimizer = Float16OptimizerWithFloat16Params(
-                optimizer, config, None, muon_init_state_fn
+                optimizer, config, None, master_init_state_fn
             )
     else:
-        optimizer = FP32Optimizer(optimizer, config, muon_init_state_fn)
+        optimizer = FP32Optimizer(optimizer, config, master_init_state_fn)
 
     optimizers.append(optimizer)
 
@@ -584,10 +588,10 @@ def get_megatron_master_optimizer(
         expert_optimizer = MasterOptimizer(expert_param_groups, **master_kwargs)
         if config.bf16:
             expert_optimizer = Float16OptimizerWithFloat16Params(
-                expert_optimizer, config, None, muon_init_state_fn
+                expert_optimizer, config, None, master_init_state_fn
             )
         else:
-            expert_optimizer = FP32Optimizer(expert_optimizer, config, muon_init_state_fn)
+            expert_optimizer = FP32Optimizer(expert_optimizer, config, master_init_state_fn)
         setattr(expert_optimizer, 'grad_stats_parallel_group', pg_collection.tp_ep_pp)
         optimizers.append(expert_optimizer)
 
@@ -610,7 +614,7 @@ def get_megatron_master_optimizer(
         param.requires_grad = True
 
     # chain everything together
-    init_fns = [muon_init_state_fn] + len(chained_adam.chained_optimizers) * [adam_init_state_fn]
+    init_fns = [master_init_state_fn] + len(chained_adam.chained_optimizers) * [adam_init_state_fn]
     optimizers += chained_adam.chained_optimizers
 
     if layer_wise_distributed_optimizer:

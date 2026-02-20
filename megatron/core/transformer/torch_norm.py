@@ -9,6 +9,7 @@ from megatron.core.jit import jit_fuser
 from megatron.core.transformer import TransformerConfig
 from megatron.core.utils import is_torch_min_version
 from megatron.core.tensor_parallel.mappings import _reduce
+from megatron.core.transformer.module import MegatronModule
 
 _SEEDNORM_ACTIVATIONS = {
     "tanh": torch.tanh,
@@ -192,12 +193,13 @@ class SeeDNorm(torch.nn.Module):
         return self._seed_norm(x)
 
 
-class LayerScale(nn.Module):
-    def __init__(self, hidden_size: int, initial_value: float = 1.0, scale: Optional[float] = None,
-                 sequence_parallel: bool = False):
-        super().__init__()
+class LayerScale(MegatronModule):
+    def __init__(self, hidden_size: int, config=None, initial_value: float = 1.0, scale: Optional[float] = None,
+                 sequence_parallel: bool = False, dtype: Optional[torch.dtype] = None):
+        super().__init__(config=config)
         assert not sequence_parallel, "NYI"
-        self.weight = nn.Parameter(torch.empty(hidden_size))
+        self.weight = nn.Parameter(torch.empty(hidden_size, dtype=dtype))
+        self.dtype = dtype
         self.init_value = initial_value
         self.scale = scale
         self.reset_parameters()
@@ -208,11 +210,19 @@ class LayerScale(nn.Module):
         else:
             nn.init.constant_(self.weight, self.scale)
 
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        xdtype = x.dtype
+        if self.dtype is not None:
+            x = x.to(self.dtype)
+
         if self.scale is None:
-            return layer_scale(x, self.weight)
-        return layer_scale_with_scale(x, self.weight, self.init_value, self.scale)
+            y = layer_scale(x, self.weight)
+        else:
+            y = layer_scale_with_scale(x, self.weight, self.init_value, self.scale)
+
+        if self.type is not None:
+            y = y.to(xdtype)
+        return y
 
 
 @torch.compile
