@@ -41,7 +41,7 @@ ALPHA=5
 HYPERBALL=false
 HB_KIND=l2
 HB_R=1
-HB_NOUPDATE=false
+HB_UPDATE=false
 HB_EMBED=false
 HB_SPLIT_HEADS=false
 
@@ -83,16 +83,18 @@ usage () {
 	echo " --logits-layer-scale <float>"
 	echo " --logits-layer-scale-scale <float>"
 	# Optimizer settings.
-	echo " --opt <adam/dmuon/muon/ademamix> (default=$OPT)"
-	echo " --b1: beta1 (adam,muon&ademamix)"
-	echo " --b2: beta2 (adam&ademamix)"
-	echo " --b3: beta3 (ademamix)"
+	echo " --opt <adam/dmuon/muon/dmaster/master/ademamix> (default=$OPT)"
+	echo " --master-orthogonalize"
+	echo " --b1: beta1 (master&adam&muon&ademamix)"
+	echo " --b2: beta2 (master&adam&ademamix)"
+	echo " --mb2: beta2 (master)"
+	echo " --b3: beta3 (master&ademamix)"
 	echo " --alpha: ademamix alpha"
 	echo " --wd: weight decay"
 	echo " --hb <row/col/rowcol/flat>: Enables hyperball training"
 	echo " --hb-kind <l2/standard/spectral>: hyperball kind"
 	echo " --hb-r <learnable/float>: hyperball radius"
-	echo " --hb-nu: hyperball dont normalize update"
+	echo " --hb-u: hyperball normalize update"
 	echo " --hb-embed: hyperball normalize embeddings"
 	echo " --hb-split-heads: hyperball normalize q,k,v heads separately"
 	# Logs.
@@ -232,6 +234,8 @@ while [[ $# -gt 0 ]]; do
 		# Opt settings.
 		--opt)
 			OPT=$2; shift 2;;
+		--master-orthogonalize)
+			MASTER_ORTHOGONALIZE=true; shift;;
 		--b1)
 			BETA1=$2; shift 2;;
 		--b2)
@@ -248,8 +252,8 @@ while [[ $# -gt 0 ]]; do
 			HB_KIND=$2; shift 2;;
 		--hb-r)
 			HB_R=$2; shift 2;;
-		--hb-nu)
-			HB_NOUPDATE=true; shift;;
+		--hb-u)
+			HB_UPDATE=true; shift;;
 		--hb-embed)
 			HB_EMBED=true; shift;;
 		--hb-split-heads)
@@ -286,6 +290,21 @@ elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
 	if [[ $OPT = dmuon ]]; then
 		OPT=dist_muon
 	fi
+elif [[ $OPT = dmaster ]] || [[ $OPT = master ]]; then
+	SUFFIX=$SUFFIX-$OPT
+	if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.95 ]] || [[ $BETA3 != 0.999 ]]; then
+		SUFFIX=${SUFFIX}_b${BETA1}_${BETA2}_$BETA3
+	fi
+	if [[ $ALPHA != 5 ]]; then
+		SUFFIX=${SUFFIX}_a$ALPHA
+	fi
+	if [[ $MASTER_ORTHOGONALIZE = true ]]; then
+		SUFFIX=${SUFFIX}_o
+		OPT_ARGS+=(--use-orthogonal-updates)
+	fi
+	if [[ $OPT = dmaster ]]; then
+		OPT=dist_master
+	fi
 elif [[ $OPT = ademamix ]]; then
 	SUFFIX=$SUFFIX-amix
 	OPT_ARGS+=(--overlap-grad-reduce)
@@ -307,8 +326,9 @@ fi
 if [[ $HYPERBALL != false ]]; then
 	SUFFIX=$SUFFIX-HB${HYPERBALL}${HB_R}_$HB_KIND
 	OPT_ARGS+=(--hyperball-mode $HYPERBALL --hyperball-kind $HB_KIND --hyperball-radius $HB_R)
-	if [[ $HB_NOUPDATE = true ]]; then
-		SUFFIX=${SUFFIX}_nu
+	if [[ $HB_UPDATE = true ]]; then
+		SUFFIX=${SUFFIX}_u
+	else
 		OPT_ARGS+=(--hyperball-no-update)
 	fi
 	if [[ $HB_EMBED = true ]]; then
@@ -577,7 +597,8 @@ cat > $ROOT_PATH/submission.sbatch <<- EOM
 #SBATCH --exclusive
 #SBATCH --account=a-infra01-1
 #SBATCH --partition=${PARTITION:-normal}
-$MAYBE_SIGNAL
+#SBATCH --signal=SIGUSR2@180
+#SBATCH --dependency=singleton
 
 # Wake up.
 echo [\$(date)] Starting job

@@ -2206,6 +2206,8 @@ def _add_regularization_args(parser):
     group.add_argument('--hyperball-no-update', action="store_false", dest="hyperball_update")
     group.add_argument('--hyperball-embeddings', action="store_true")
     group.add_argument('--hyperball-split-heads', action="store_true")
+    group.add_argument('--weight-decay-method', choices=["decoupled", "independent"], default="decoupled")
+    group.add_argument('--use-orthogonal-updates', action="store_true")
     return parser
 
 
@@ -2499,7 +2501,7 @@ def _add_training_args(parser):
     group.add_argument('--qk-clip-threshold', type=float, default=100,
                        help='The balancing threshold for qk-clip.')
     group.add_argument('--optimizer', type=str, default='adam',
-                       choices=['adam', 'sgd', 'muon', 'dist_muon', 'ademamix'],
+                       choices=['adam', 'sgd', 'muon', 'dist_muon', 'ademamix', 'master', 'dist_master'],
                        help='Optimizer function')
     group.add_argument('--optimizer-cpu-offload', action='store_true',
                        help='Offload optimizer state to CPU')

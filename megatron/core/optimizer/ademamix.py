@@ -210,6 +210,7 @@ class AdEMAMix(torch.optim.Optimizer):
                             #print(f"g norms: {g.norm(dim=0)}")
                     update = merge_qkv(qkv, p.shape, self.qkv_split_shapes)
                     p.mul_(0).add_(update)
+                    hyperball_kwargs["hyperball_update"] = group["hyperball_update"]  # revert actual value for future parameters in the group.
                     #print(f"p norms: {p.norm(dim=0)}")
                     #print("---")
                 else:
@@ -296,7 +297,6 @@ def split_qkv(x, shapes: tuple[int, int, int]) -> list[torch.Tensor]:
 
 
 def split_heads(x, head_dim: int) -> tuple[torch.Tensor]:
-    # x.shape = (heads*head_dim, ?).
     return torch.split(x, head_dim, dim=1)
 
 

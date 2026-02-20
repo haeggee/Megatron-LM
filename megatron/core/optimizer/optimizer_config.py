@@ -242,6 +242,10 @@ class OptimizerConfig:
     hyperball_split_heads: bool = False
     """If enabled, then each q,k,v head matrix will be normalized separately."""
 
+    weight_decay_method: Literal["decoupled", "independent"] = "decoupled"
+
+    use_orthogonal_updates: bool = False
+
     # AdEMAMix
     ademamix_alpha: float = 2.0
     """AdEMAMix alpha coefficient mixing the slow and fast EMAs."""
@@ -440,3 +444,6 @@ class AdemamixOptimizerConfig(OptimizerConfig):
     optimizer: str = 'ademamix'
     """Optimizer name."""
 
+
+class MasterOptimizerConfig(OptimizerConfig):
+    optimizer: str = 'master'

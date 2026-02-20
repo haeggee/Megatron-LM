@@ -16,6 +16,8 @@ import sys
 from contextlib import nullcontext
 from typing import Any, Optional, Dict
 
+from megatron.core.optimizer.master import get_megatron_master_optimizer
+from megatron.core.optimizer.optimizer_config import MasterOptimizerConfig
 import torch.distributed
 
 from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
@@ -1213,7 +1215,13 @@ def get_megatron_optimizer_config(args: Any) -> OptimizerConfig:
     """Return a Megatron optimizer config object from Megatron's arguments."""
 
     config = None
-    if args.optimizer == 'adam' or 'muon' in args.optimizer:
+    if "master" in args.optimizer:
+        kwargs = {}
+        for f in dataclasses.fields(MasterOptimizerConfig):
+            if hasattr(args, f.name):
+                kwargs[f.name] = getattr(args, f.name)
+        config = MasterOptimizerConfig(**kwargs)
+    elif args.optimizer == 'adam' or 'muon' in args.optimizer:
         kwargs = {}
         for f in dataclasses.fields(AdamOptimizerConfig):
             if hasattr(args, f.name):
@@ -1262,7 +1270,15 @@ def setup_model_and_optimizer(
         config, config_overrides = get_megatron_optimizer_config(args)
         config.timers = timers
 
-        if 'muon' not in config.optimizer:
+        if "master" in config.optimizer:
+            optimizer = get_megatron_master_optimizer(
+                config,
+                model,
+                config_overrides=config_overrides,
+                use_gloo_process_groups=args.enable_gloo_process_groups,
+                layer_wise_distributed_optimizer="dist" in config.optimizer,
+            )
+        elif 'muon' not in config.optimizer:
             # If the user is asking for a non-zero embedding init std, skip weight decay for embeddings
             # to avoid embeddings from shrinking to zero as recommended in https://arxiv.org/abs/2312.16903
             # default_skip_embedding_weight_decay=args.embedding_init_method_std is not None,

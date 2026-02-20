@@ -1,15 +1,16 @@
 source .env  # export WANDB_API_KEY and HF_TOKEN here.
-LS=0.083  # approx 1/n_layers
-LSS=0.044  # approx 1/sqrt(hidden_dim)
-SS=11.31  # approx sqrt(k_dim)
-MS=22.62  # approx sqrt(hidden_dim)
+INV_LAYERS=0.083  # approx 1/n_layers
+INV_SQRTMODELDIM=0.044  # approx 1/sqrt(hidden_dim)
+SQRT_KDIM=11.31  # approx sqrt(k_dim)
+INV_SQRTKDIM=0.088  # approx 1/sqrt(k_dim)
+SQRT_MODELDIM=22.62  # approx sqrt(hidden_dim)
 bash submissions/submit.sh 110 \
 	--no-pre-norm --no-final-layernorm \
-	--opt ademamix --alpha 0 --hb row --hb-nu --hb-embed --hb-split-heads \
-	--normalization L2Norm --no-learnable-norms --post-norm --post-block-norm --use-stream-minus-residual --layer-scale $LS --layer-scale-scale $LSS \
-	--softmax-scale $SS --qk-norm L2Norm --qk-layer-scale 1 --qk-layer-scale-scale $LSS \
-	--mlp-layer-scale 1 --mlp-layer-scale-gate-scale $MS  \
-	--logits-layer-scale 1 --logits-layer-scale-scale $LSS \
+	--opt dmaster --alpha 0 --hb row --hb-embed --hb-split-heads \
+	--normalization L2Norm --no-learnable-norms --post-norm --post-block-norm --use-stream-minus-residual --layer-scale $INV_LAYERS --layer-scale-scale $INV_SQRTMODELDIM \
+	--softmax-scale $SQRT_KDIM --qk-layer-scale 1 --qk-layer-scale-scale $INV_SQRTKDIM \
+	--mlp-layer-scale 1 --mlp-layer-scale-gate-scale $SQRT_MODELDIM \
+	--logits-layer-scale 1 --logits-layer-scale-scale $INV_SQRTMODELDIM \
 	--no-warmup --wd 0 \
-	--init $LSS \
+	--init $INV_SQRTMODELDIM \
 	$*

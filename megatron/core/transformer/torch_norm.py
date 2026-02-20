@@ -102,7 +102,8 @@ class L2Norm(torch.nn.Module):
             torch.Tensor: The L2-normalized tensor.
         """
         x_float = x.float()
-        return (x_float * torch.rsqrt(x_float.pow(2).mean(-1, keepdim=True) + self.eps)).type_as(x)
+        #return (x_float * torch.rsqrt(x_float.pow(2).mean(-1, keepdim=True) + self.eps)).type_as(x)
+        return (x_float * torch.rsqrt(x_float.pow(2).sum(-1, keepdim=True) + self.eps)).type_as(x)
 
     def forward(self, x):
         """
@@ -191,63 +192,34 @@ class SeeDNorm(torch.nn.Module):
         return self._seed_norm(x)
 
 
-class _LayerScale(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x: torch.Tensor, weight: torch.Tensor, parallel_input: bool) -> torch.Tensor:
-        ctx.save_for_backward(x, weight)
-        ctx.parallel_input = parallel_input
-        return weight*x
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None]:
-        x, weight = ctx.saved_tensors
-        if not ctx.parallel_input:
-            return grad_output*weight, grad_output*x, None
-
-        grad_output_parallel = grad_output
-        grad_x_parallel = grad_output_parallel*weight
-
-        grad_weight_parallel = grad_output_parallel*weight
-        grad_weight_parallel_reduced = torch.sum(grad_weight_parallel.view(-1, weight.size(-1)), dim=0)
-        grad_weight = _reduce(grad_weight_parallel_reduced)
-
-        return grad_x_parallel, grad_weight, None
-
-
 class LayerScale(nn.Module):
-    def __init__(self, hidden_size: Optional[int] = None, initial_value: float = 1.0, device=None, dtype=None,
-                 sequence_parallel: bool = False, scale: Optional[float] = None):
+    def __init__(self, hidden_size: int, initial_value: float = 1.0, scale: Optional[float] = None,
+                 sequence_parallel: bool = False):
         super().__init__()
-        self.hidden_size = hidden_size
-        if hidden_size is None:
-            self.weight = torch.nn.Parameter(torch.empty(1, device=device, dtype=dtype))
-        else:
-            self.weight = torch.nn.Parameter(torch.empty(hidden_size, device=device, dtype=dtype))
-        self.sequence_parallel = sequence_parallel
-        self.initial_value = initial_value
+        assert not sequence_parallel, "NYI"
+        self.weight = nn.Parameter(torch.empty(hidden_size))
+        self.init_value = initial_value
         self.scale = scale
         self.reset_parameters()
 
     def reset_parameters(self):
-        if self.scale is None:  # regular LayerScale.
-            nn.init.constant_(self.weight, self.initial_value)
-        else:  # eigen learning rate as in nGPT.
+        if self.scale is None:
+            nn.init.constant_(self.weight, self.init_value)
+        else:
             nn.init.constant_(self.weight, self.scale)
 
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_dtype = x.dtype
-        if x_dtype != self.weight.dtype:
-            x = x.to(self.weight.dtype)
+        if self.scale is None:
+            return layer_scale(x, self.weight)
+        return layer_scale_with_scale(x, self.weight, self.init_value, self.scale)
 
-        if self.scale is None:  # regular LayerScale.
-            weight = self.weight
-        else:  # eigen learning rate as in nGPT.
-            weight = self.weight * (self.initial_value / self.scale)
 
-        y = _LayerScale.apply(x, weight, self.sequence_parallel)
-        if x_dtype != self.weight.dtype:
-            return y.to(x_dtype)
-        return y
+@torch.compile
+def layer_scale(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    return (x * weight)
 
-    def __repr__(self) -> str:
-        return f"LayerScale(hidden_size={self.hidden_size}, initial_value={self.initial_value}, sequence_parallel={self.sequence_parallel}, scale={self.scale})"
+
+@torch.compile
+def layer_scale_with_scale(x: torch.Tensor, weight: torch.Tensor, init_value: float, scale: float) -> torch.Tensor:
+    return (x * weight) * (init_value / scale)
