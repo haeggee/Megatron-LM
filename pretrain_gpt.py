@@ -3,6 +3,7 @@
 """Pretrain and SFT GPT."""
 
 import json
+import math
 from functools import partial
 from typing import List, Optional, Tuple
 
@@ -97,7 +98,34 @@ def get_batch(data_iterator, vp_stage=None):
 SPIKY_LOSS_FACTOR = 10
 
 
-def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optional[GPTModel] = None, labels: torch.Tensor = None):
+def get_current_image_weight(args):
+    """
+    Compute the current image-loss-weight, applying decay schedule if enabled.
+    If decay not enabled, return image weight.
+    """
+    if not args.image_weight_decay:
+        return args.image_weight
+
+    step = getattr(args, 'curr_iteration', 0)
+    start_step = args.image_weight_decay_start_step
+    end_step = args.image_weight_decay_end_step
+    w_max = args.image_weight_max
+    w_min = args.image_weight_min
+
+    if step <= start_step:
+        return w_max
+    if step >= end_step:
+        return w_min
+
+    progress = (step - start_step) / (end_step - start_step)
+
+    if args.image_weight_decay_schedule == 'cosine':
+        return w_min + 0.5 * (w_max - w_min) * (1.0 + math.cos(math.pi * progress))
+    else:  # linear
+        return w_max + (w_min - w_max) * progress
+
+
+def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optional[GPTModel] = None, labels: torch.Tensor = None, current_image_weight: float = None):
     """Loss function.
 
     Args:
@@ -188,6 +216,9 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optio
             report[f'{name}_token_loss'] = modality_stats[i][[0,1]]
             report[f'{name}_weighted_loss'] = modality_stats[i][[0,2]]
 
+    if args.log_image_weight:
+        report['image-weight'] = torch.tensor(current_image_weight)
+
     return loss, num_tokens, report
 
 
@@ -234,6 +265,17 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
             )
     timers('batch-generator').stop()
 
+    # Dynamic image weight decay: override loss_mask for image tokens
+    # Only do here if decay is activated as fixed img weight is applied in dataset class. (avoid unnecessary modification)
+    current_image_weight = get_current_image_weight(args)
+    if args.image_weight_decay and labels is not None:
+        vision_offset = getattr(args, 'vision_token_offset', None)
+        vision_vocab = getattr(args, 'vision_vocab_size', None)
+        if vision_offset is not None and vision_vocab is not None:
+            image_mask = (labels >= vision_offset) & (labels < vision_offset + vision_vocab)
+            loss_mask = loss_mask.clone()
+            loss_mask[image_mask] = current_image_weight
+
     with stimer:
         if args.use_legacy_models:
             output_tensor = model(tokens, position_ids, attention_mask, labels=labels,
@@ -246,7 +288,7 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
                     tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask,
                     packed_seq_params=packed_seq_params
                 )
-                return schedule_plan, partial(loss_func, loss_mask, model=model, labels=labels)
+                return schedule_plan, partial(loss_func, loss_mask, model=model, labels=labels, current_image_weight=current_image_weight)
             else:
                 output_tensor = model(
                     tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask,
@@ -254,7 +296,7 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
                 )
 
     # [ModelOpt]: model is needed to access ModelOpt distillation losses
-    return output_tensor, partial(loss_func, loss_mask, model=model, labels=labels)
+    return output_tensor, partial(loss_func, loss_mask, model=model, labels=labels, current_image_weight=current_image_weight)
 
 
 def is_dataset_built_on_rank(vp_stage=None):

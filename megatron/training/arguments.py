@@ -1319,6 +1319,25 @@ def validate_args(args, defaults={}):
         assert args.goldfish_k > 0, f"goldfish_k (frequency) must be a positive integer. ({args.goldfish_k})"
         assert args.goldfish_h > 0, f"goldfish_h (context width) must be a positive integer. ({args.goldfish_h})"
 
+    # Image weight decay
+    if args.image_weight_decay:
+        if args.image_weight_max is None:
+            args.image_weight_max = args.image_weight
+        assert args.image_weight_max >= args.image_weight_min, \
+            f"image_weight_max ({args.image_weight_max}) must be >= image_weight_min ({args.image_weight_min})"
+        # Resolve fraction to absolute steps
+        if args.image_weight_decay_start_step is None:
+            assert args.train_iters is not None, \
+                "--train-iters required for image-weight-decay when using fractional start/end"
+            args.image_weight_decay_start_step = int(args.image_weight_decay_start * args.train_iters)
+        if args.image_weight_decay_end_step is None:
+            assert args.train_iters is not None, \
+                "--train-iters required for image-weight-decay when using fractional start/end"
+            args.image_weight_decay_end_step = int(args.image_weight_decay_end * args.train_iters)
+        assert args.image_weight_decay_start_step < args.image_weight_decay_end_step, \
+            f"image_weight_decay_start_step ({args.image_weight_decay_start_step}) must be < " \
+            f"image_weight_decay_end_step ({args.image_weight_decay_end_step})"
+
     # Differential attention halves the effective head dimension for RoPE. If the
     # user left rotary_percent at its default, pick 0.5 automatically to match the
     # reference implementation; otherwise keep their choice but warn.
@@ -3108,6 +3127,25 @@ def _add_data_args(parser):
     group.add_argument('--image-weight', type=float, default=1.0,
                        help='Loss mask weight for image tokens between <|img_start|> and <|img_end|>. '
                             'Default 1.0 (normal loss). Set to 0.0 to fully mask image tokens.')
+    group.add_argument('--image-weight-decay', action='store_true', default=False,
+                       help='Enable dynamic decay of image token loss weight during training.')
+    group.add_argument('--image-weight-max', type=float, default=None,
+                       help='Starting (maximum) image weight for decay. Defaults to --image-weight.')
+    group.add_argument('--image-weight-min', type=float, default=0.0,
+                       help='Final (minimum) image weight for decay. Default 0.0.')
+    group.add_argument('--image-weight-decay-start', type=float, default=0.0,
+                       help='Fraction of train_iters at which image weight decay begins. Default 0.0.')
+    group.add_argument('--image-weight-decay-end', type=float, default=1.0,
+                       help='Fraction of train_iters at which image weight decay ends. Default 1.0.')
+    group.add_argument('--image-weight-decay-start-step', type=int, default=None,
+                       help='Absolute step at which image weight decay begins. Overrides --image-weight-decay-start.')
+    group.add_argument('--image-weight-decay-end-step', type=int, default=None,
+                       help='Absolute step at which image weight decay ends. Overrides --image-weight-decay-end.')
+    group.add_argument('--image-weight-decay-schedule', type=str, default='cosine',
+                       choices=['cosine', 'linear'],
+                       help='Schedule for image weight decay. Default cosine.')
+    group.add_argument('--log-image-weight', action='store_true', default=False,
+                       help='Log current image weight to tensorboard/wandb.')
     group.add_argument('--no-create-attention-mask-in-dataloader', action='store_false',
                        help='If set, do not create attention_masks in dataloader.',
                        dest='create_attention_mask_in_dataloader')
