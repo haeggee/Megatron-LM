@@ -1,7 +1,7 @@
 """
 This script is a modiefied version of create_data_config.py. It allows the same input as this script but to additionally define an overall weight in range 0-1.
 
-It will find all bin/idx pairs in the given paths and assign overall wights according to sizes of data samples. All weights normalized to sum to given weight.
+It will find all bin/idx pairs in the given paths and assign overall wights according number of sequences in each dataset. All weights normalized to sum to given weight.
 
 ex:
 
@@ -35,9 +35,9 @@ def get_dataset_size(prefix: str) -> int:
     with open(idx_file, 'rb') as f:
         f.seek(18)  # skip header(9) + version(8) + dtype(1)
         num_sequences = struct.unpack('<Q', f.read(8))[0]
-        num_docs = struct.unpack('<Q', f.read(8))[0]
+        #num_docs = struct.unpack('<Q', f.read(8))[0]
 
-    return num_docs
+    return num_sequences
 
 
 def create_data_prefix(list_of_paths: List[str]) -> List[str]:
