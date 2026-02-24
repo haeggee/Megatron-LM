@@ -1319,24 +1319,44 @@ def validate_args(args, defaults={}):
         assert args.goldfish_k > 0, f"goldfish_k (frequency) must be a positive integer. ({args.goldfish_k})"
         assert args.goldfish_h > 0, f"goldfish_h (context width) must be a positive integer. ({args.goldfish_h})"
 
-    # Image weight decay
-    if args.image_weight_decay:
-        if args.image_weight_max is None:
-            args.image_weight_max = args.image_weight
-        assert args.image_weight_max >= args.image_weight_min, \
-            f"image_weight_max ({args.image_weight_max}) must be >= image_weight_min ({args.image_weight_min})"
-        # Resolve fraction to absolute steps
-        if args.image_weight_decay_start_step is None:
+    def _validate_modality_weight_decay(modality: str) -> None:
+        decay_attr = f"{modality}_weight_decay"
+        if not getattr(args, decay_attr):
+            return
+
+        weight_attr = f"{modality}_weight"
+        max_attr = f"{modality}_weight_max"
+        min_attr = f"{modality}_weight_min"
+        start_attr = f"{modality}_weight_decay_start"
+        end_attr = f"{modality}_weight_decay_end"
+        start_step_attr = f"{modality}_weight_decay_start_step"
+        end_step_attr = f"{modality}_weight_decay_end_step"
+
+        if getattr(args, max_attr) is None:
+            setattr(args, max_attr, getattr(args, weight_attr))
+        max_value = getattr(args, max_attr)
+        min_value = getattr(args, min_attr)
+        assert max_value >= min_value, \
+            f"{max_attr} ({max_value}) must be >= {min_attr} ({min_value})"
+
+        # Resolve fraction to absolute steps.
+        if getattr(args, start_step_attr) is None:
             assert args.train_iters is not None, \
-                "--train-iters required for image-weight-decay when using fractional start/end"
-            args.image_weight_decay_start_step = int(args.image_weight_decay_start * args.train_iters)
-        if args.image_weight_decay_end_step is None:
+                f"--train-iters required for {modality}-weight-decay when using fractional start/end"
+            setattr(args, start_step_attr, int(getattr(args, start_attr) * args.train_iters))
+        if getattr(args, end_step_attr) is None:
             assert args.train_iters is not None, \
-                "--train-iters required for image-weight-decay when using fractional start/end"
-            args.image_weight_decay_end_step = int(args.image_weight_decay_end * args.train_iters)
-        assert args.image_weight_decay_start_step < args.image_weight_decay_end_step, \
-            f"image_weight_decay_start_step ({args.image_weight_decay_start_step}) must be < " \
-            f"image_weight_decay_end_step ({args.image_weight_decay_end_step})"
+                f"--train-iters required for {modality}-weight-decay when using fractional start/end"
+            setattr(args, end_step_attr, int(getattr(args, end_attr) * args.train_iters))
+
+        start_step = getattr(args, start_step_attr)
+        end_step = getattr(args, end_step_attr)
+        assert start_step < end_step, \
+            f"{start_step_attr} ({start_step}) must be < {end_step_attr} ({end_step})"
+
+    # Modality weight decay.
+    _validate_modality_weight_decay("vision")
+    _validate_modality_weight_decay("audio")
 
     # Differential attention halves the effective head dimension for RoPE. If the
     # user left rotary_percent at its default, pick 0.5 automatically to match the
@@ -3124,28 +3144,50 @@ def _add_data_args(parser):
                        help='Dropout factor k for goldfish loss masking, where dropout probability is 1/k.')
     group.add_argument('--goldfish-h', type=int, default=50,
                         help='Context width for hashing in goldfish loss masking. Controls how many preceding tokens determine masking.')
-    group.add_argument('--image-weight', type=float, default=1.0,
-                       help='Loss mask weight for image tokens between <|img_start|> and <|img_end|>. '
-                            'Default 1.0 (normal loss). Set to 0.0 to fully mask image tokens.')
-    group.add_argument('--image-weight-decay', action='store_true', default=False,
-                       help='Enable dynamic decay of image token loss weight during training.')
-    group.add_argument('--image-weight-max', type=float, default=None,
-                       help='Starting (maximum) image weight for decay. Defaults to --image-weight.')
-    group.add_argument('--image-weight-min', type=float, default=0.0,
-                       help='Final (minimum) image weight for decay. Default 0.0.')
-    group.add_argument('--image-weight-decay-start', type=float, default=0.0,
-                       help='Fraction of train_iters at which image weight decay begins. Default 0.0.')
-    group.add_argument('--image-weight-decay-end', type=float, default=1.0,
-                       help='Fraction of train_iters at which image weight decay ends. Default 1.0.')
-    group.add_argument('--image-weight-decay-start-step', type=int, default=None,
-                       help='Absolute step at which image weight decay begins. Overrides --image-weight-decay-start.')
-    group.add_argument('--image-weight-decay-end-step', type=int, default=None,
-                       help='Absolute step at which image weight decay ends. Overrides --image-weight-decay-end.')
-    group.add_argument('--image-weight-decay-schedule', type=str, default='cosine',
+    group.add_argument('--vision-weight', dest='vision_weight', type=float, default=1.0,
+                       help='Loss mask weight for vision tokens between <|img_start|> and <|img_end|>. '
+                            'Default 1.0 (normal loss). Set to 0.0 to fully mask vision tokens.')
+    group.add_argument('--audio-weight', type=float, default=1.0,
+                       help='Loss mask weight for audio tokens. '
+                            'Default 1.0 (normal loss). Set to 0.0 to fully mask audio tokens.')
+    group.add_argument('--vision-weight-decay', dest='vision_weight_decay', action='store_true', default=False,
+                       help='Enable dynamic decay of vision token loss weight during training.')
+    group.add_argument('--vision-weight-max', dest='vision_weight_max', type=float, default=None,
+                       help='Starting (maximum) vision weight for decay. Defaults to --vision-weight.')
+    group.add_argument('--vision-weight-min', dest='vision_weight_min', type=float, default=0.0,
+                       help='Final (minimum) vision weight for decay. Default 0.0.')
+    group.add_argument('--vision-weight-decay-start', dest='vision_weight_decay_start', type=float, default=0.0,
+                       help='Fraction of train_iters at which vision weight decay begins. Default 0.0.')
+    group.add_argument('--vision-weight-decay-end', dest='vision_weight_decay_end', type=float, default=1.0,
+                       help='Fraction of train_iters at which vision weight decay ends. Default 1.0.')
+    group.add_argument('--vision-weight-decay-start-step', dest='vision_weight_decay_start_step', type=int, default=None,
+                       help='Absolute step at which vision weight decay begins. Overrides --vision-weight-decay-start.')
+    group.add_argument('--vision-weight-decay-end-step', dest='vision_weight_decay_end_step', type=int, default=None,
+                       help='Absolute step at which vision weight decay ends. Overrides --vision-weight-decay-end.')
+    group.add_argument('--vision-weight-decay-schedule', dest='vision_weight_decay_schedule', type=str, default='cosine',
                        choices=['cosine', 'linear'],
-                       help='Schedule for image weight decay. Default cosine.')
-    group.add_argument('--log-image-weight', action='store_true', default=False,
-                       help='Log current image weight to tensorboard/wandb.')
+                       help='Schedule for vision weight decay. Default cosine.')
+    group.add_argument('--log-vision-weight', dest='log_vision_weight', action='store_true', default=False,
+                       help='Log current vision weight to tensorboard/wandb.')
+    group.add_argument('--audio-weight-decay', action='store_true', default=False,
+                       help='Enable dynamic decay of audio token loss weight during training.')
+    group.add_argument('--audio-weight-max', type=float, default=None,
+                       help='Starting (maximum) audio weight for decay. Defaults to --audio-weight.')
+    group.add_argument('--audio-weight-min', type=float, default=0.0,
+                       help='Final (minimum) audio weight for decay. Default 0.0.')
+    group.add_argument('--audio-weight-decay-start', type=float, default=0.0,
+                       help='Fraction of train_iters at which audio weight decay begins. Default 0.0.')
+    group.add_argument('--audio-weight-decay-end', type=float, default=1.0,
+                       help='Fraction of train_iters at which audio weight decay ends. Default 1.0.')
+    group.add_argument('--audio-weight-decay-start-step', type=int, default=None,
+                       help='Absolute step at which audio weight decay begins. Overrides --audio-weight-decay-start.')
+    group.add_argument('--audio-weight-decay-end-step', type=int, default=None,
+                       help='Absolute step at which audio weight decay ends. Overrides --audio-weight-decay-end.')
+    group.add_argument('--audio-weight-decay-schedule', type=str, default='cosine',
+                       choices=['cosine', 'linear'],
+                       help='Schedule for audio weight decay. Default cosine.')
+    group.add_argument('--log-audio-weight', action='store_true', default=False,
+                       help='Log current audio weight to tensorboard/wandb.')
     group.add_argument('--no-create-attention-mask-in-dataloader', action='store_false',
                        help='If set, do not create attention_masks in dataloader.',
                        dest='create_attention_mask_in_dataloader')

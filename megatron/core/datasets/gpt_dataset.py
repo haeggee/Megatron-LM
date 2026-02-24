@@ -5,7 +5,7 @@ import os
 import time
 from dataclasses import dataclass
 from math import ceil
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy
 import torch
@@ -67,8 +67,14 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
        Check --per-dataset-sequences-path
     """
 
-    image_weight: float = 1.0
-    """Loss weight for image tokens (between img_start and img_end). Default 1.0 (no change)."""
+    vision_weight: float = 1.0
+    """Loss weight for vision tokens (between img_start and img_end). Default 1.0 (no change)."""
+
+    audio_weight: float = 1.0
+    """Loss weight for audio tokens. Default 1.0 (no change)."""
+
+    modality_weights: Optional[Dict[str, float]] = None
+    """Per-modality loss weights keyed by modality name (e.g., vision/audio)."""
 
 
     def __post_init__(self) -> None:
@@ -92,6 +98,13 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
                 self.token_dtype_code is not None
             ), "Tokenizer vocab size is not set, deactivate --per-dataset-sequences-path or \
             fix the tokenizer."
+
+        if self.modality_weights is None:
+            self.modality_weights = {}
+        if "vision" not in self.modality_weights and self.vision_weight != 1.0:
+            self.modality_weights["vision"] = self.vision_weight
+        if "audio" not in self.modality_weights and self.audio_weight != 1.0:
+            self.modality_weights["audio"] = self.audio_weight
 
 
 class GPTDataset(MegatronDataset):
@@ -124,15 +137,7 @@ class GPTDataset(MegatronDataset):
         super().__init__(
             indexed_dataset, dataset_path, indexed_indices, num_samples, index_split, config
         )
-        self.masks_and_position_ids_are_cacheable = not any(
-            [
-                self.config.reset_position_ids,
-                self.config.reset_attention_mask,
-                self.config.eod_mask_loss,
-                self.config.goldfish_loss,
-                self.config.image_weight != 1.0,
-            ]
-        )
+
         self.masks_and_position_ids_are_cached = False
         self.cached_attention_mask = None
         self.cached_loss_mask = None
@@ -142,20 +147,68 @@ class GPTDataset(MegatronDataset):
         from megatron.training import get_args
         args = get_args()
 
-        # Image token loss masking
-        self._image_weight = self.config.image_weight
-        self._first_vision_token_id = None
-        self._last_vision_token_id = None
-        if self._image_weight != 1.0:
-            # Extract vision config from tokenizer
-            self._first_vision_token_id = args.vision_token_offset
-            self._last_vision_token_id = args.vision_token_offset + args.vision_vocab_size
+        # Build weighted modality specs as (name, start_id, end_id, weight).
+        self._weighted_modality_specs: List[Tuple[str, int, int, float]] = []
+        modality_weights = self.config.modality_weights or {}
+        used_modalities = set()
+        unresolved_weighted_modalities = []
+
+        omnimodal_config = getattr(args, "omnimodal_config", None)
+        if omnimodal_config is not None:
+            for modality in omnimodal_config.get("modalities", []):
+                name = modality.get("name")
+                if not name:
+                    continue
+                used_modalities.add(name)
+                weight = modality_weights.get(name, 1.0)
+                offset = modality.get("offset")
+                vocab_size = modality.get("vocab_size")
+                if weight == 1.0:
+                    continue
+                if offset is None or vocab_size is None:
+                    unresolved_weighted_modalities.append(name)
+                    continue
+                start = int(offset)
+                end = start + int(vocab_size)
+                self._weighted_modality_specs.append((name, start, end, float(weight)))
+
+        # Fallback for modality names not listed in omnimodal_config but exposed on args.
+        for name, weight in modality_weights.items():
+            if name in used_modalities or weight == 1.0:
+                continue
+            offset = getattr(args, f"{name}_token_offset", None)
+            vocab_size = getattr(args, f"{name}_vocab_size", None)
+            if offset is None or vocab_size is None:
+                unresolved_weighted_modalities.append(name)
+                continue
+            start = int(offset)
+            end = start + int(vocab_size)
+            self._weighted_modality_specs.append((name, start, end, float(weight)))
+
+        if unresolved_weighted_modalities:
+            missing = ", ".join(sorted(set(unresolved_weighted_modalities)))
+            raise ValueError(
+                "Configured non-default modality weights without token range metadata for: "
+                f"{missing}. Ensure tokenizer omnimodal_config (or args.*_token_offset/args.*_vocab_size) "
+                "contains these modalities."
+            )
+
+        for name, start, end, weight in self._weighted_modality_specs:
             log_single_rank(
                 logger,
                 logging.INFO,
-                f"VISION ID RANGE: {self._first_vision_token_id} {self._last_vision_token_id} apply weight {self._image_weight}",
+                f"{name.upper()} ID RANGE: {start} {end} apply weight {weight}",
             )
 
+        self.masks_and_position_ids_are_cacheable = not any(
+            [
+                self.config.reset_position_ids,
+                self.config.reset_attention_mask,
+                self.config.eod_mask_loss,
+                self.config.goldfish_loss,
+                bool(self._weighted_modality_specs),
+            ]
+        )
 
         # Optional contiguous range of omni special tokens to skip in goldfish masking.
         self._goldfish_exemption_start = None
@@ -173,6 +226,12 @@ class GPTDataset(MegatronDataset):
             exempt = getattr(self.config.tokenizer, "goldfish_exemption_range", None)
             if exempt:
                 self._goldfish_exemption_start, self._goldfish_exemption_end = exempt
+                log_single_rank(
+                    logger,
+                    logging.INFO,
+                    "Goldfish exemption range enabled: "
+                    f"[{self._goldfish_exemption_start}, {self._goldfish_exemption_end})",
+                )
 
     @staticmethod
     def numel_low_level_dataset(low_level_dataset: IndexedDataset) -> int:
@@ -325,10 +384,11 @@ class GPTDataset(MegatronDataset):
 
             loss_mask[goldfish_labels == self._goldfish_token_id] = 0.0
 
-        # Image token loss masking
-        if self._image_weight != 1.0 and self._first_vision_token_id is not None:
-            image_mask = (labels >= self._first_vision_token_id) & (labels < self._last_vision_token_id)
-            loss_mask[image_mask] = self._image_weight
+        # Modality token loss masking.
+        for _, start, end, weight in self._weighted_modality_specs:
+            modality_mask = (labels >= start) & (labels < end)
+            active_modality_mask = modality_mask & (loss_mask > 0)
+            loss_mask[active_modality_mask] = weight
 
         # Batch padding sequence so we mask the loss
         if idx is None:

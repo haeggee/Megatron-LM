@@ -21,6 +21,7 @@ from megatron.core.utils import StragglerDetector, get_attr_wrapped_model
 from megatron.training import get_args, get_timers, get_tokenizer, inprocess_restart, pretrain, print_rank_0
 from megatron.training.datasets.sft_dataset import SFTDataset
 from megatron.training.datasets.fim_dataset import GPTFIMDataset, GPTFIMDatasetConfig
+from megatron.training.tokenizer.tokenizer_omni_metadata import populate_omni_metadata_from_tokenizer
 from megatron.training.utils import (
     get_batch_on_this_cp_rank,
     get_batch_on_this_tp_rank,
@@ -96,21 +97,19 @@ def get_batch(data_iterator, vp_stage=None):
 
 # define spiky loss as a loss that's 10x the max loss observed
 SPIKY_LOSS_FACTOR = 10
+MODALITY_WEIGHT_NAMES = ("vision", "audio")
 
 
-def get_current_image_weight(args):
-    """
-    Compute the current image-loss-weight, applying decay schedule if enabled.
-    If decay not enabled, return image weight.
-    """
-    if not args.image_weight_decay:
-        return args.image_weight
+def get_current_modality_weight(args, modality: str) -> float:
+    """Compute current modality loss weight using static or decay config."""
+    if not getattr(args, f"{modality}_weight_decay"):
+        return getattr(args, f"{modality}_weight")
 
-    step = getattr(args, 'curr_iteration', 0)
-    start_step = args.image_weight_decay_start_step
-    end_step = args.image_weight_decay_end_step
-    w_max = args.image_weight_max
-    w_min = args.image_weight_min
+    step = getattr(args, "curr_iteration", 0)
+    start_step = getattr(args, f"{modality}_weight_decay_start_step")
+    end_step = getattr(args, f"{modality}_weight_decay_end_step")
+    w_max = getattr(args, f"{modality}_weight_max")
+    w_min = getattr(args, f"{modality}_weight_min")
 
     if step <= start_step:
         return w_max
@@ -118,14 +117,41 @@ def get_current_image_weight(args):
         return w_min
 
     progress = (step - start_step) / (end_step - start_step)
-
-    if args.image_weight_decay_schedule == 'cosine':
+    schedule = getattr(args, f"{modality}_weight_decay_schedule")
+    if schedule == "cosine":
         return w_min + 0.5 * (w_max - w_min) * (1.0 + math.cos(math.pi * progress))
-    else:  # linear
-        return w_max + (w_min - w_max) * progress
+    return w_max + (w_min - w_max) * progress
 
 
-def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optional[GPTModel] = None, labels: torch.Tensor = None, current_image_weight: float = None):
+def apply_decay_modality_weights(loss_mask: torch.Tensor, labels: torch.Tensor, args, current_weights: dict) -> torch.Tensor:
+    """Apply decayed modality weights only on currently active (non-zero) loss entries."""
+    if labels is None:
+        return loss_mask
+
+    loss_mask_modified = False
+    for modality, current_weight in current_weights.items():
+        if not getattr(args, f"{modality}_weight_decay", False):
+            continue
+
+        offset = getattr(args, f"{modality}_token_offset", None)
+        vocab_size = getattr(args, f"{modality}_vocab_size", None)
+        if offset is None or vocab_size is None:
+            raise ValueError(
+                f"{modality}_weight_decay is enabled but token metadata is missing. "
+                f"Expected args.{modality}_token_offset and args.{modality}_vocab_size from tokenizer omnimodal_config."
+            )
+
+        modality_mask = (labels >= offset) & (labels < offset + vocab_size)
+        active_modality_mask = modality_mask & (loss_mask > 0)
+        if not loss_mask_modified:
+            loss_mask = loss_mask.clone()
+            loss_mask_modified = True
+        loss_mask[active_modality_mask] = current_weight
+
+    return loss_mask
+
+
+def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optional[GPTModel] = None, labels: torch.Tensor = None, current_modality_weights: dict = None):
     """Loss function.
 
     Args:
@@ -216,8 +242,9 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optio
             report[f'{name}_token_loss'] = modality_stats[i][[0,1]]
             report[f'{name}_weighted_loss'] = modality_stats[i][[0,2]]
 
-    if args.log_image_weight:
-        report['image-weight'] = torch.tensor(current_image_weight)
+    for modality, weight in (current_modality_weights or {}).items():
+        if getattr(args, f"log_{modality}_weight", False):
+            report[f"{modality}-weight"] = torch.tensor(weight, device=loss_mask.device)
 
     return loss, num_tokens, report
 
@@ -265,16 +292,11 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
             )
     timers('batch-generator').stop()
 
-    # Dynamic image weight decay: override loss_mask for image tokens
-    # Only do here if decay is activated as fixed img weight is applied in dataset class. (avoid unnecessary modification)
-    current_image_weight = get_current_image_weight(args)
-    if args.image_weight_decay and labels is not None:
-        vision_offset = getattr(args, 'vision_token_offset', None)
-        vision_vocab = getattr(args, 'vision_vocab_size', None)
-        if vision_offset is not None and vision_vocab is not None:
-            image_mask = (labels >= vision_offset) & (labels < vision_offset + vision_vocab)
-            loss_mask = loss_mask.clone()
-            loss_mask[image_mask] = current_image_weight
+    # Dynamic modality weight decay: update active modality tokens only.
+    current_modality_weights = {
+        modality: get_current_modality_weight(args, modality) for modality in MODALITY_WEIGHT_NAMES
+    }
+    loss_mask = apply_decay_modality_weights(loss_mask, labels, args, current_modality_weights)
 
     with stimer:
         if args.use_legacy_models:
@@ -288,7 +310,13 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
                     tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask,
                     packed_seq_params=packed_seq_params
                 )
-                return schedule_plan, partial(loss_func, loss_mask, model=model, labels=labels, current_image_weight=current_image_weight)
+                return schedule_plan, partial(
+                    loss_func,
+                    loss_mask,
+                    model=model,
+                    labels=labels,
+                    current_modality_weights=current_modality_weights,
+                )
             else:
                 output_tensor = model(
                     tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask,
@@ -296,7 +324,13 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
                 )
 
     # [ModelOpt]: model is needed to access ModelOpt distillation losses
-    return output_tensor, partial(loss_func, loss_mask, model=model, labels=labels, current_image_weight=current_image_weight)
+    return output_tensor, partial(
+        loss_func,
+        loss_mask,
+        model=model,
+        labels=labels,
+        current_modality_weights=current_modality_weights,
+    )
 
 
 def is_dataset_built_on_rank(vp_stage=None):
@@ -309,6 +343,10 @@ def core_gpt_dataset_config_from_args(args):
     else:
         tokenizer = build_tokenizer(args)
 
+    # Populate metadata for both tokenizer paths. This keeps goldfish exemption and
+    # modality offsets/vocab available to GPT dataset construction and reporting.
+    populate_omni_metadata_from_tokenizer(args, tokenizer)
+
     # Sometimes --data-path is too long, instead we parse it from a file.
     blend: Optional[Tuple[List[str], Optional[List[float]]]]
     blend_per_split: Optional[List[Optional[Tuple[List[str], Optional[List[float]]]]]]
@@ -318,6 +356,23 @@ def core_gpt_dataset_config_from_args(args):
     if args.per_dataset_sequences_path is not None:
         with open(args.per_dataset_sequences_path, "r") as f:
             sequences_per_dataset = json.load(f)
+
+    modality_weights = {}
+    omnimodal_config = getattr(args, "omnimodal_config", None)
+    if omnimodal_config is not None:
+        for modality in omnimodal_config.get("modalities", []):
+            name = modality.get("name")
+            if not name:
+                continue
+            weight = getattr(args, f"{name}_weight", None)
+            if weight is not None:
+                modality_weights[name] = weight
+
+    # Backward-compatible fallback for legacy modality names.
+    for name in ("vision", "audio"):
+        weight = getattr(args, f"{name}_weight", None)
+        if weight is not None:
+            modality_weights.setdefault(name, weight)
 
     data_args = {
         "random_seed": args.seed,
@@ -344,7 +399,9 @@ def core_gpt_dataset_config_from_args(args):
         "goldfish_loss": args.goldfish_loss,
         "goldfish_k": args.goldfish_k,
         "goldfish_h": args.goldfish_h,
-        "image_weight": args.image_weight,
+        "modality_weights": modality_weights,
+        "vision_weight": args.vision_weight,
+        "audio_weight": args.audio_weight,
     }
 
     # add FIM args to the config
