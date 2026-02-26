@@ -2059,6 +2059,9 @@ def _add_logging_args(parser):
     group.add_argument('--log-world-size-to-tensorboard',
                        action='store_true',
                        help='Enable world size logging to tensorboard.')
+    group.add_argument('--log-pre-final-ln-norm',
+                        action='store_true',
+                        help='If set, log the pre-final-layernorm activation norm.')
     group.add_argument('--log-max-attention-logit', action='store_true',
                        help='Enable max attention logit logging to tensorboard.')
     group.add_argument('--wandb-project', type=str, default='',
