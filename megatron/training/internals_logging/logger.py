@@ -3,7 +3,7 @@
 """Main logger class for model internals logging to W&B."""
 
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Tuple
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -13,14 +13,75 @@ from .hooks import InternalsHookManager
 from .state_manager import InternalsStateManager
 from .metrics import (
     compute_activation_stats,
+    compute_delta_y,
+    compute_delta_y_qkv_split,
+    compute_delta_y_swiglu_split,
     compute_gradient_norm,
     compute_gradient_weight_alignment,
     compute_grad_shard_norm_sq,
     compute_grad_weight_dot_shard,
     get_param_grad,
 )
+from .hooks import _LINEAR_LAYER_PATHS
 
 from megatron.training.utils import prettify_metric_keys
+
+
+def _build_model_info(model: nn.Module):
+    """Walk TransformerLayers once to extract all static model structure info.
+
+    Builds two data structures that are invariant across training steps:
+    - split_info: identifies fused weight matrices and their split config
+    - linear_entries: maps (linear_attr, layer_number) to module references
+
+    Returns:
+        split_info: Dict[int, dict] — id(param) → {type, ...split config}
+        linear_entries: Dict[Tuple[str, int], Tuple[nn.Module, nn.Module]]
+            — (linear_attr, layer_number) → (linear_module, transformer_layer)
+    """
+    from megatron.core.transformer.transformer_layer import TransformerLayer
+
+    split_info: Dict[int, dict] = {}
+    linear_entries: Dict[Tuple[str, int], Tuple[nn.Module, nn.Module]] = {}
+
+    for _, module in model.named_modules():
+        if not isinstance(module, TransformerLayer):
+            continue
+
+        layer_number = module.layer_number
+
+        for parent_attr, linear_attr in _LINEAR_LAYER_PATHS:
+            parent = getattr(module, parent_attr, None)
+            if parent is None:
+                continue
+            linear_module = getattr(parent, linear_attr, None)
+            if linear_module is None:
+                continue
+            linear_entries[(linear_attr, layer_number)] = (linear_module, module)
+
+        attn = getattr(module, 'self_attention', None)
+        if attn is not None:
+            qkv = getattr(attn, 'linear_qkv', None)
+            if qkv is not None and hasattr(qkv, 'weight'):
+                split_info[id(qkv.weight)] = {
+                    'type': 'qkv',
+                    'num_query_groups': attn.num_query_groups_per_partition,
+                    'num_query_heads_per_group': (
+                        attn.num_attention_heads_per_partition
+                        // attn.num_query_groups_per_partition
+                    ),
+                    'head_dim': attn.hidden_size_per_attention_head,
+                }
+
+        if getattr(module.config, 'gated_linear_unit', False):
+            mlp = getattr(module, 'mlp', None)
+            if mlp is not None:
+                fc1 = getattr(mlp, 'linear_fc1', None)
+                if fc1 is not None and hasattr(fc1, 'weight'):
+                    split_info[id(fc1.weight)] = {'type': 'swiglu'}
+
+    return split_info, linear_entries
+
 
 class InternalsLogger:
     """Main logger class that orchestrates model internals logging to W&B.
@@ -59,6 +120,8 @@ class InternalsLogger:
         self.is_logging_rank = is_logging_rank
         self._dist_optimizer = None
         self._dp_group = None
+        self._split_info = None
+        self._linear_entries = None
 
     def snapshot_weights(self, model: nn.Module) -> None:
         """Snapshot current weights before the training step.
@@ -120,6 +183,9 @@ class InternalsLogger:
             iteration: Current training iteration.
             wandb_writer: W&B writer instance (None on non-logging ranks).
         """
+        if self._split_info is None:
+            self._split_info, self._linear_entries = _build_model_info(model)
+
         metrics: Dict[str, float] = {}
 
         # 1. Activation statistics (all DP ranks participate for reduction)
@@ -141,7 +207,9 @@ class InternalsLogger:
 
         # 3. Relative weight updates (logging rank only, weights are all-gathered)
         if self.config.log_relative_updates and self.is_logging_rank:
-            weight_delta_metrics = self.state_manager.compute_weight_deltas(model)
+            weight_delta_metrics = self.state_manager.compute_weight_deltas(
+                model, self._split_info,
+            )
             metrics.update(weight_delta_metrics)
 
         # 4. Angular metrics
@@ -159,6 +227,12 @@ class InternalsLogger:
             else:
                 alignment_metrics = {}
             metrics.update(alignment_metrics)
+
+        # 5. Delta Y — all ranks must participate (TP collectives in linear forward)
+        if self.config.log_delta_y:
+            delta_y_metrics = self._compute_delta_y_metrics(model)
+            if self.is_logging_rank:
+                metrics.update(delta_y_metrics)
 
         # Log all metrics to W&B (logging rank only)
         if self.is_logging_rank and metrics and wandb_writer is not None:
@@ -464,6 +538,69 @@ class InternalsLogger:
                         break
 
         self._add_layer_alignment_metrics(metrics, layer_alignments)
+        return metrics
+
+    def _compute_delta_y_metrics(self, model: nn.Module) -> Dict[str, float]:
+        """Compute delta_Y metrics by re-running linear layers with stored inputs.
+
+        For each linear layer with captured (input, output) from the forward pass,
+        re-runs the layer with the stored input and updated weights, then computes
+        ||Y_new - Y_old|| / ||Y_old||.
+
+        For fused projections that pack distinct operations into one matmul,
+        the output is split before computing delta_Y per component:
+        - linear_qkv: split into Q, K, V (interleaved by query group)
+        - linear_fc1 with SwiGLU: split into gate and up
+
+        ALL TP ranks must call this method because the linear layer forward
+        involves TP collective communication.
+
+        Args:
+            model: The model with updated weights.
+
+        Returns:
+            Dictionary mapping metric names to delta_Y values.
+        """
+        captured = self.hook_manager.captured_linear_io
+        if not captured:
+            return {}
+
+        metrics = {}
+        for key in sorted(captured.keys()):
+            linear_name, layer_number = key
+            entry = self._linear_entries.get(key)
+            if entry is None:
+                continue
+
+            linear_module, _ = entry
+            stored_input, stored_output = captured[key]
+
+            info = (
+                self._split_info.get(id(linear_module.weight))
+                if hasattr(linear_module, 'weight') else None
+            )
+
+            if info is not None and info['type'] == 'qkv':
+                split_metrics = compute_delta_y_qkv_split(
+                    linear_module, stored_input, stored_output,
+                    num_query_groups=info['num_query_groups'],
+                    num_query_heads_per_group=info['num_query_heads_per_group'],
+                    head_dim=info['head_dim'],
+                )
+                for comp, value in split_metrics.items():
+                    metrics[f'delta_Y/{comp}/layer_{layer_number:02d}'] = value
+
+            elif info is not None and info['type'] == 'swiglu':
+                split_metrics = compute_delta_y_swiglu_split(
+                    linear_module, stored_input, stored_output,
+                )
+                for comp, value in split_metrics.items():
+                    metrics[f'delta_Y/{comp}/layer_{layer_number:02d}'] = value
+
+            else:
+                delta_y = compute_delta_y(linear_module, stored_input, stored_output)
+                metrics[f'delta_Y/{linear_name}/layer_{layer_number:02d}'] = delta_y
+
         return metrics
 
     # ------------------------------------------------------------------
