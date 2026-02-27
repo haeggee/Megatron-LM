@@ -1347,6 +1347,8 @@ def load_args_from_checkpoint(
     _set_arg('add_qkv_bias', force=True)
     _set_arg('squared_relu', force=True)
     _set_arg('swiglu', force=True)
+    _set_arg('xielu', force=True)
+    _set_arg('qk_layernorm', force=True)
     _set_arg('untie_embeddings_and_output_weights', force=True)
     _set_arg('apply_layernorm_1p', force=True)
     _set_arg('normalization', force=True)

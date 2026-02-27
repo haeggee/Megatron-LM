@@ -340,6 +340,23 @@ class MegatronCheckpointLoaderBase:
                         else:
                             message["mlp l0 bias"] = torch.cat(mlp_l0_bias, dim=0)
 
+                    if self.md.qk_layernorm:
+                        message["q norm weight"] = layer["self_attn_q_layernorm_weight"]
+                        message["k norm weight"] = layer["self_attn_k_layernorm_weight"]
+
+                    if self.md.xielu:
+                        # there is also mlp alpha_p and alpha_n?
+                        message["mlp xielu alpha p"] = layer["mlp_xielu_alpha_p"]
+                        message["mlp xielu alpha n"] = layer["mlp_xielu_alpha_n"]
+
+                        if "mlp_xielu_beta" in layer and layer["mlp_xielu_beta"] is not None:
+                            beta = layer["mlp_xielu_beta"]
+                            message["mlp xielu beta"] = (
+                                beta if isinstance(beta, torch.Tensor) else torch.tensor(beta)
+                            )
+                        if "mlp_xielu_eps" in layer and layer["mlp_xielu_eps"] is not None:
+                            message["mlp xielu eps"] = layer["mlp_xielu_eps"]
+
                     self.queue_put(f"transformer layer {total_layer_num}", message)
                     total_layer_num += 1
 
@@ -451,6 +468,8 @@ class MegatronCheckpointLoaderBase:
         md.qkv_bias = self.margs.add_qkv_bias
         md.norm_has_bias = norm_has_bias
         md.swiglu = self.margs.swiglu
+        md.xielu = self.margs.xielu
+        md.qk_layernorm = self.margs.qk_layernorm
         md.previous_tensor_parallel_size = self.margs.tensor_model_parallel_size
         md.previous_pipeline_parallel_size = self.margs.pipeline_model_parallel_size
         md.true_vocab_size = true_vocab_size
@@ -492,4 +511,3 @@ class MegatronCheckpointLoaderBase:
     def send_model_over_queue(self):
         """Creates model schema and sends the model over the queue"""
         raise NotImplementedError
-
