@@ -208,12 +208,17 @@ class ProcessGroupCollection:
             'pos_embd': partial(
                 parallel_state.get_position_embedding_group, check_initialized=False
             ),
-            'dp': parallel_state.get_data_parallel_group,
-            'dp_cp': partial(parallel_state.get_data_parallel_group, with_context_parallel=True),
+            'dp': partial(parallel_state.get_data_parallel_group, check_initialized=False),
+            'dp_cp': partial(
+                parallel_state.get_data_parallel_group,
+                with_context_parallel=True,
+                check_initialized=False,
+            ),
             'intra_dp_cp': partial(
                 parallel_state.get_data_parallel_group,
                 with_context_parallel=True,
                 partial_data_parallel=True,
+                check_initialized=False,
             ),
             'intra_expt_dp': partial(
                 parallel_state.get_expert_data_parallel_group,
