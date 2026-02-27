@@ -384,19 +384,50 @@ class MegatronFSDP(torch.nn.Module):
                 # The suggested size is twice the number of elements in the FSDP modules.
                 # This ensures we process the current FSDP module and attempt to prefetch
                 # the next FSDP module, making the flow of communication better.
-                suggested_communication_unit_size = total_param_elements // total_fsdp_module * 2
+                params_per_fsdp_unit = total_param_elements // total_fsdp_module
+                suggested_communication_unit_size = params_per_fsdp_unit * 2
+                if torch.distributed.get_rank() == 0:
+                    logger.info(
+                        f"Auto-calculated suggested_communication_unit_size: "
+                        f"total_param_elements={total_param_elements:,}, "
+                        f"total_fsdp_modules={total_fsdp_module}, "
+                        f"params_per_fsdp_unit={params_per_fsdp_unit:,}, "
+                        f"suggested_communication_unit_size={suggested_communication_unit_size:,} (2 FSDP units)"
+                    )
             elif self.bucket_size is not None:
                 suggested_communication_unit_size = self.bucket_size
+                if torch.distributed.get_rank() == 0:
+                    logger.info(
+                        f"Auto-calculated suggested_communication_unit_size from bucket_size: "
+                        f"{suggested_communication_unit_size:,}"
+                    )
             else:
                 suggested_communication_unit_size = 1_000_000_000
+                if torch.distributed.get_rank() == 0:
+                    logger.info(
+                        f"Using default suggested_communication_unit_size: "
+                        f"{suggested_communication_unit_size:,}"
+                    )
 
             # Cap to 1B elements.
+            pre_cap_size = suggested_communication_unit_size
             suggested_communication_unit_size = max(
                 1_000_000_000, suggested_communication_unit_size
             )
+            if torch.distributed.get_rank() == 0 and pre_cap_size != suggested_communication_unit_size:
+                logger.info(
+                    f"suggested_communication_unit_size capped from {pre_cap_size:,} to {suggested_communication_unit_size:,}"
+                )
 
         self.suggested_RS_queue_capacity = suggested_communication_unit_size
         self.suggested_AG_prefetch_size = suggested_communication_unit_size // 2
+
+        if torch.distributed.get_rank() == 0:
+            logger.info(
+                f"FSDP communication unit size: suggested_communication_unit_size={suggested_communication_unit_size:,}, "
+                f"RS_queue_capacity={self.suggested_RS_queue_capacity:,}, "
+                f"AG_prefetch_size={self.suggested_AG_prefetch_size:,}"
+            )
 
         if self.data_parallel_sharding_strategy == "optim_grads_params":
             override_sharded_param_methods_with_safety_checks(

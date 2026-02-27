@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Protocol, Union
@@ -27,7 +29,9 @@ from megatron.core.transformer.moe.token_dispatcher import (
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.typed_torch import apply_module
-from megatron.core.utils import internal_api
+from megatron.core.utils import internal_api, log_single_rank
+
+logger = logging.getLogger(__name__)
 
 try:
     import transformer_engine as te  # pylint: disable=unused-import
@@ -154,6 +158,15 @@ class MoELayer(BaseMoELayer):
             config.recompute_granularity == 'selective'
             and "moe" in config.recompute_modules
             and config.cuda_graph_impl != 'local'
+        )
+        # DEBUG: Log moe_layer_recompute status
+        log_single_rank(
+            logger,
+            logging.INFO,
+            f"[DEBUG MoE Layer {layer_number}] moe_layer_recompute={self.moe_layer_recompute}, "
+            f"granularity={config.recompute_granularity}, "
+            f"'moe' in modules={'moe' in (config.recompute_modules or [])}, "
+            f"cuda_graph_impl={config.cuda_graph_impl}",
         )
         self.shared_experts_recompute = (
             config.recompute_granularity == 'selective'
@@ -430,6 +443,14 @@ class MoELayer(BaseMoELayer):
             return output, mlp_bias
 
         if self.moe_layer_recompute:
+            # DEBUG: Log that we're using checkpoint recompute
+            if not hasattr(self, '_debug_logged_recompute'):
+                log_single_rank(
+                    logger,
+                    logging.INFO,
+                    f"[DEBUG MoE forward] Using checkpoint recompute, fp8={self.config.fp8}, fp4={self.config.fp4}",
+                )
+                self._debug_logged_recompute = True
             if self.config.fp8 or self.config.fp4:
                 outputs = te_checkpoint(
                     custom_forward,
@@ -444,6 +465,14 @@ class MoELayer(BaseMoELayer):
                     custom_forward, False, hidden_states, padding_mask
                 )
         else:
+            # DEBUG: Log that we're NOT using recompute
+            if not hasattr(self, '_debug_logged_no_recompute'):
+                log_single_rank(
+                    logger,
+                    logging.INFO,
+                    f"[DEBUG MoE forward] NOT using recompute (moe_layer_recompute={self.moe_layer_recompute})",
+                )
+                self._debug_logged_no_recompute = True
             outputs = custom_forward(hidden_states, intermediate_tensors, padding_mask)
 
         return outputs

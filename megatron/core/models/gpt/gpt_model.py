@@ -1,7 +1,9 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
+from __future__ import annotations
+
 from collections import OrderedDict
-from typing import Dict, Literal, Optional
+from typing import TYPE_CHECKING, Dict, Literal, Optional
 
 import torch
 from torch import Tensor
@@ -9,7 +11,9 @@ from torch import Tensor
 from megatron.core import parallel_state, tensor_parallel
 from megatron.core.config_logger import has_config_logger_enabled, log_config_to_disk
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
-from megatron.core.inference.contexts import BaseInferenceContext
+
+if TYPE_CHECKING:
+    from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.models.common.embeddings import YarnRotaryEmbedding
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.models.common.embeddings.rotary_pos_embedding import (

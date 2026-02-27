@@ -865,6 +865,33 @@ def apply_router_token_dropping(
     return final_probs, final_map
 
 
+def expert_max_violation_batchwise(
+    routing_map: torch.Tensor,
+    num_experts: int,
+    total_num_tokens: int,
+    topk: int,
+) -> torch.Tensor:
+    """Compute the maximum expert violation ratio in the micro-batch.
+
+    A perfect balance yields 0. Positive values indicate overloaded experts.
+
+    Args:
+        routing_map: Boolean tensor [num_tokens, num_experts] of expert assignments.
+        num_experts: Number of routable (FFN) experts.
+        total_num_tokens: Total number of tokens in the micro-batch.
+        topk: Number of experts selected per token.
+
+    Returns:
+        Scalar tensor with the maximum violation ratio across all experts.
+    """
+    tokens_per_expert = routing_map.sum(dim=0).float()
+    effective_total_tokens = total_num_tokens * topk
+    ideal_tokens_per_expert = effective_total_tokens / num_experts
+    violation_ratios = (tokens_per_expert - ideal_tokens_per_expert) / ideal_tokens_per_expert
+    max_violation = torch.max(violation_ratios)
+    return max_violation
+
+
 def save_to_aux_losses_tracker(
     name: str,
     loss: torch.Tensor,

@@ -5,13 +5,15 @@ import copy
 import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Optional, Protocol, Tuple, Union
+from typing import TYPE_CHECKING, Callable, Optional, Protocol, Tuple, Union
 
 import torch
 from torch import Tensor
 
 from megatron.core import tensor_parallel
-from megatron.core.inference.contexts import BaseInferenceContext
+
+if TYPE_CHECKING:
+    from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.jit import jit_fuser
 from megatron.core.models.common.embeddings.rope_utils import (
     apply_rotary_pos_emb,

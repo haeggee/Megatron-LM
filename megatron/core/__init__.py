@@ -4,7 +4,6 @@ import megatron.core.tensor_parallel
 import megatron.core.utils
 from megatron.core import parallel_state
 from megatron.core.distributed import DistributedDataParallel
-from megatron.core.inference_params import InferenceParams
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.package_info import (
     __contact_emails__,
@@ -45,6 +44,22 @@ __all__ = [
     "__shortversion__",
     "__version__",
 ]
+
+_LAZY_IMPORTS = {
+    "InferenceParams": "megatron.core.inference_params",
+}
+
+
+def __getattr__(name):
+    if name in _LAZY_IMPORTS:
+        import importlib
+
+        mod = importlib.import_module(_LAZY_IMPORTS[name])
+        attr = getattr(mod, name)
+        globals()[name] = attr
+        return attr
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 from .safe_globals import register_safe_globals
 

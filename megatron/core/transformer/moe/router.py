@@ -13,6 +13,7 @@ from megatron.core.transformer.moe.moe_utils import (
     apply_random_logits,
     apply_router_token_dropping,
     compute_routing_scores_for_aux_loss,
+    expert_max_violation_batchwise,
     get_tokens_per_expert_and_token_count,
     router_gating_linear,
     save_to_aux_losses_tracker,
@@ -627,6 +628,25 @@ class TopKRouter(Router):
 
         # Optionally apply expert bias
         self._apply_expert_bias(routing_map, padding_mask=padding_mask)
+
+        # Log expert max violation metric (logging only, no gradient impact)
+        if self.training:
+            num_layers = self.config.num_layers
+            if self.config.mtp_num_layers is not None:
+                num_layers += self.config.mtp_num_layers
+            max_violation = expert_max_violation_batchwise(
+                routing_map=routing_map,
+                num_experts=self.config.num_moe_experts,
+                total_num_tokens=routing_map.shape[0],
+                topk=self.topk,
+            )
+            save_to_aux_losses_tracker(
+                "expert_max_violation",
+                max_violation,
+                self.layer_number,
+                num_layers,
+                reduce_group=self.tp_cp_group,
+            )
 
         return probs, routing_map
 

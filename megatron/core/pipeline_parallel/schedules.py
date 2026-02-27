@@ -1,6 +1,7 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import contextlib
+import logging
 from functools import partial
 from typing import Callable, Iterator, List, Optional, Union
 
@@ -28,9 +29,12 @@ from megatron.core.utils import (
     get_attr_wrapped_model,
     get_model_config,
     get_model_type,
+    log_single_rank,
     nvtx_range_pop,
     nvtx_range_push,
 )
+
+logger = logging.getLogger(__name__)
 
 from .combined_1f1b import (
     combined_1f1b_schedule_for_interleaved_pipelining,
@@ -596,6 +600,13 @@ def forward_backward_no_pipelining(
     total_num_tokens = torch.zeros([], dtype=torch.int, device="cuda")
 
     if config.overlap_moe_expert_parallel_comm and not forward_only:
+        # log_single_rank(
+        #     logger,
+        #     logging.INFO,
+        #     f"[A2A Overlap] Selecting combined_1f1b path for no-pipelining: "
+        #     f"overlap_moe_expert_parallel_comm={config.overlap_moe_expert_parallel_comm}, "
+        #     f"num_microbatches={num_microbatches}, forward_only={forward_only}",
+        # )
         forward_data_store, total_num_tokens = combined_1f1b_schedule_for_no_pipelining(
             forward_step_func,
             data_iterator,
@@ -1320,6 +1331,14 @@ def forward_backward_pipelining_with_interleaving(
         wrap forward_helper, backward_helper, and combined_forward_backward_helper in a unified way
         """
         if config.overlap_moe_expert_parallel_comm and not forward_only:  # Combined 1F1B path
+            # log_single_rank(
+            #     logger,
+            #     logging.INFO,
+            #     f"[A2A Overlap] Selecting combined_1f1b path for interleaved pipelining (VPP): "
+            #     f"overlap_moe_expert_parallel_comm={config.overlap_moe_expert_parallel_comm}, "
+            #     f"f_virtual_microbatch_id={f_virtual_microbatch_id}, "
+            #     f"b_virtual_microbatch_id={b_virtual_microbatch_id}",
+            # )
             return combined_1f1b_schedule_for_interleaved_pipelining(
                 config,
                 forward_step_func,

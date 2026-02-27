@@ -1828,9 +1828,18 @@ class ParamAndGradBuffer:
                 f"[FSDP_UNIT {group.fsdp_unit_id}] Group {idx}: elems={numel} dtype={group.dtype} "
                 f"bufs={','.join(buf_flags) or 'None'} pad={_bytes_to_mb(group_padded)}"
             )
-            # List parameters below
-            for param in group.params:
-                log_lines.append(f"\t{param_to_name[param]} {tuple(param.shape)}")
+            # List parameters below (truncated for readability)
+            MAX_SHOW = 5
+            params_list = group.params
+            if len(params_list) <= MAX_SHOW * 2:
+                for param in params_list:
+                    log_lines.append(f"\t{param_to_name[param]} {tuple(param.shape)}")
+            else:
+                for param in params_list[:MAX_SHOW]:
+                    log_lines.append(f"\t{param_to_name[param]} {tuple(param.shape)}")
+                log_lines.append(f"\t... ({len(params_list) - MAX_SHOW * 2} more parameters) ...")
+                for param in params_list[-MAX_SHOW:]:
+                    log_lines.append(f"\t{param_to_name[param]} {tuple(param.shape)}")
 
         # Add summary
         log_lines.append(

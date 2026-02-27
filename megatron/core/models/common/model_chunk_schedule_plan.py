@@ -1,5 +1,6 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
+import logging
 from contextlib import nullcontext
 from typing import Optional
 
@@ -14,6 +15,9 @@ from megatron.core.pipeline_parallel.utils import (
     get_comm_stream,
     get_comp_stream,
 )
+from megatron.core.utils import log_single_rank
+
+logger = logging.getLogger(__name__)
 
 
 class ModelChunkState:
@@ -211,6 +215,16 @@ class TransformerLayerSchedulePlan:
         Returns:
             Functions or values for next iteration's computation
         """
+
+        # log_single_rank(
+        #     logger,
+        #     logging.DEBUG,
+        #     f"[A2A Fine-Grained Overlap] TransformerLayerSchedulePlan.run: "
+        #     f"f_layer={'present' if f_layer else 'None'}, "
+        #     f"b_layer={'present' if b_layer else 'None'}, "
+        #     f"is_last_layer_in_bwd={is_last_layer_in_bwd} "
+        #     f"(overlapping comm: dispatch/combine with comp: attn/mlp)",
+        # )
 
         if b_layer is not None:
             b_grad = b_layer.mtp_post_process.backward(b_grad)
@@ -446,6 +460,17 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         Returns:
             The output of the forward pass.
         """
+        f_num = f_schedule_plan.num_layers() if f_schedule_plan is not None else 0
+        b_num = b_schedule_plan.num_layers() if b_schedule_plan is not None else 0
+        # log_single_rank(
+        #     logger,
+        #     logging.INFO,
+        #     f"[A2A Fine-Grained Overlap] TransformerModelChunkSchedulePlan.run: "
+        #     f"f_layers={f_num}, b_layers={b_num}, "
+        #     f"overlapped_layers={min(f_num, b_num)}, "
+        #     f"vp_stage={f_schedule_plan.vp_stage if f_schedule_plan else (b_schedule_plan.vp_stage if b_schedule_plan else None)}",
+        # )
+
         f_input = None
         if f_schedule_plan:
             # pp output send/receive sync

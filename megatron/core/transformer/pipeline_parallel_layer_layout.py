@@ -165,6 +165,17 @@ class PipelineParallelLayerLayout:
 
         # Count layer numbers in this stage.
         num_layers_to_build = self.layout[pp_rank][vp_stage].count(layer_type)
+
+        from megatron.core.utils import log_single_rank
+
+        log_single_rank(
+            logger,
+            logging.INFO,
+            f"[PP Custom Layout] get_num_layers_to_build: pp_rank={pp_rank}, vp_stage={vp_stage}, "
+            f"layer_type={layer_type.name}, num_layers={num_layers_to_build}, "
+            f"pp_size={self.pipeline_model_parallel_size}, vp_size={self.virtual_pipeline_model_parallel_size}",
+        )
+
         return num_layers_to_build
 
     def get_layer_offset(
@@ -189,6 +200,17 @@ class PipelineParallelLayerLayout:
                 self.pipeline_model_parallel_size if _vpp_rank < vp_stage else pp_rank
             ):
                 offset += self.layout[_pp_rank][_vpp_rank].count(layer_type)
+
+        from megatron.core.utils import log_single_rank
+
+        log_single_rank(
+            logger,
+            logging.INFO,
+            f"[PP Custom Layout] get_layer_offset: pp_rank={pp_rank}, vp_stage={vp_stage}, "
+            f"layer_type={layer_type.name}, offset={offset}, "
+            f"pp_size={self.pipeline_model_parallel_size}, vp_size={self.virtual_pipeline_model_parallel_size}",
+        )
+
         return offset
 
     def get_layer_id_list(

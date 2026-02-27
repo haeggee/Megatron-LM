@@ -1,7 +1,10 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
+import logging
 import warnings
 from typing import Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from megatron.core.extensions.transformer_engine import (
     TEActivationOp,
@@ -71,6 +74,12 @@ class TESpecProvider(BackendSpecProvider):
                 linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
             )
         elif moe_use_grouped_gemm:
+            logger.warning(
+                "MoE grouped GEMM: using legacy GroupedMLP (fanshiqing/grouped_gemm). "
+                "TEColumnParallelGroupedLinear=%s, moe_use_legacy_grouped_gemm=%s",
+                TEColumnParallelGroupedLinear,
+                moe_use_legacy_grouped_gemm,
+            )
             warnings.warn(
                 'The legacy GroupedMLP will be deprecated in Megatron-Core v0.12.0. '
                 'Please update the TransformerEngine to version>=1.7.0 and use TEGroupedMLP.'

@@ -1963,6 +1963,7 @@ def training_log(
             track_names.append("global_load_balancing_loss")
         if args.moe_z_loss_coeff is not None:
             track_names.append("z_loss")
+        track_names.append("expert_max_violation")
 
         if args.is_hybrid_model:
             layers = args.hybrid_override_pattern.count('E')

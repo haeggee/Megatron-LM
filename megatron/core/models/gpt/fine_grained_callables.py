@@ -1,6 +1,11 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
+import logging
 import weakref
+
+from megatron.core.utils import log_single_rank
+
+logger = logging.getLogger(__name__)
 from contextlib import nullcontext
 from functools import partial
 from typing import Optional
@@ -522,6 +527,17 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         Run forward pass for computations between dispatch and combine:
             post dispatch->experts->combine preprocess
         """
+        # # DEBUG: Log recompute status in fine-grained forward
+        # if not hasattr(submodule_moe_forward, '_debug_logged'):
+        #     log_single_rank(
+        #         logger,
+        #         logging.INFO,
+        #         f"[DEBUG fine_grained MoE forward] layer.recompute_pre_mlp_layernorm="
+        #         f"{layer.recompute_pre_mlp_layernorm}, "
+        #         f"layer.mlp.moe_layer_recompute={layer.mlp.moe_layer_recompute}",
+        #     )
+        #     submodule_moe_forward._debug_logged = True
+
         dispatched_probs = node.layer_state.dispatched_probs
         token_dispatcher = layer.mlp.token_dispatcher
         if enable_deepep or enable_hybridep:

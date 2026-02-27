@@ -190,6 +190,16 @@ def get_transformer_layer_offset(
                     offset -= 1
     else:
         offset = 0
+
+    log_single_rank(
+        logger,
+        logging.INFO,
+        f"[PP Layer Offset] pp_rank={pp_rank}, vp_stage={vp_stage}, "
+        f"layer_offset={offset}, total_layers={config.num_layers}, "
+        f"pp_size={config.pipeline_model_parallel_size}, "
+        f"vp_size={config.virtual_pipeline_model_parallel_size}",
+    )
+
     return offset
 
 
@@ -445,6 +455,14 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             if "mlp" in self.config.recompute_modules:
                 if not self.is_moe_layer:
                     self.recompute_mlp = True
+        # DEBUG: Log layernorm recompute status
+        log_single_rank(
+            logger,
+            logging.INFO,
+            f"[DEBUG TransformerLayer {layer_number}] recompute_input_layernorm={self.recompute_input_layernorm}, "
+            f"recompute_pre_mlp_layernorm={self.recompute_pre_mlp_layernorm}, "
+            f"recompute_mlp={self.recompute_mlp}, is_moe_layer={self.is_moe_layer}",
+        )
         self.offload_attn_norm = (
             self.config.fine_grained_activation_offloading
             and "attn_norm" in self.config.offload_modules

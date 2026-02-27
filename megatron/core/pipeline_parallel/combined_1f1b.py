@@ -1,6 +1,7 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
 import contextlib
+import logging
 from contextlib import nullcontext
 from typing import List, Union
 
@@ -9,7 +10,9 @@ import torch
 from megatron.core.enums import Fp8Recipe
 from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.pipeline_parallel.utils import AbstractSchedulePlan, ScheduleNode, set_streams
-from megatron.core.utils import get_attr_wrapped_model
+from megatron.core.utils import get_attr_wrapped_model, log_single_rank
+
+logger = logging.getLogger(__name__)
 
 # Types
 Shape = Union[List[int], torch.Size]
@@ -46,6 +49,14 @@ def combined_1f1b_schedule_for_no_pipelining(
     Phases 3: 3rd microbatch backward + 4th microbatch forward
     Phases 4: 4th microbatch backward
     """
+
+    # log_single_rank(
+    #     logger,
+    #     logging.INFO,
+    #     f"[A2A Overlap] Using combined_1f1b_schedule_for_no_pipelining: "
+    #     f"num_microbatches={num_microbatches}, "
+    #     f"overlap enabled (EP A2A hidden by attention/MLP compute)",
+    # )
 
     set_streams()
     # The forward step for the first microbatch is executed alone, no a2a overlapping
@@ -172,6 +183,15 @@ def combined_1f1b_schedule_for_interleaved_pipelining(
                 # forward_step_helper_postprocess()
                 # backward_step_helper_postprocess()
     """
+
+    # log_single_rank(
+    #     logger,
+    #     logging.INFO,
+    #     f"[A2A Overlap] Using combined_1f1b_schedule_for_interleaved_pipelining (VPP): "
+    #     f"f_virtual_microbatch_id={f_virtual_microbatch_id}, "
+    #     f"b_virtual_microbatch_id={b_virtual_microbatch_id}, "
+    #     f"num_microbatches={num_microbatches}",
+    # )
 
     set_streams()
     # forward prepare

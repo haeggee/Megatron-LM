@@ -5,11 +5,13 @@
 # This source code is licensed under the Apache license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import logging
 import math
 import warnings
 from dataclasses import dataclass, replace
-from typing import List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -18,7 +20,10 @@ import torch.nn.functional as F
 from megatron.core import parallel_state
 from megatron.core.dist_checkpointing import ShardedTensor
 from megatron.core.dist_checkpointing.mapping import ReplicaId, ShardedTensorFactory
-from megatron.core.inference.contexts import BaseInferenceContext, DynamicInferenceContext
+from megatron.core.inference.contexts import BaseInferenceContext
+
+if TYPE_CHECKING:
+    from megatron.core.inference.contexts import DynamicInferenceContext
 from megatron.core.inference.contexts.attention_context.triton.tensor_ops import (
     tensor_get_slice_after,
     tensor_masked_update,

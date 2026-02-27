@@ -1,8 +1,10 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+from __future__ import annotations
+
 import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import TYPE_CHECKING, List, Optional, Union
 
 import torch
 from torch import Tensor
@@ -14,7 +16,9 @@ from megatron.core.enums import Fp8Recipe
 from megatron.core.fp4_utils import get_fp4_context
 from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.fusions.fused_layer_norm import FusedLayerNorm
-from megatron.core.inference.contexts import BaseInferenceContext
+
+if TYPE_CHECKING:
+    from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.pipeline_parallel.utils import is_vp_first_stage, is_vp_last_stage
 from megatron.core.process_groups_config import ProcessGroupCollection
@@ -31,6 +35,7 @@ from megatron.core.utils import (
     WrappedTensor,
     deprecate_inference_params,
     get_pg_rank,
+    log_single_rank,
     make_viewless_tensor,
 )
 
@@ -198,6 +203,14 @@ def get_num_layers_to_build(
         if is_vp_last_stage(vp_stage, vp_size) and is_last_pp_stage:
             num_layers_to_build -= 1
             assert num_layers_to_build >= 0, f"Not enough layers in the last virtual pipeline stage"
+
+    log_single_rank(
+        logger,
+        logging.INFO,
+        f"[PP Layer Distribution] pp_rank={pp_rank}, vp_stage={vp_stage}, "
+        f"num_layers_to_build={num_layers_to_build}, total_layers={config.num_layers}, "
+        f"pp_size={config.pipeline_model_parallel_size}, vp_size={vp_size}",
+    )
 
     return num_layers_to_build
 
