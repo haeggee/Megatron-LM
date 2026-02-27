@@ -13,14 +13,16 @@ from .hooks import InternalsHookManager
 from .state_manager import InternalsStateManager
 from .metrics import (
     compute_activation_stats,
-    compute_delta_y,
-    compute_delta_y_qkv_split,
-    compute_delta_y_swiglu_split,
     compute_gradient_norm,
     compute_gradient_weight_alignment,
     compute_grad_shard_norm_sq,
     compute_grad_weight_dot_shard,
     get_param_grad,
+    _extract_layer_index,
+    _rerun_linear,
+    _split_qkv_dim,
+    _mean_squared_norm_change,
+    _QKV_NAMES,
 )
 from .hooks import _LINEAR_LAYER_PATHS
 
@@ -228,11 +230,10 @@ class InternalsLogger:
                 alignment_metrics = {}
             metrics.update(alignment_metrics)
 
-        # 5. Delta Y — all ranks must participate (TP collectives in linear forward)
+        # 5. Delta Y — all DP ranks must participate (DP reduction)
         if self.config.log_delta_y:
             delta_y_metrics = self._compute_delta_y_metrics(model)
-            if self.is_logging_rank:
-                metrics.update(delta_y_metrics)
+            metrics.update(delta_y_metrics)
 
         # Log all metrics to W&B (logging rank only)
         if self.is_logging_rank and metrics and wandb_writer is not None:
@@ -334,17 +335,9 @@ class InternalsLogger:
                 clean_name = name.replace('.', '/')
                 metrics[f'gradients/norm/{clean_name}'] = grad_norm
 
-                # Aggregate by layer
-                if 'layers' in name:
-                    parts = name.split('.')
-                    for i, part in enumerate(parts):
-                        if part == 'layers' and i + 1 < len(parts):
-                            try:
-                                layer_idx = int(parts[i + 1])
-                                layer_grad_norms[layer_idx].append(grad_norm)
-                            except ValueError:
-                                pass
-                            break
+                layer_idx = _extract_layer_index(name)
+                if layer_idx is not None:
+                    layer_grad_norms[layer_idx].append(grad_norm)
 
         self._add_layer_aggregate_metrics(metrics, layer_grad_norms)
         return metrics
@@ -399,16 +392,9 @@ class InternalsLogger:
             clean_name = name.replace('.', '/')
             metrics[f'gradients/norm/{clean_name}'] = grad_norm
 
-            if 'layers' in name:
-                parts = name.split('.')
-                for j, part in enumerate(parts):
-                    if part == 'layers' and j + 1 < len(parts):
-                        try:
-                            layer_idx = int(parts[j + 1])
-                            layer_grad_norms[layer_idx].append(grad_norm)
-                        except ValueError:
-                            pass
-                        break
+            layer_idx = _extract_layer_index(name)
+            if layer_idx is not None:
+                layer_grad_norms[layer_idx].append(grad_norm)
 
         self._add_layer_aggregate_metrics(metrics, layer_grad_norms)
         return metrics
@@ -438,18 +424,11 @@ class InternalsLogger:
                 metrics[f'grad_weight_align/radial/{clean_name}'] = align_stats['radial_component']
                 metrics[f'grad_weight_align/tangential/{clean_name}'] = align_stats['tangential_component']
 
-                if 'layers' in name:
-                    parts = name.split('.')
-                    for i, part in enumerate(parts):
-                        if part == 'layers' and i + 1 < len(parts):
-                            try:
-                                layer_idx = int(parts[i + 1])
-                                layer_alignments[layer_idx]['cos'].append(align_stats['cos_alignment'])
-                                layer_alignments[layer_idx]['radial'].append(align_stats['radial_component'])
-                                layer_alignments[layer_idx]['tangential'].append(align_stats['tangential_component'])
-                            except ValueError:
-                                pass
-                            break
+                layer_idx = _extract_layer_index(name)
+                if layer_idx is not None:
+                    layer_alignments[layer_idx]['cos'].append(align_stats['cos_alignment'])
+                    layer_alignments[layer_idx]['radial'].append(align_stats['radial_component'])
+                    layer_alignments[layer_idx]['tangential'].append(align_stats['tangential_component'])
 
         self._add_layer_alignment_metrics(metrics, layer_alignments)
         return metrics
@@ -524,18 +503,11 @@ class InternalsLogger:
             metrics[f'grad_weight_align/radial/{clean_name}'] = radial
             metrics[f'grad_weight_align/tangential/{clean_name}'] = tangential
 
-            if 'layers' in name:
-                parts = name.split('.')
-                for j, part in enumerate(parts):
-                    if part == 'layers' and j + 1 < len(parts):
-                        try:
-                            layer_idx = int(parts[j + 1])
-                            layer_alignments[layer_idx]['cos'].append(cos_align)
-                            layer_alignments[layer_idx]['radial'].append(radial)
-                            layer_alignments[layer_idx]['tangential'].append(tangential)
-                        except ValueError:
-                            pass
-                        break
+            layer_idx = _extract_layer_index(name)
+            if layer_idx is not None:
+                layer_alignments[layer_idx]['cos'].append(cos_align)
+                layer_alignments[layer_idx]['radial'].append(radial)
+                layer_alignments[layer_idx]['tangential'].append(tangential)
 
         self._add_layer_alignment_metrics(metrics, layer_alignments)
         return metrics
@@ -555,6 +527,10 @@ class InternalsLogger:
         ALL TP ranks must call this method because the linear layer forward
         involves TP collective communication.
 
+        For DP > 1, squared norms are all-reduced (SUM) across the DP group
+        so that the final ratio is computed as if over one large concatenated
+        batch:  delta_Y = sqrt(sum_r ||dY_r||^2) / sqrt(sum_r ||Y_r||^2).
+
         Args:
             model: The model with updated weights.
 
@@ -565,7 +541,10 @@ class InternalsLogger:
         if not captured:
             return {}
 
-        metrics = {}
+        # First pass: re-run linear layers and collect squared norms.
+        # entries: list of (metric_key, delta_sq, old_sq)
+        entries: List[Tuple[str, float, float]] = []
+
         for key in sorted(captured.keys()):
             linear_name, layer_number = key
             entry = self._linear_entries.get(key)
@@ -575,32 +554,91 @@ class InternalsLogger:
             linear_module, _ = entry
             stored_input, stored_output = captured[key]
 
+            with torch.no_grad():
+                new_out = _rerun_linear(linear_module, stored_input)
+
             info = (
                 self._split_info.get(id(linear_module.weight))
                 if hasattr(linear_module, 'weight') else None
             )
 
             if info is not None and info['type'] == 'qkv':
-                split_metrics = compute_delta_y_qkv_split(
-                    linear_module, stored_input, stored_output,
-                    num_query_groups=info['num_query_groups'],
-                    num_query_heads_per_group=info['num_query_heads_per_group'],
-                    head_dim=info['head_dim'],
+                qkv_args = (
+                    info['num_query_groups'],
+                    info['num_query_heads_per_group'],
+                    info['head_dim'],
                 )
-                for comp, value in split_metrics.items():
-                    metrics[f'delta_Y/{comp}/layer_{layer_number:02d}'] = value
+                new_comps = _split_qkv_dim(new_out, *qkv_args, qkv_dim=-1)
+                old_comps = _split_qkv_dim(stored_output, *qkv_args, qkv_dim=-1)
+                for name, nc, oc in zip(_QKV_NAMES, new_comps, old_comps):
+                    entries.append((
+                        f'delta_Y/{name}/layer_{layer_number:02d}',
+                        *_mean_squared_norm_change(nc, oc),
+                    ))
 
             elif info is not None and info['type'] == 'swiglu':
-                split_metrics = compute_delta_y_swiglu_split(
-                    linear_module, stored_input, stored_output,
-                )
-                for comp, value in split_metrics.items():
-                    metrics[f'delta_Y/{comp}/layer_{layer_number:02d}'] = value
+                new_gate, new_up = torch.chunk(new_out, 2, dim=-1)
+                old_gate, old_up = torch.chunk(stored_output, 2, dim=-1)
+                for comp_name, nc, oc in [('gate', new_gate, old_gate),
+                                          ('up', new_up, old_up)]:
+                    entries.append((
+                        f'delta_Y/{comp_name}/layer_{layer_number:02d}',
+                        *_mean_squared_norm_change(nc, oc),
+                    ))
 
             else:
-                delta_y = compute_delta_y(linear_module, stored_input, stored_output)
-                metrics[f'delta_Y/{linear_name}/layer_{layer_number:02d}'] = delta_y
+                entries.append((
+                    f'delta_Y/{linear_name}/layer_{layer_number:02d}',
+                    *_mean_squared_norm_change(new_out, stored_output),
+                ))
 
+        if not entries:
+            return {}
+
+        # DP reduction: sum squared norms across DP ranks so the metric
+        # reflects the full batch (all micro-batches concatenated).
+        dp_world_size = 1
+        if self._dp_group is not None:
+            dp_world_size = torch.distributed.get_world_size(group=self._dp_group)
+
+        n = len(entries)
+
+        if dp_world_size > 1:
+            # Pack [delta_msq_0, ..., delta_msq_{n-1}, old_msq_0, ..., old_msq_{n-1}]
+            local_msqs = torch.zeros(
+                2 * n, dtype=torch.float64, device=torch.cuda.current_device(),
+            )
+            for i, (_, delta_msq, old_msq) in enumerate(entries):
+                local_msqs[i] = delta_msq
+                local_msqs[n + i] = old_msq
+
+            torch.distributed.all_reduce(
+                local_msqs, op=torch.distributed.ReduceOp.AVG, group=self._dp_group,
+            )
+
+            if not self.is_logging_rank:
+                return {}
+
+            metrics = {}
+            for i, (metric_key, _, _) in enumerate(entries):
+                delta_msq = local_msqs[i].item()
+                old_msq = local_msqs[n + i].item()
+                if old_msq > 1e-20:
+                    metrics[metric_key] = (delta_msq ** 0.5) / (old_msq ** 0.5)
+                else:
+                    metrics[metric_key] = 0.0
+            return metrics
+
+        # Single DP rank — compute ratios directly.
+        if not self.is_logging_rank:
+            return {}
+
+        metrics = {}
+        for metric_key, delta_msq, old_msq in entries:
+            if old_msq > 1e-20:
+                metrics[metric_key] = (delta_msq ** 0.5) / (old_msq ** 0.5)
+            else:
+                metrics[metric_key] = 0.0
         return metrics
 
     # ------------------------------------------------------------------

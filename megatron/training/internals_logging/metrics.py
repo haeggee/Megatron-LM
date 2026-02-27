@@ -3,10 +3,26 @@
 """Metric computation functions for model internals logging."""
 
 import math
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 import torch
 from torch import Tensor
 import torch.nn as nn
+
+
+def _extract_layer_index(param_name: str) -> Optional[int]:
+    """Extract transformer layer index from a dotted parameter name.
+
+    E.g. 'decoder.layers.3.self_attention.linear_qkv.weight' → 3.
+    Returns None if no layer index is found.
+    """
+    parts = param_name.split('.')
+    for i, part in enumerate(parts):
+        if part == 'layers' and i + 1 < len(parts):
+            try:
+                return int(parts[i + 1])
+            except ValueError:
+                return None
+    return None
 
 
 def compute_activation_stats(tensor: Tensor) -> Dict[str, float]:
@@ -335,6 +351,20 @@ def _relative_norm_change(new_tensor: Tensor, old_tensor: Tensor) -> float:
     return 0.0
 
 
+def _mean_squared_norm_change(new_tensor: Tensor, old_tensor: Tensor) -> Tuple[float, float]:
+    """Return (mean(|new - old|²), mean(|old|²)) for deferred ratio computation.
+
+    Basically computes the average l2 norm of vectors, and looks at the ratio of the change to the old l2 norm.
+    """
+    if old_tensor.device != new_tensor.device:
+        old_tensor = old_tensor.to(new_tensor.device)
+    new_f = new_tensor.float()
+    old_f = old_tensor.float()
+    delta_msq = (new_f - old_f).pow(2).sum(-1).mean().item()
+    old_msq = old_f.pow(2).sum(-1).mean().item()
+    return delta_msq, old_msq
+
+
 def _rerun_linear(
     linear_module: nn.Module,
     stored_input: Tensor,
@@ -344,77 +374,6 @@ def _rerun_linear(
     if isinstance(new_output, tuple):
         return new_output[0]
     return new_output
-
-
-def compute_delta_y(
-    linear_module: nn.Module,
-    stored_input: Tensor,
-    stored_output: Tensor,
-) -> float:
-    """Compute relative output change after weight update.
-
-    Re-runs the linear layer with the stored input and current (updated) weights,
-    then computes ||Y_new - Y_old|| / ||Y_old||.
-
-    Args:
-        linear_module: The linear layer with updated weights.
-        stored_input: Input tensor captured during the forward pass (before weight update).
-        stored_output: Output tensor captured during the forward pass (before weight update).
-
-    Returns:
-        Relative L2 norm of the output change.
-    """
-    with torch.no_grad():
-        new_out = _rerun_linear(linear_module, stored_input)
-        return _relative_norm_change(new_out, stored_output)
-
-
-def compute_delta_y_qkv_split(
-    linear_module: nn.Module,
-    stored_input: Tensor,
-    stored_output: Tensor,
-    num_query_groups: int,
-    num_query_heads_per_group: int,
-    head_dim: int,
-) -> Dict[str, float]:
-    """Compute per-component delta_Y for a fused QKV projection.
-
-    Returns:
-        Dictionary with keys 'Q', 'K', 'V' mapping to delta_Y values.
-    """
-    with torch.no_grad():
-        new_out = _rerun_linear(linear_module, stored_input)
-
-        qkv_args = (num_query_groups, num_query_heads_per_group, head_dim)
-        new_comps = _split_qkv_dim(new_out, *qkv_args, qkv_dim=-1)
-        old_comps = _split_qkv_dim(stored_output, *qkv_args, qkv_dim=-1)
-
-        return {
-            name: _relative_norm_change(nc, oc)
-            for name, nc, oc in zip(_QKV_NAMES, new_comps, old_comps)
-        }
-
-
-def compute_delta_y_swiglu_split(
-    linear_module: nn.Module,
-    stored_input: Tensor,
-    stored_output: Tensor,
-) -> Dict[str, float]:
-    """Compute per-component delta_Y for a fused SwiGLU fc1 projection.
-
-    Returns:
-        Dictionary with keys 'gate', 'up' mapping to delta_Y values.
-    """
-    with torch.no_grad():
-        new_out = _rerun_linear(linear_module, stored_input)
-
-        new_gate, new_up = torch.chunk(new_out, 2, dim=-1)
-        old_gate, old_up = torch.chunk(stored_output, 2, dim=-1)
-
-        return {
-            'gate': _relative_norm_change(new_gate, old_gate),
-            'up': _relative_norm_change(new_up, old_up),
-        }
 
 
 def _zero_scalar() -> Tensor:

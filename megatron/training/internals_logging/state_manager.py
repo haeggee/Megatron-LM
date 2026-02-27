@@ -12,6 +12,7 @@ from .metrics import (
     compute_weight_delta_qkv_split,
     compute_weight_delta_swiglu_split,
     compute_angular_update,
+    _extract_layer_index,
 )
 
 
@@ -169,23 +170,15 @@ class InternalsStateManager:
                 metrics[f'angular/cos_similarity/{clean_name}'] = angular_stats['cos_similarity']
                 metrics[f'angular/degrees/{clean_name}'] = angular_stats['angular_change_degrees']
 
-                # Aggregate by layer for summary metrics
-                if 'layers' in name:
-                    parts = name.split('.')
-                    for i, part in enumerate(parts):
-                        if part == 'layers' and i + 1 < len(parts):
-                            try:
-                                layer_idx = int(parts[i + 1])
-                                if layer_idx not in layer_angular:
-                                    layer_angular[layer_idx] = {
-                                        'cos_sims': [],
-                                        'degrees': [],
-                                    }
-                                layer_angular[layer_idx]['cos_sims'].append(angular_stats['cos_similarity'])
-                                layer_angular[layer_idx]['degrees'].append(angular_stats['angular_change_degrees'])
-                            except ValueError:
-                                pass
-                            break
+                layer_idx = _extract_layer_index(name)
+                if layer_idx is not None:
+                    if layer_idx not in layer_angular:
+                        layer_angular[layer_idx] = {
+                            'cos_sims': [],
+                            'degrees': [],
+                        }
+                    layer_angular[layer_idx]['cos_sims'].append(angular_stats['cos_similarity'])
+                    layer_angular[layer_idx]['degrees'].append(angular_stats['angular_change_degrees'])
 
         # Compute per-layer aggregate angular metrics
         for layer_idx, stats in layer_angular.items():
