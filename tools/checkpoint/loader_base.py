@@ -26,6 +26,8 @@ class MegatronCheckpointLoaderBase:
         self.md = None               # Metadata sent to the saver
         self.consumed_train_samples = None
         self.consumed_valid_samples = None
+        self._converter_fake_groups = {}
+        self._use_converter_fake_groups = False
 
     def _maybe_parse_additional_megatron_args(self, margs, checkpoint_args):
         """
@@ -128,6 +130,112 @@ class MegatronCheckpointLoaderBase:
 
         self._maybe_ensure_additional_required_arguments()
 
+    def _initialize_converter_fake_groups(self, mpu):
+        """Initialize fake process groups used by checkpoint converter-only runs."""
+        tp_size = self.margs.tensor_model_parallel_size
+        pp_size = self.margs.pipeline_model_parallel_size
+        ep_size = self.margs.expert_model_parallel_size
+        cp_size = max(1, getattr(self.margs, 'context_parallel_size', 1) or 1)
+
+        self._converter_fake_groups = {
+            "tp": _ConverterFakeProcessGroup(size=tp_size),
+            "pp": _ConverterFakeProcessGroup(size=pp_size),
+            "mp": _ConverterFakeProcessGroup(size=tp_size * pp_size),
+            "embd": _ConverterFakeProcessGroup(size=min(pp_size, 2)),
+            "pos_embd": _ConverterFakeProcessGroup(size=min(pp_size, 2)),
+            "dp": _ConverterFakeProcessGroup(size=1),
+            "dp_cp": _ConverterFakeProcessGroup(size=cp_size),
+            "intra_dp_cp": _ConverterFakeProcessGroup(size=cp_size),
+            "tp_dp": _ConverterFakeProcessGroup(size=tp_size),
+            "tp_dp_cp": _ConverterFakeProcessGroup(size=tp_size * cp_size),
+            "cp": _ConverterFakeProcessGroup(size=cp_size),
+            "tp_cp": _ConverterFakeProcessGroup(size=tp_size * cp_size),
+            "ep": _ConverterFakeProcessGroup(size=ep_size),
+            "expt_tp": _ConverterFakeProcessGroup(size=tp_size),
+            "tp_ep": _ConverterFakeProcessGroup(size=tp_size * ep_size),
+            "tp_ep_pp": _ConverterFakeProcessGroup(size=tp_size * ep_size * pp_size),
+            "expt_dp": _ConverterFakeProcessGroup(size=1),
+            "intra_expt_dp": _ConverterFakeProcessGroup(size=1),
+            "inter_dist_opt": _ConverterFakeProcessGroup(size=1),
+            "intra_dist_opt": _ConverterFakeProcessGroup(size=1),
+        }
+        groups = self._converter_fake_groups
+
+        # Core model-parallel process groups.
+        mpu._TENSOR_MODEL_PARALLEL_GROUP = groups["tp"]
+        mpu._PIPELINE_MODEL_PARALLEL_GROUP = groups["pp"]
+        mpu._MODEL_PARALLEL_GROUP = groups["mp"]
+        mpu._EMBEDDING_GROUP = groups["embd"]
+        mpu._POSITION_EMBEDDING_GROUP = groups["pos_embd"]
+        mpu._CONTEXT_PARALLEL_GROUP = groups["cp"]
+        mpu._TENSOR_AND_CONTEXT_PARALLEL_GROUP = groups["tp_cp"]
+
+        # Data-parallel family.
+        mpu._DATA_PARALLEL_GROUP = groups["dp"]
+        mpu._DATA_PARALLEL_GROUP_GLOO = groups["dp"]
+        mpu._DATA_PARALLEL_GROUP_WITH_CP = groups["dp_cp"]
+        mpu._DATA_PARALLEL_GROUP_WITH_CP_GLOO = groups["dp_cp"]
+        mpu._INTRA_PARTIAL_DATA_PARALLEL_GROUP_WITH_CP = groups["intra_dp_cp"]
+        mpu._INTRA_PARTIAL_DATA_PARALLEL_GROUP_WITH_CP_GLOO = groups["intra_dp_cp"]
+        mpu._TENSOR_AND_DATA_PARALLEL_GROUP = groups["tp_dp"]
+        mpu._TENSOR_AND_DATA_PARALLEL_GROUP_WITH_CP = groups["tp_dp_cp"]
+
+        # Expert and optimizer-instance groups.
+        mpu._EXPERT_MODEL_PARALLEL_GROUP = groups["ep"]
+        mpu._EXPERT_TENSOR_PARALLEL_GROUP = groups["expt_tp"]
+        mpu._EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP = groups["tp_ep"]
+        mpu._EXPERT_TENSOR_MODEL_PIPELINE_PARALLEL_GROUP = groups["tp_ep_pp"]
+        mpu._EXPERT_DATA_PARALLEL_GROUP = groups["expt_dp"]
+        mpu._EXPERT_DATA_PARALLEL_GROUP_GLOO = groups["expt_dp"]
+        mpu._INTRA_PARTIAL_EXPERT_DATA_PARALLEL_GROUP = groups["intra_expt_dp"]
+        mpu._INTRA_PARTIAL_EXPERT_DATA_PARALLEL_GROUP_GLOO = groups["intra_expt_dp"]
+        mpu._INTER_PARTIAL_EXPERT_DATA_PARALLEL_GROUP = groups["inter_dist_opt"]
+        mpu._INTRA_DISTRIBUTED_OPTIMIZER_INSTANCE_GROUP = groups["intra_dist_opt"]
+
+        mpu._HIERARCHICAL_CONTEXT_PARALLEL_GROUPS = [groups["cp"]] if cp_size > 1 else []
+        mpu._EMBEDDING_GLOBAL_RANKS = [0] if pp_size == 1 else [0, pp_size - 1]
+        mpu._POSITION_EMBEDDING_GLOBAL_RANKS = list(mpu._EMBEDDING_GLOBAL_RANKS)
+        mpu._PIPELINE_GLOBAL_RANKS = list(range(pp_size))
+        mpu._TENSOR_MODEL_PARALLEL_GLOBAL_RANKS = list(range(tp_size))
+        mpu._MODEL_PARALLEL_GLOBAL_RANKS = list(range(tp_size * pp_size))
+        mpu._DATA_PARALLEL_GLOBAL_RANKS = [0]
+        mpu._DATA_PARALLEL_GLOBAL_RANKS_WITH_CP = [0]
+        mpu._CONTEXT_PARALLEL_GLOBAL_RANKS = [0]
+
+    def _set_converter_fake_group_ranks(self, mpu, tp_rank, pp_rank):
+        """Update fake process-group ranks for the TP/PP shard being loaded."""
+        tp_size = self.margs.tensor_model_parallel_size
+        ep_size = self.margs.expert_model_parallel_size
+        mp_rank = pp_rank * tp_size + tp_rank
+        tp_ep_pp_rank = pp_rank * (tp_size * ep_size) + tp_rank
+
+        groups = self._converter_fake_groups
+        groups["tp"].set_rank(tp_rank)
+        groups["pp"].set_rank(pp_rank)
+        groups["mp"].set_rank(mp_rank)
+        groups["tp_dp"].set_rank(tp_rank)
+        groups["tp_dp_cp"].set_rank(tp_rank)
+        groups["cp"].set_rank(0)
+        groups["tp_cp"].set_rank(tp_rank)
+        groups["ep"].set_rank(0)
+        groups["expt_tp"].set_rank(tp_rank)
+        groups["tp_ep"].set_rank(tp_rank)
+        groups["tp_ep_pp"].set_rank(tp_ep_pp_rank)
+        groups["embd"].set_rank(0)
+        groups["pos_embd"].set_rank(0)
+        groups["dp"].set_rank(0)
+        groups["dp_cp"].set_rank(0)
+        groups["intra_dp_cp"].set_rank(0)
+        groups["expt_dp"].set_rank(0)
+        groups["intra_expt_dp"].set_rank(0)
+        groups["inter_dist_opt"].set_rank(0)
+        groups["intra_dist_opt"].set_rank(0)
+
+        mpu.set_tensor_model_parallel_rank(tp_rank)
+        mpu.set_pipeline_model_parallel_rank(pp_rank)
+        mpu.set_expert_tensor_parallel_rank(tp_rank)
+        mpu.set_expert_model_parallel_rank(0)
+
     def initialize_megatron_env(self):
         """
         Initialize Megatron global variables and fused kernels.
@@ -146,12 +254,16 @@ class MegatronCheckpointLoaderBase:
         mpu.set_pipeline_model_parallel_world_size(self.margs.pipeline_model_parallel_size)
         mpu.set_virtual_pipeline_model_parallel_world_size(self.margs.virtual_pipeline_model_parallel_size)
         mpu.set_expert_model_parallel_world_size(self.margs.expert_model_parallel_size)
-        
-        # For backward compatibility during local parallel states refactoring
-        fake_tp_group = _ConverterFakeProcessGroup(size=self.margs.tensor_model_parallel_size)
-        fake_ep_group = _ConverterFakeProcessGroup(size=self.margs.expert_model_parallel_size)
-        mpu._TENSOR_MODEL_PARALLEL_GROUP = fake_tp_group
-        mpu._EXPERT_MODEL_PARALLEL_GROUP = fake_ep_group
+        mpu.set_expert_tensor_parallel_world_size(self.margs.tensor_model_parallel_size)
+
+        # Converter fallback: only install fake groups if model-parallel groups
+        # are missing. This avoids overriding real distributed initialization.
+        has_tp_group = mpu.get_tensor_model_parallel_group(check_initialized=False) is not None
+        has_pp_group = mpu.get_pipeline_model_parallel_group(check_initialized=False) is not None
+        self._use_converter_fake_groups = not (has_tp_group and has_pp_group)
+        if self._use_converter_fake_groups:
+            self._initialize_converter_fake_groups(mpu)
+            self._set_converter_fake_group_ranks(mpu, tp_rank=0, pp_rank=0)
         fused_kernels.load(self.margs)
 
     def compute_true_vocab_size(self):
@@ -193,12 +305,15 @@ class MegatronCheckpointLoaderBase:
 
         all_models = []  # all_models[pp_rank][vp_rank] = [list of models across TP ranks]
 
-        def get_models_for_pipeline_stage(count, dtype):
+        def get_models_for_pipeline_stage(count, dtype, pp_rank):
+            mpu.set_pipeline_model_parallel_rank(pp_rank)
             local_models_for_stage = [[] for _ in range(vp_size)]
             for tp_rank in range(count):
-                fake_tp_group = mpu.get_tensor_model_parallel_group()
-                fake_tp_group.set_rank(tp_rank)
-                mpu.set_tensor_model_parallel_rank(tp_rank)
+                if self._use_converter_fake_groups:
+                    self._set_converter_fake_group_ranks(mpu, tp_rank=tp_rank, pp_rank=pp_rank)
+                else:
+                    mpu.set_tensor_model_parallel_rank(tp_rank)
+                    mpu.set_pipeline_model_parallel_rank(pp_rank)
                 model_list = []
 
                 for i in range(vp_size):
@@ -238,8 +353,7 @@ class MegatronCheckpointLoaderBase:
         # Load shards for each pipeline rank
         mpu.set_virtual_pipeline_model_parallel_rank(0)
         for pp_rank in range(pp_size):
-            mpu.set_pipeline_model_parallel_rank(pp_rank)
-            all_models.append(get_models_for_pipeline_stage(tp_size, dtype))
+            all_models.append(get_models_for_pipeline_stage(tp_size, dtype, pp_rank))
 
         return all_models, consumed_train_samples, consumed_valid_samples
     

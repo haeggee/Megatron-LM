@@ -1345,45 +1345,39 @@ def get_pipeline_model_parallel_group(check_initialized=True):
     return _PIPELINE_MODEL_PARALLEL_GROUP
 
 
-def get_data_parallel_group(with_context_parallel=False, partial_data_parallel=False, check_initialized=True):
+def get_data_parallel_group(with_context_parallel=False, partial_data_parallel=False):
     """Get the data-parallel group the caller rank belongs to."""
     if with_context_parallel:
         if partial_data_parallel:
-            if check_initialized:
-                assert (
-                    _INTRA_PARTIAL_DATA_PARALLEL_GROUP_WITH_CP is not None
-                ), "Intra partial data parallel group is not initialized"
-            return _INTRA_PARTIAL_DATA_PARALLEL_GROUP_WITH_CP
-        if check_initialized:
             assert (
-                _DATA_PARALLEL_GROUP_WITH_CP is not None
-            ), "data parallel group with context parallel combined is not initialized"
+                _INTRA_PARTIAL_DATA_PARALLEL_GROUP_WITH_CP is not None
+            ), "Intra partial data parallel group is not initialized"
+            return _INTRA_PARTIAL_DATA_PARALLEL_GROUP_WITH_CP
+        assert (
+            _DATA_PARALLEL_GROUP_WITH_CP is not None
+        ), "data parallel group with context parallel combined is not initialized"
         return _DATA_PARALLEL_GROUP_WITH_CP
     else:
-        if check_initialized:
-            assert _DATA_PARALLEL_GROUP is not None, "data parallel group is not initialized"
-            assert partial_data_parallel == False, "Partial DP for Optimizer needs to include CP"
+        assert _DATA_PARALLEL_GROUP is not None, "data parallel group is not initialized"
+        assert partial_data_parallel == False, "Partial DP for Optimizer needs to include CP"
         return _DATA_PARALLEL_GROUP
 
 
-def get_data_parallel_group_gloo(with_context_parallel=False, partial_data_parallel=False, check_initialized=True):
+def get_data_parallel_group_gloo(with_context_parallel=False, partial_data_parallel=False):
     """Get the Gloo data-parallel group the caller rank belongs to."""
     if with_context_parallel:
         if partial_data_parallel:
-            if check_initialized:
-                assert (
-                    _INTRA_PARTIAL_DATA_PARALLEL_GROUP_WITH_CP_GLOO is not None
-                ), "Intra partial data parallel group is not initialized"
-            return _INTRA_PARTIAL_DATA_PARALLEL_GROUP_WITH_CP_GLOO
-        if check_initialized:
             assert (
-                _DATA_PARALLEL_GROUP_WITH_CP_GLOO is not None
-            ), "data parallel group-gloo with context parallel combined is not initialized"
+                _INTRA_PARTIAL_DATA_PARALLEL_GROUP_WITH_CP_GLOO is not None
+            ), "Intra partial data parallel group is not initialized"
+            return _INTRA_PARTIAL_DATA_PARALLEL_GROUP_WITH_CP_GLOO
+        assert (
+            _DATA_PARALLEL_GROUP_WITH_CP_GLOO is not None
+        ), "data parallel group-gloo with context parallel combined is not initialized"
         return _DATA_PARALLEL_GROUP_WITH_CP_GLOO
     else:
-        if check_initialized:
-            assert _DATA_PARALLEL_GROUP_GLOO is not None, "data parallel group-gloo is not initialized"
-            assert partial_data_parallel == False, "Partial DP for Optimizer needs to include CP"
+        assert _DATA_PARALLEL_GROUP_GLOO is not None, "data parallel group-gloo is not initialized"
+        assert partial_data_parallel == False, "Partial DP for Optimizer needs to include CP"
         return _DATA_PARALLEL_GROUP_GLOO
 
 
