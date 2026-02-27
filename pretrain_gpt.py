@@ -17,7 +17,7 @@ from megatron.core.enums import ModelType
 from megatron.core.models.gpt import GPTModel
 from megatron.core.rerun_state_machine import get_rerun_state_machine
 from megatron.core.tokenizers.text.utils.build_tokenizer import build_tokenizer
-from megatron.core.utils import StragglerDetector, get_attr_wrapped_model
+from megatron.core.utils import StragglerDetector, get_attr_wrapped_model, unwrap_model
 from megatron.training import get_args, get_timers, get_tokenizer, inprocess_restart, pretrain, print_rank_0
 from megatron.training.datasets.sft_dataset import SFTDataset
 from megatron.training.datasets.fim_dataset import GPTFIMDataset, GPTFIMDatasetConfig
@@ -246,6 +246,17 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optio
         if getattr(args, f"log_{modality}_weight", False):
             report[f"{modality}-weight"] = torch.tensor(weight, device=loss_mask.device)
 
+    # Pre-final-layernorm activation norm (if captured by hook).
+    if model is not None and args.log_pre_final_ln_norm:
+        unwrapped_model = unwrap_model(model)
+        decoder = getattr(unwrapped_model, "decoder", None)
+        final_ln = getattr(decoder, "final_layernorm", None) if decoder is not None else None
+        pre_ln_norm = getattr(final_ln, "_last_pre_ln_norm", None) if final_ln is not None else None
+        if pre_ln_norm is not None:
+            pre_ln_norm = pre_ln_norm.clone().detach()
+            report["pre_final_ln_norm"] = torch.stack(
+                (pre_ln_norm, torch.tensor(1.0, device=pre_ln_norm.device))
+            )
     return loss, num_tokens, report
 
 
