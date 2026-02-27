@@ -1343,6 +1343,8 @@ def load_args_from_checkpoint(
     _set_arg('rotary_base', force=True)
     _set_arg('rotary_percent', force=True)
     _set_arg('rotary_interleaved', force=True)
+    _set_arg('use_rope_scaling', force=True)
+    _set_arg('rope_scaling_factor', force=True)
     _set_arg('add_bias_linear', force=True)
     _set_arg('add_qkv_bias', force=True)
     _set_arg('squared_relu', force=True)
