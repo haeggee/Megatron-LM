@@ -81,18 +81,176 @@ def tokens_to_packed_seq_params(input_ids, eod_token, orig_seq_len, qkv_format='
 
 
 def get_batch(data_iterator, vp_stage=None):
-    """Generate a batch."""
-    # TODO: this is pretty hacky, find a better way
-    if not is_first_or_last_pipeline_stage(vp_stage):
-        return None, None, None, None, None
+    """Generate a batch with optional packed-sequence + context-parallelism support."""
 
-    # get batches based on the TP rank you are on
+    if not is_first_or_last_pipeline_stage(vp_stage):
+        return (None, None, None, None, None), None
+
+    args = get_args()
     batch = get_batch_on_this_tp_rank(data_iterator)
 
-    # slice batch along sequence dimension for context parallelism
-    batch = get_batch_on_this_cp_rank(batch)
+    packed_seq_params = None
 
-    return batch.values()
+    if args.use_packed_seq_params:
+        tokenizer = get_tokenizer()
+        qkv_format = 'thd'
+        cp_size = parallel_state.get_context_parallel_world_size()
+
+        tokens_full_flat = batch["tokens"].view(1, -1)
+        total_tokens = tokens_full_flat.size(-1)
+        device = tokens_full_flat.device
+
+        # Step 1a: compute cu_seqlens from EOD boundaries
+        eod_positions = (tokens_full_flat.flatten() == tokenizer.eod).nonzero()[:, 0].int() + 1
+        fixed_boundaries = torch.arange(
+            0, total_tokens + args.seq_length, args.seq_length,
+            device=device, dtype=torch.int32,
+        )
+        cu_seq, _ = torch.sort(torch.unique(torch.cat((fixed_boundaries, eod_positions))))
+        cu_seq = cu_seq[cu_seq <= total_tokens]
+        if cu_seq[-1] != total_tokens:
+            cu_seq = torch.cat([
+                cu_seq,
+                torch.tensor([total_tokens], device=device, dtype=cu_seq.dtype),
+            ])
+
+        # Step 1b: merge sequences that are too short for CP 
+        _divisibility = 2 * cp_size
+        _seq_lens = cu_seq[1:] - cu_seq[:-1]
+        _keep = torch.cat([
+            torch.tensor([True], device=device),
+            _seq_lens >= _divisibility,
+        ])
+        cu_seq = cu_seq[_keep]
+
+        if cp_size > 1:
+
+            from megatron.core.packed_seq_params import PackedSeqParams
+            from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
+                pad_thd_sequences_for_cp,
+                generate_positional_ids_for_cp,
+                get_batch_on_this_cp_rank as te_get_batch_on_this_cp_rank,
+            )
+
+            divisibility = 2 * cp_size
+            cp_group = parallel_state.get_context_parallel_group()
+            cp_rank = parallel_state.get_context_parallel_rank()
+
+            # Step 2a. Pad every sub-sequence so its length is divisible by 2*cp_size
+            input_ids_padded, labels_padded, cu_seqlens_padded = pad_thd_sequences_for_cp(
+                batch["tokens"].view(-1).cpu(),
+                batch["labels"].view(-1).cpu(),
+                cu_seq.cpu(),
+                divisibility_factor=divisibility,
+                padding_token_id=tokenizer.eod,
+                padding_label_id=-100,
+            )
+            input_ids_padded = input_ids_padded.to(device)
+            labels_padded = labels_padded.to(device)
+            cu_seqlens_padded = cu_seqlens_padded.to(device=device, dtype=torch.int32)
+
+            assert (cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]).min() % divisibility == 0, \
+                "Some padded sequence lengths are not divisible by 2*cp_size after merging."
+
+            # Step 2b. Pad loss_mask -> Unfortunately, there wasn't any function applying padding to the loss function in transformers_engine, 
+            # but the current line of code follow the same algorithm that the other implementations have.
+            loss_mask_flat = batch["loss_mask"].view(-1)
+            seqlens = cu_seq[1:] - cu_seq[:-1]
+            padding_amounts = [
+                ((l.item() + divisibility - 1) // divisibility) * divisibility - l.item()
+                for l in seqlens
+            ]
+            loss_mask_seqs = [
+                loss_mask_flat[cu_seq[i]:cu_seq[i + 1]]
+                for i in range(len(cu_seq) - 1)
+            ]
+            loss_mask_padded = torch.cat([
+                torch.cat([seq, torch.zeros(pad, dtype=seq.dtype, device=seq.device)])
+                if pad > 0 else seq
+                for seq, pad in zip(loss_mask_seqs, padding_amounts)
+            ])
+
+            # Step 2c. Generate position_ids for padded sequences
+            position_ids_padded = generate_positional_ids_for_cp(
+                cu_seq.cpu(), divisibility, dtype=batch["position_ids"].dtype
+            ).to(device)
+
+            # Step 3a: DualChunkSwap slicing
+            input_ids_padded, labels_padded, position_ids_padded = (
+                te_get_batch_on_this_cp_rank(
+                    cu_seqlens_padded,
+                    input_ids_padded,
+                    labels_padded,
+                    position_ids_padded,
+                    cp_group=cp_group,
+                    qvk_format='thd',
+                )
+            )
+
+            # Steo 3b: Again, similar to the transformer_engine logic, we select the loss_mask tensor related to the specific CP rank of this GPU.
+            total_slices = 2 * cp_size
+            slice_sizes = (
+                (cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]) // total_slices
+            )
+            cp_rank_indices = []
+            
+            # On this particular rank, for each sequence, get two slices, one from the beginning
+            # and one from the end. 
+            for slice_size, seq_start in zip(slice_sizes, cu_seqlens_padded[:-1]):
+                cp_rank_indices.append(torch.arange(
+                    seq_start + cp_rank * slice_size,
+                    seq_start + (cp_rank + 1) * slice_size,
+                    device=device,
+                ))
+                cp_rank_indices.append(torch.arange(
+                    seq_start + (total_slices - cp_rank - 1) * slice_size,
+                    seq_start + (total_slices - cp_rank) * slice_size,
+                    device=device,
+                ))
+            loss_mask_padded = loss_mask_padded.index_select(
+                0, torch.cat(cp_rank_indices)
+            )
+
+            batch["tokens"] = input_ids_padded.unsqueeze(0)
+            batch["labels"] = labels_padded.unsqueeze(0)
+            batch["loss_mask"] = loss_mask_padded.unsqueeze(0)
+            batch["position_ids"] = position_ids_padded.unsqueeze(0)
+            batch["attention_mask"] = None
+
+            #  Step 4: construct PackedSeqParams 
+            max_padded_len = (cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]).max()
+
+            assert max_padded_len % divisibility == 0, \
+                f"max_padded_len {max_padded_len} not divisible by {divisibility}"
+
+            packed_seq_params = PackedSeqParams(
+                cu_seqlens_q=cu_seqlens_padded,  # We are returning input_ids_padded as "tokens", cu_seqlens is no longer necessary. This is a bit hacky.
+                cu_seqlens_kv=cu_seqlens_padded, # We are returning input_ids_padded as "tokens", cu_seqlens is no longer necessary. This is a bit hacky.
+                max_seqlen_q=max_padded_len,
+                max_seqlen_kv=max_padded_len,
+                qkv_format=qkv_format,
+                cu_seqlens_q_padded=cu_seqlens_padded,
+                cu_seqlens_kv_padded=cu_seqlens_padded,
+            )
+
+        else:
+            # cp_size == 1: No need to cut the sequence length
+            packed_seq_params = tokens_to_packed_seq_params(
+                tokens_full_flat,
+                eod_token=tokenizer.eod,
+                orig_seq_len=args.seq_length,
+                qkv_format=qkv_format,
+            )
+            for key in ["tokens", "labels", "loss_mask", "position_ids"]:
+                if batch.get(key) is not None:
+                    batch[key] = batch[key].view(1, -1)
+
+    else:
+        batch = get_batch_on_this_cp_rank(batch)
+
+    return batch.values(), packed_seq_params
+
+
 
 
 # define spiky loss as a loss that's 10x the max loss observed
@@ -276,31 +434,9 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
     global stimer
     with stimer(bdata=True):
         vp_stage = get_attr_wrapped_model(model, "vp_stage")
-        tokens, labels, loss_mask, attention_mask, position_ids = get_batch(data_iterator, vp_stage)
+        batch_values, packed_seq_params = get_batch(data_iterator, vp_stage)
+        tokens, labels, loss_mask, attention_mask, position_ids = batch_values
 
-        # Compute packed sequence parameters if enabled
-        packed_seq_params = None
-        if args.use_packed_seq_params:
-            # Reshape tensors from [B, S] to [1, B*S] for THD format
-            tokens = tokens.view(1, -1)  # [1, B*S]
-            labels = labels.view(1, -1)  # [1, B*S]
-            loss_mask = loss_mask.view(1, -1)  # [1, B*S]
-            position_ids = position_ids.view(1, -1)  # [1, B*S]
-            # Note: attention_mask not needed in THD format with packed_seq_params
-
-            tokenizer = get_tokenizer()
-
-            # Hardcoded to 'thd' format for now
-            # TODO: Add cu_seqlens_padded support for context parallelism when needed
-            qkv_format = 'thd'
-
-            packed_seq_params = tokens_to_packed_seq_params(
-                tokens,
-                eod_token=tokenizer.eod,
-                orig_seq_len=args.seq_length,
-                qkv_format=qkv_format,
-                cu_seqlens_padded=None  # TODO: Compute for CP support
-            )
     timers('batch-generator').stop()
 
     # Dynamic modality weight decay: update active modality tokens only.
