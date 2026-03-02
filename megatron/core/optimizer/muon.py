@@ -3,7 +3,7 @@
 """Megatron muon optimizer wrapper to handle tensor-parallel."""
 
 import logging
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional, override
 
 import torch
 from torch.optim.optimizer import ParamsT
@@ -24,10 +24,8 @@ from .optimizer import (
 from .optimizer_config import OptimizerConfig, ParamKey
 
 try:
-    from emerging_optimizers.orthogonalized_optimizers import (
-        OrthogonalizedOptimizer,
-        get_muon_scale_factor,
-    )
+    from emerging_optimizers.orthogonalized_optimizers import OrthogonalizedOptimizer
+    from emerging_optimizers.orthogonalized_optimizers import get_muon_scale_factor as _get_muon_scale_factor
     from emerging_optimizers.orthogonalized_optimizers.muon_utils import newton_schulz_tp
 
     HAVE_EMERGING_OPTIMIZERS = True
@@ -107,6 +105,7 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
             scaled_orthogonalize_fn=scaled_orthogonalize_fn,
         )
 
+
     def orthogonalize(self, p: torch.Tensor, grad: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         """Orthogonalize the momentum.
 
@@ -160,6 +159,12 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
         else:
             grad = self.scaled_orthogonalize_fn(grad, tp_group, partition_dim)
         return grad
+
+
+def get_muon_scale_factor(size_out: int, size_in: int, mode: str = "spectral") -> float:
+    if mode == "none":
+        return 1.0
+    return _get_muon_scale_factor(size_out, size_in, mode=mode)
 
 
 def get_megatron_muon_optimizer(
@@ -258,7 +263,7 @@ def get_megatron_muon_optimizer(
                 nonlinear_params.append(param)
 
     muon_kwargs = {
-        "lr": config.lr,
+        "lr": config.muon_lr_factor * config.lr,
         "momentum_beta": config.muon_momentum,
         "use_nesterov": config.muon_use_nesterov,
         "weight_decay": config.weight_decay,
@@ -277,7 +282,10 @@ def get_megatron_muon_optimizer(
     for param in nonlinear_params:
         param.requires_grad = False
 
-    linear_param_groups = _get_param_groups(model_chunks, config, config_overrides)
+    config_overrides_muon = {**config_overrides}
+    config_overrides_muon[ParamKey(name="*")] = ParamGroupOverride(max_lr=config.muon_lr_factor * config.lr)
+
+    linear_param_groups = _get_param_groups(model_chunks, config, config_overrides_muon)
     # if layerwise distributed optimizer is not used, need to handle ep params separately
     expert_param_groups = []
     if not layer_wise_distributed_optimizer:

@@ -19,6 +19,7 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.optimizer_param_scheduler import ParamGroupOverride
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.utils import get_pg_size, log_single_rank
+from megatron.core.optimizer.muon import get_muon_scale_factor
 
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,6 @@ logger = logging.getLogger(__name__)
 try:
     import emerging_optimizers
     from emerging_optimizers.orthogonalized_optimizers.muon_utils import newton_schulz_tp
-    from emerging_optimizers.orthogonalized_optimizers import get_muon_scale_factor
 except ImportError:
     emerging_optimizers = None
 
@@ -53,10 +53,13 @@ class MasterOptimizer(torch.optim.Optimizer):
         hypersphere_kind: Optional[Literal["l2", "standard", "spectral", "orthogonal"]] = None,
         hypersphere_radius: Literal["learnable"] | float = 1.0,
         hypersphere_eps: float = 1e-8,
-        hypersphere_update: float = True,
+        hypersphere_update: bool = True,
+        hypersphere_project: bool = False,
+        hypersphere_soft: bool = False,
 
         # Muon.
         use_orthogonal_updates: bool = False,  # Enable or disable muon entirely.
+        momentum_beta: float = 0.95,
         use_nesterov: bool = True,
         split_qkv: bool = True,  # Also applies to hypersphere optimization.
         split_qkv_heads: bool = True,  # Also applies to hypersphere optimization.
@@ -82,6 +85,8 @@ class MasterOptimizer(torch.optim.Optimizer):
         self.hypersphere_radius = hypersphere_radius
         self.hypersphere_eps = hypersphere_eps
         self.hypersphere_update = hypersphere_update
+        self.hypersphere_project = hypersphere_project
+        self.hypersphere_soft = hypersphere_soft
 
         self.split_qkv = split_qkv
         self.split_qkv_heads  = split_qkv_heads
@@ -105,6 +110,7 @@ class MasterOptimizer(torch.optim.Optimizer):
             beta1=betas[0],
             beta2=betas[1],
             beta3=betas[2],
+            momentum_beta=momentum_beta,
             alpha=alpha,
             step=0,
             beta3_warmup=beta3_warmup,
@@ -129,6 +135,9 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         for group in self.param_groups:
             group["step"] += 1
+
+            if "momentum_beta" not in group:  # To be able to use old checkpoints.
+                group["momentum_beta"] = group["beta1"]
             for p in group["params"]:
                 if p.grad is not None:
                     self._param_step(p, group)
@@ -151,9 +160,12 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         exp_avg = state["exp_avg"]
         beta1 = group["beta1"]
+        momentum_beta = group["momentum_beta"]
         is_qkv = self.is_qkv_fn(p)
 
         # TODO: potentially project gradient to tangent space here.
+        if self.hypersphere_project:
+            grad = self._project(p, grad, is_qkv=is_qkv)
 
         # Get update direction.
         if self.use_orthogonal_updates:  # Muon branch.
@@ -163,11 +175,11 @@ class MasterOptimizer(torch.optim.Optimizer):
             self._apply_weight_decay_inplace(p, p.grad, group)
 
             # Update momentum buffer with EMA of gradient
-            exp_avg.lerp_(grad, 1 - beta1)
+            exp_avg.lerp_(grad, 1 - momentum_beta)
 
             # Include nesterov momentum
             if self.use_nesterov:
-                grad = grad.lerp(exp_avg, beta1)
+                grad = grad.lerp(exp_avg, momentum_beta)
             else:
                 grad = exp_avg
 
@@ -215,7 +227,6 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         # Update parameter.
         lr = group["lr"]
-        #print(f"update {update.norm()}")
         p.add_(update, alpha=-lr)
 
         # Optionally, normalize parameter.
@@ -344,20 +355,27 @@ class MasterOptimizer(torch.optim.Optimizer):
             dim = 0
         elif self.hypersphere_mode == "row":
             dim = 1
-        elif self.hypersphere_mode == "flat":
+        elif self.hypersphere_mode in {"flat", "rowcol"}:
             dim = None
-        elif self.hypersphere_mode == "rowcol":
-            raise NotImplementedError(f"Rowcol hypersphere NYI")
         else:
             raise ValueError(f"Unknown normalization {self.hypersphere_mode}")
 
-        if self.hypersphere_kind == "l2":
-            norm = torch.norm(x, dim=dim, keepdim=True).clamp_min(self.hypersphere_eps)
-            #print(f"l2 {norm}")
+        eps = self.hypersphere_radius if self.hypersphere_soft else self.hypersphere_eps
+
+        if self.hypersphere_mode == "rowcol":
+            assert self.hypersphere_kind == "l2"
+            assert self.hypersphere_radius == 1.0
+            sinkhorn(x, eps=eps)
+        elif self.hypersphere_kind == "l2":
+            norm = torch.norm(x, dim=dim, keepdim=True).clamp_min(eps)
+            #if torch.any(norm < eps):
+            #    print("Letsgoo")
+            #else:
+            #    print("avg norm:", norm.mean())
             x.mul_(self.hypersphere_radius / norm)
         elif self.hypersphere_kind == "spectral":
             assert self.hypersphere_mode == "flat"
-            norm = spectral_norm(x).clamp_min(self.hypersphere_eps)
+            norm = spectral_norm(x).clamp_min(eps)
             x.mul_(self.hypersphere_radius / norm)
         elif self.hypersphere_kind == "orthogonal":  # TODO verify lol.
             assert self.hypersphere_mode == "flat"
@@ -365,10 +383,48 @@ class MasterOptimizer(torch.optim.Optimizer):
             x.copy_(x_normalized)
         elif self.hypersphere_kind == "standard":
             mu = x.mean(dim=dim, keepdim=True)
-            std = x.std(dim=dim, keepdim=True).clamp_min(self.hypersphere_eps)
+            std = x.std(dim=dim, keepdim=True).clamp_min(eps)
             x.add_(mu).mul_(self.hypersphere_radius / std)
         else:
             raise ValueError(f"Unknown hypersphere_kind {self.hypersphere_kind}")
+
+    def _project(self, p, g, is_qkv: bool = False):
+        if self.hypersphere_mode is None or not self.hypersphere_project:
+            return
+        if is_qkv and self.split_qkv and self.hypersphere_mode != "row":
+            p_qs, p_ks, p_vs = split_qkv(p, self.qkv_split_shapes)
+            g_qs, g_ks, g_vs = split_qkv(g.copy(), self.qkv_split_shapes)
+            if self.split_qkv_heads:
+                for p_q, g_q in zip(split_heads(p_qs, self.qkv_dim), split_heads(g_qs, self.qkv_dim)):
+                    g_q.copy_(self._project(p_q, g_q))
+                for p_k, g_k in zip(split_heads(p_ks, self.qkv_dim), split_heads(g_ks, self.qkv_dim)):
+                    g_k.copy_(self._project(p_k, g_k))
+                for p_v, g_v in zip(split_heads(p_vs, self.qkv_dim), split_heads(g_vs, self.qkv_dim)):
+                    g_v.copy_(self._project(p_v, g_v))
+            else:
+                # If hypersphere_mode is row, we don't need to split heads manually as before
+                # because each head are just contiguous *rows* in qs, splitting is unnecessary.
+                g_qs = self._project(p_qs, g_qs)
+                g_ks = self._project(p_ks, g_ks)
+                g_vs = self._project(p_vs, g_vs)
+            return merge_qkv((g_qs, g_ks, g_vs), p.size(), self.qkv_split_shapes)
+
+        if self.hypersphere_mode == "col":
+            dim = 0
+        elif self.hypersphere_mode == "row":
+            dim = 1
+        elif self.hypersphere_mode == "flat":
+            dim = None
+        elif self.hypersphere_mode == "rowcol":
+            raise ValueError(f"Project rowcol nyi")
+        else:
+            raise ValueError(f"Unknown normalization {self.hypersphere_mode}")
+
+        if self.hypersphere_kind != "l2":
+            raise ValueError(f"Project {self.hypersphere_kind} nyi")
+
+        dots = torch.sum(p * g, dim=dim, keepdim=True)
+        return g - (dots / self.hypersphere_radius**2) * p
 
 
 def split_qkv(x, shapes: tuple[int, int, int]) -> list[torch.Tensor]:
@@ -398,24 +454,24 @@ def merge_heads(xs) -> torch.Tensor:
     return torch.cat(xs, dim=1)
 
 
-def spectral_norm(X, num_iters=5):
-    """
-    Returns spectral norm approximation using power iteration.
-    """
-    # Initialize random vector
-    u = torch.randn(X.shape[0], 1, device=X.device)
-    u = u / torch.norm(u)
+def spectral_norm(x, n_iters: int = 10):
+    if x.size(-2) < x.size(-1):
+        x = x @ x.T
+    else:
+        x = x.T @ x
 
-    # Power iteration: u converges to the left singular vector
-    for _ in range(num_iters):
-        v = X.T @ u
-        v = v / torch.norm(v)
-        u = X @ v
+    u = torch.randn(x.size(-1), device=x.device, dtype=x.dtype)
+    for _ in range(n_iters):
         u = u / torch.norm(u)
+        u = x @ u
+    return torch.norm(u)**0.5
 
-    # Approximate spectral norm
-    sigma_max = (u.T @ X @ v)
-    return sigma_max
+
+def sinkhorn(x, n_iters: int = 10, eps: float = 1e-8):
+    for _ in range(n_iters):
+        norm_col = torch.norm(x, dim=0, keepdim=True).clamp_min(eps)
+        norm_row = torch.norm(x, dim=1, keepdim=True).clamp_min(eps)
+        x.div_(norm_col).div_(norm_row)
 
 
 
@@ -519,7 +575,7 @@ def get_megatron_master_optimizer(
 
     master_kwargs = {
         # Common.
-        "lr": config.lr,
+        "lr": config.muon_lr_factor * config.lr,
         "weight_decay": config.weight_decay,
         "weight_decay_method": config.weight_decay_method,
 
@@ -535,9 +591,11 @@ def get_megatron_master_optimizer(
         "hypersphere_kind": config.hypersphere_kind,
         "hypersphere_radius": config.hypersphere_radius,
         "hypersphere_update": config.hypersphere_update,
+        "hypersphere_project": config.hypersphere_project,
 
         # Muon.
         "use_orthogonal_updates": config.use_orthogonal_updates,
+        "momentum_beta": config.muon_momentum,
         "use_nesterov": config.muon_use_nesterov,
         "split_qkv": config.muon_split_qkv,
         "split_qkv_heads": config.hypersphere_split_heads,
@@ -554,7 +612,10 @@ def get_megatron_master_optimizer(
     for param in nonlinear_params:
         param.requires_grad = False
 
-    linear_param_groups = _get_param_groups(model_chunks, config, config_overrides)
+    config_overrides_master = {**config_overrides}
+    config_overrides_master[ParamKey(name="*")] = ParamGroupOverride(max_lr=config.muon_lr_factor * config.lr)
+
+    linear_param_groups = _get_param_groups(model_chunks, config, config_overrides_master)
     # if layerwise distributed optimizer is not used, need to handle ep params separately
     expert_param_groups = []
     if not layer_wise_distributed_optimizer:

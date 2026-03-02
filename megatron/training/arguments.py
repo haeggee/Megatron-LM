@@ -2183,7 +2183,7 @@ def _add_regularization_args(parser):
     group.add_argument('--muon-use-nesterov', action='store_true',
                        help='Whether to use Nesterov-style momentum in the internal SGD')
     group.add_argument('--muon-scale-mode', type=str, default='spectral',
-                       choices=['spectral', 'unit_rms_norm', 'shape_scaling'],
+                       choices=['spectral', 'unit_rms_norm', 'shape_scaling', 'none'],
                        help='Scale mode for Muon optimizer')
     group.add_argument('--muon-fp32-matmul-prec', type=str, default='medium',
                        choices=['low', 'medium', 'high'],
@@ -2195,14 +2195,18 @@ def _add_regularization_args(parser):
                        help='How to perform NS calculation for tensor model parallel weights')
     group.add_argument('--muon-extra-scale-factor', type=float, default=1.0,
                        help='Additional scale factor for the muon update')
+    group.add_argument('--muon-lr-factor', type=float, default=1.0)
     group.add_argument('--hypersphere-mode', type=_float_or_str)
     group.add_argument('--hypersphere-kind', type=_float_or_str, default="l2")
     group.add_argument('--hypersphere-radius', type=_float_or_str, default=1.0)
     group.add_argument('--hypersphere-no-update', action="store_false", dest="hypersphere_update")
     group.add_argument('--hypersphere-embeddings', action="store_true")
     group.add_argument('--hypersphere-split-heads', action="store_true")
+    group.add_argument('--hypersphere-project', action="store_true")
+    group.add_argument('--hypersphere-soft', action="store_true")
     group.add_argument('--weight-decay-method', choices=["decoupled", "independent"], default="decoupled")
     group.add_argument('--use-orthogonal-updates', action="store_true")
+    group.add_argument('--no-use-orthogonal-embeddings', action="store_false", dest="use_orthogonal_embeddings")
     return parser
 
 

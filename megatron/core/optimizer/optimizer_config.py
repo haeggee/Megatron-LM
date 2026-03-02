@@ -224,6 +224,9 @@ class OptimizerConfig:
     muon_extra_scale_factor: float = 1.0
     """Additional scale factor for the muon update."""
 
+    muon_lr_factor: float = 1.0
+    """Muon parameters will use a learning rate of lr * muon_lr_factor instead of just lr."""
+
     hypersphere_mode: Optional[Literal["row", "col", "rowcol", "flat"]] = None
     """When specified, enables hypersphere constraint of the parameters, either row-wise, column-wise, row+column-wise or of the flattened vector."""
 
@@ -242,9 +245,17 @@ class OptimizerConfig:
     hypersphere_split_heads: bool = False
     """If enabled, then each q,k,v head matrix will be normalized separately."""
 
+    hypersphere_project: bool = False
+    """If enabled, do u - (w·u/||w||²) before the momentum accumulation."""
+
+    hypersphere_soft: bool = False
+    """If enabled, do R*w/max(||w||, R) instead of just R*w/||w||."""
+
     weight_decay_method: Literal["decoupled", "independent"] = "decoupled"
 
     use_orthogonal_updates: bool = False
+
+    use_orthogonal_embeddings: bool = True
 
     # AdEMAMix
     ademamix_alpha: float = 2.0

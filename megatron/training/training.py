@@ -875,7 +875,8 @@ def pretrain(
 
         iteration = args.iteration
 
-    if args.do_valid:
+    #if args.do_valid:
+    if False:
         prefix = f'iteration {iteration} on validation set'
         if getattr(args, 'perform_rl_step', False):
             rl_utils.evaluate_and_print_results_rl(

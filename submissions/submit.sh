@@ -36,7 +36,10 @@ OPT=adam
 BETA1=0.9
 BETA2=0.99
 BETA3=0.999
+MUON_MOMENTUM=0.95
+ADAMBETA1=0.95
 ALPHA=5
+MUON_SCALE_MODE=spectral
 
 HYPERBALL=false
 HS_KIND=l2
@@ -46,6 +49,8 @@ HS_EMBED=false
 HS_SPLIT_HEADS=false
 
 NO_WARMUP=false
+DECAY=wsd
+COOLDOWN=0.2
 
 # Misc. defaults.
 EXTRA_LOG=true
@@ -57,6 +62,7 @@ usage () {
 	echo "Options:"
 	# Misc settings.
 	echo " --nodes <nodes>: How many nodes to use"
+	echo " --debug: Enable debug mode"
 	echo " --extra-name <name>: Add a suffix to the name"
 	echo " --time (default=$TIME): Change the sbatch time limit"
 	# FP8 settings.
@@ -65,6 +71,8 @@ usage () {
 	echo " --tokens <int>: Amount of tokens to train with (in B)."
 	echo " --lr <float>: Learning rate."
 	echo " --no-warmup: Deactivates learning rate warmup"
+	echo " --decay <wsd/cos>"
+	echo " --cooldown <float>: Fraction to do cooldown"
 	# Architecture settings.
 	echo " --init <float>: Change init std."
 	echo " --no-pre-norm"
@@ -87,9 +95,12 @@ usage () {
 	echo " --master-orthogonalize"
 	echo " --b1: beta1 (master&adam&muon&ademamix)"
 	echo " --b2: beta2 (master&adam&ademamix)"
-	echo " --mb2: beta2 (master)"
+	echo " --mb1: beta1 (master&muon)"
 	echo " --b3: beta3 (master&ademamix)"
 	echo " --alpha: ademamix alpha"
+	echo " --muon-scale <spectral/shape_scaling/unit_rms_norm/none>"
+	echo " --muon-nesterov: Enables muon nesterov momentum"
+	echo " --mlr: muon learning rate"
 	echo " --wd: weight decay"
 	echo " --wd-method (decoupled/independent): weight decay method"
 	echo " --hs <row/col/rowcol/flat>: Enables hypersphere training"
@@ -98,6 +109,8 @@ usage () {
 	echo " --hs-u: hypersphere normalize update"
 	echo " --hs-embed: hypersphere normalize embeddings"
 	echo " --hs-split-heads: hypersphere normalize q,k,v heads separately"
+	echo " --hs-p: project gradient to tangent space"
+	echo " --hs-s: soft hyperball norm clipping."
 	# Logs.
 	echo " --wandb-name <str>: Specify wandb name."
 	echo " --no-extra-log"
@@ -179,6 +192,8 @@ while [[ $# -gt 0 ]]; do
 	case $1 in
 		# Misc settings.
 		--nodes) NODES=$2; shift 2;;
+		--debug)
+			SCRIPT_VERSION=$SCRIPT_VERSION-debug; shift;;
 		--extra-name)
 			EXTRA_NAME="-$2"; shift 2;;
 		--time)
@@ -195,6 +210,10 @@ while [[ $# -gt 0 ]]; do
 			shift 2;;
 		--no-warmup)
 			NO_WARMUP=true; shift;;
+		--decay)
+			DECAY=$2; shift 2;;
+		--cooldown)
+			COOLDOWN=$2; shift 2;;
 		# Architecture settings.
 		--init)
 			NEW_INIT_STD=$2; shift 2;;
@@ -243,8 +262,16 @@ while [[ $# -gt 0 ]]; do
 			BETA2=$2; shift 2;;
 		--b3)
 			BETA3=$2; shift 2;;
+		--mb1)
+			ADAMBETA1=$2; shift 2;;
+		--mlr)
+			MUON_LR_FACTOR=$2; shift 2;;
 		--alpha)
 			ALPHA=$2; shift 2;;
+		--muon-scale)
+			MUON_SCALE_MODE=$2; shift 2;;
+		--muon-nesterov)
+			MUON_NESTEROV=true; shift;;
 		--wd)
 			WEIGHT_DECAY=$2; shift 2;;
 		--wd-method)
@@ -261,6 +288,10 @@ while [[ $# -gt 0 ]]; do
 			HS_EMBED=true; shift;;
 		--hs-split-heads)
 			HS_SPLIT_HEADS=true; shift;;
+		--hs-p)
+			HS_PROJECT=true; shift;;
+		--hs-s)
+			HS_SOFT=true; shift;;
 		# Logs.
 		--wandb-name)
 			WANDB_NAME=$2; shift 2;;
@@ -286,18 +317,54 @@ elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
 	if [[ $BETA1 != 0.9 ]]; then
 		SUFFIX=${SUFFIX}_m$BETA1
 	fi
+	if [[ $ADAMBETA1 != 0.95 ]]; then
+		SUFFIX=${SUFFIX}_b$ADAMBETA1
+	fi
+	if [[ ! -z "${MUON_LR_FACTOR+xxx}" ]]; then
+		SUFFIX=${SUFFIX}_mlr$MUON_LR_FACTOR
+		OPT_ARGS+=(--muon-lr-factor $MUON_LR_FACTOR)
+	fi
 	if [[ $OPT = dmuon ]]; then
 		OPT=dist_muon
 	fi
+	if [[ $MUON_SCALE_MODE != spectral ]]; then
+		if [[ $MUON_SCALE_MODE = unit_rms_norm ]]; then
+			SUFFIX=${SUFFIX}_urm
+		else
+			SUFFIX=${SUFFIX}_$MUON_SCALE_MODE
+		fi
+	fi
+	if [[ $MUON_NESTEROV = true ]]; then
+		SUFFIX=${SUFFIX}_nest
+		OPT_ARGS+=(--muon-use-nesterov)
+	fi
+	MUON_MOMENTUM=$BETA1
+	BETA1=$ADAMBETA1
 elif [[ $OPT = dmaster ]] || [[ $OPT = master ]]; then
 	SUFFIX=$SUFFIX-$OPT
 	IS_MASTER_OPT=true
 	if [[ $MASTER_ORTHOGONALIZE = true ]]; then
 		SUFFIX=${SUFFIX}_o
 		if [[ $BETA1 != 0.95 ]]; then
-			SUFFIX=${SUFFIX}_b$BETA1
+			SUFFIX=${SUFFIX}_m$BETA1
+		fi
+		if [[ $ADAMBETA1 != 0.95 ]]; then
+			SUFFIX=${SUFFIX}_b$ADAMBETA1
+		fi
+		if [[ ! -z "${MUON_LR_FACTOR+xxx}" ]]; then
+			SUFFIX=${SUFFIX}_mlr$MUON_LR_FACTOR
+			OPT_ARGS+=(--muon-lr-factor $MUON_LR_FACTOR)
 		fi
 		OPT_ARGS+=(--use-orthogonal-updates)
+		MUON_MOMENTUM=$BETA1
+		BETA1=$ADAMBETA1
+		if [[ $MUON_SCALE_MODE != spectral ]]; then
+			if [[ $MUON_SCALE_MODE = unit_rms_norm ]]; then
+				SUFFIX=${SUFFIX}_urm
+			else
+				SUFFIX=${SUFFIX}_$MUON_SCALE_MODE
+			fi
+		fi
 	else
 		if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.99 ]] || [[ $BETA3 != 0.999 ]]; then
 			SUFFIX=${SUFFIX}_b${BETA1}_${BETA2}_$BETA3
@@ -353,6 +420,14 @@ if [[ $HYPERBALL != false ]]; then
 	if [[ $HS_SPLIT_HEADS = true ]]; then
 		SUFFIX=${SUFFIX}_sh
 		OPT_ARGS+=(--hypersphere-split-heads)
+	fi
+	if [[ $HS_PROJECT = true ]]; then
+		SUFFIX=${SUFFIX}_p
+		OPT_ARGS+=(--hypersphere-project)
+	fi
+	if [[ $HS_SOFT = true ]]; then
+		SUFFIX=${SUFFIX}_s
+		OPT_ARGS+=(--hypersphere-soft)
 	fi
 fi
 
@@ -464,7 +539,34 @@ if [[ $TOKENS != $DEF_TOKENS ]]; then
 	SUFFIX=$SUFFIX-${TOKENS}BT
 fi
 ITERS=$((ITERS_PER_BT*TOKENS))
-DECAY_ITERS=$(($ITERS/5))
+
+DECAY_ARGS=()
+if [[ $DECAY = wsd ]]; then
+	if [[ $COOLDOWN != 0.2 ]]; then
+		SUFFIX=$SUFFIX-cd$COOLDOWN
+	fi
+	DECAY_ITERS=$(python3 -c "print(int($ITERS * $COOLDOWN))")
+	DECAY_ARGS+=(
+		--lr-decay-style WSD
+		--lr-wsd-decay-style minus_sqrt
+		--lr-wsd-decay-iters $DECAY_ITERS
+	)
+elif [[ $DECAY = cos ]]; then
+	SUFFIX=$SUFFIX-cos
+	DECAY_ITERS=$((ITERS - WARMUP))
+	DECAY_ARGS+=(
+		--lr-decay-style cosine
+		--lr-decay-iters $DECAY_ITERS
+	)
+else
+	echo "Unknown decay method $DECAY"
+	exit 1
+fi
+
+# In order to make the name shorter, we will alias all the suffixes that correspond to
+# ngpt architecture to just show ngpt.
+NGPT_SUBSTRING=-L2Norm-fz-nPre-nFin-pst-ppst-usmr-ss-lsS-qklsS-mlplsG-lgslsS
+SUFFIX="${SUFFIX/$NGPT_SUBSTRING/-ngpt}"
 
 EXTRA_LOGS=()
 SUFFIX=$SUFFIX$EXTRA_NAME
@@ -500,9 +602,9 @@ if [[ -z ${WANDB_NAME+x} ]]; then
 	WANDB_NAME=$EXP_NAME
 fi
 
-if [[ ${#WANDB_NAME} -gt 116 ]]; then
-	# We compare against 116 because WANDB_NAME gets appended -n$NODE_COUNT-j$JOB_ID in the final sbatch.
-	>&2 echo "WANDB_NAME is too long (it shouldn't exceed 116 characters): $WANDB_NAME"
+if [[ ${#WANDB_NAME} -gt 117 ]]; then
+	# We compare against 117 because WANDB_NAME gets appended -n$NODE_COUNT-$JOB_ID in the final sbatch.
+	>&2 echo "WANDB_NAME is too long (it shouldn't exceed 117 characters): $WANDB_NAME"
 	exit 1
 fi
 
@@ -551,7 +653,8 @@ TRAINING_ARGS=(
 	--weight-decay $WEIGHT_DECAY
 	--weight-decay-method $WEIGHT_DECAY_METHOD
 	--adam-beta1 $BETA1
-	--muon-momentum $BETA1
+	--muon-momentum $MUON_MOMENTUM
+	--muon-scale-mode $MUON_SCALE_MODE
 	--adam-beta2 $BETA2
 	--ademamix-beta3 $BETA3
 	--ademamix-alpha $ALPHA
@@ -588,9 +691,6 @@ LOGGING=(
 LOGGING=(${LOGGING[@]} ${EXTRA_LOGS[@]})
 
 SCHEDULER_ARGS=(
-	--lr-decay-style WSD
-	--lr-wsd-decay-style minus_sqrt
-	--lr-wsd-decay-iters $DECAY_ITERS
 	--lr-warmup-iters $WARMUP
 )
 
@@ -598,7 +698,7 @@ EXTRA_ARGS+=(
 	--async-save
 )
 
-ARGS="${LLAMA_ARGS[@]} ${TRAINING_ARGS[@]} ${SCHEDULER_ARGS[@]} ${DATA_ARGS[@]} ${LOGGING[@]} ${EXTRA_ARGS[@]} ${FP8_ARGS[@]} ${ARCH_ARGS[@]} ${OPT_ARGS[@]}"
+ARGS="${LLAMA_ARGS[@]} ${TRAINING_ARGS[@]} ${SCHEDULER_ARGS[@]} ${DATA_ARGS[@]} ${LOGGING[@]} ${EXTRA_ARGS[@]} ${FP8_ARGS[@]} ${ARCH_ARGS[@]} ${OPT_ARGS[@]} ${DECAY_ARGS[@]}"
 
 #= RUNNING: Prepare and launch a slurm script =#
 CMD="numactl --membind=0-3 env python3 pretrain_gpt.py $ARGS"
@@ -667,7 +767,7 @@ srun -lu --cpus-per-task \$SLURM_CPUS_PER_TASK bash -c "
 	export RANK=\\\$SLURM_PROCID
 	export LOCAL_RANK=\\\$SLURM_LOCALID
 	mkdir -p \\\$TRITON_CACHE_DIR
-	$CMD --wandb-exp-name $EXP_NAME-n$NODES-j\\\$SLURM_JOBID
+	$CMD --wandb-exp-name $EXP_NAME-n$NODES-\\\$SLURM_JOBID
 "
 
 # Goodbye lol.
