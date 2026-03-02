@@ -3,9 +3,26 @@
 """Metric computation functions for model internals logging."""
 
 import math
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 import torch
 from torch import Tensor
+import torch.nn as nn
+
+
+def _extract_layer_index(param_name: str) -> Optional[int]:
+    """Extract transformer layer index from a dotted parameter name.
+
+    E.g. 'decoder.layers.3.self_attention.linear_qkv.weight' → 3.
+    Returns None if no layer index is found.
+    """
+    parts = param_name.split('.')
+    for i, part in enumerate(parts):
+        if part == 'layers' and i + 1 < len(parts):
+            try:
+                return int(parts[i + 1])
+            except ValueError:
+                return None
+    return None
 
 
 def compute_activation_stats(tensor: Tensor) -> Dict[str, float]:
@@ -96,32 +113,6 @@ def compute_gradient_norm(param: Tensor) -> float:
         return grad.float().norm().item()
 
 
-def compute_weight_delta(
-    current: Tensor,
-    previous: Tensor,
-) -> float:
-    """Compute relative weight change: ||W_t - W_{t-1}|| / ||W_{t-1}||.
-
-    Args:
-        current: Current weight tensor.
-        previous: Previous weight tensor (same shape as current).
-
-    Returns:
-        Relative L2 norm of the weight change, or 0.0 if previous norm is zero.
-    """
-    with torch.no_grad():
-        # Move to same device if needed
-        if previous.device != current.device:
-            previous = previous.to(current.device)
-
-        delta_norm = (current.float() - previous.float()).norm().item()
-        prev_norm = previous.float().norm().item()
-
-        if prev_norm > 1e-10:
-            return delta_norm / prev_norm
-        return 0.0
-
-
 def compute_weight_delta_per_neuron(
     current: Tensor,
     previous: Tensor,
@@ -144,32 +135,20 @@ def compute_weight_delta_per_neuron(
         - 'per_neuron_min': Min per-neuron relative change
     """
     with torch.no_grad():
-        # Move to same device if needed
-        if previous.device != current.device:
-            previous = previous.to(current.device)
-
-        current_f = current.float()
-        previous_f = previous.float()
-        
-        # Full matrix relative change
-        delta_norm = (current_f - previous_f).norm().item()
-        prev_norm = previous_f.norm().item()
-        full_delta = delta_norm / prev_norm if prev_norm > 1e-10 else 0.0
-
-        result = {'full': full_delta}
+        result = {'full': _relative_norm_change(current, previous)}
 
         # Per-neuron stats only make sense for 2D+ tensors
         if current.dim() >= 2:
-            # Reshape to [num_neurons, -1] for per-row computation
-            num_neurons = current.size(0)
-            current_2d = current_f.view(num_neurons, -1)
-            previous_2d = previous_f.view(num_neurons, -1)
+            if previous.device != current.device:
+                previous = previous.to(current.device)
 
-            # Per-row (per-neuron) norms
+            num_neurons = current.size(0)
+            current_2d = current.float().view(num_neurons, -1)
+            previous_2d = previous.float().view(num_neurons, -1)
+
             delta_per_neuron = (current_2d - previous_2d).norm(dim=1)  # [num_neurons]
             prev_per_neuron = previous_2d.norm(dim=1)  # [num_neurons]
 
-            # Relative change per neuron (avoid division by zero)
             mask = prev_per_neuron > 1e-10
             relative_delta = torch.zeros_like(delta_per_neuron)
             relative_delta[mask] = delta_per_neuron[mask] / prev_per_neuron[mask]
@@ -180,6 +159,19 @@ def compute_weight_delta_per_neuron(
             # result['per_neuron_min'] = relative_delta.min().item()
 
         return result
+
+
+def _cosine_similarity(a: Tensor, b: Tensor):
+    """Compute cosine similarity between two flat tensors.
+
+    Returns (cos_sim_tensor, norm_a, norm_b) or None if either norm is near zero.
+    """
+    a_norm = a.norm()
+    b_norm = b.norm()
+    if a_norm < 1e-10 or b_norm < 1e-10:
+        return None
+    cos = (a @ b) / (a_norm * b_norm)
+    return cos.clamp(-1.0, 1.0), a_norm, b_norm
 
 
 def compute_angular_update(
@@ -202,26 +194,18 @@ def compute_angular_update(
         - angular_change_degrees: angle in degrees (0 to 180)
     """
     with torch.no_grad():
-        # Move to same device if needed
         if previous.device != current.device:
             previous = previous.to(current.device)
 
-        curr_flat = current.flatten().float()
-        prev_flat = previous.flatten().float()
-
-        curr_norm = curr_flat.norm()
-        prev_norm = prev_flat.norm()
-
-        if curr_norm < 1e-10 or prev_norm < 1e-10:
+        result = _cosine_similarity(current.flatten().float(), previous.flatten().float())
+        if result is None:
             return {
                 'cos_similarity': 0.0,
                 'angular_change': 0.0,
                 'angular_change_degrees': 0.0,
             }
 
-        cos_sim = (curr_flat @ prev_flat) / (curr_norm * prev_norm)
-        cos_sim = cos_sim.clamp(-1.0, 1.0)  # numerical stability
-
+        cos_sim, _, _ = result
         angular_change = torch.acos(cos_sim).item()
 
     return {
@@ -249,32 +233,18 @@ def compute_gradient_weight_alignment(param: Tensor) -> Dict[str, float]:
         - radial_component: ||grad|| * cos(grad, W) - component along weight direction
         - tangential_component: ||grad|| * sin(grad, W) - component orthogonal to weight
     """
+    _ZERO = {'cos_alignment': 0.0, 'radial_component': 0.0, 'tangential_component': 0.0}
+
     grad = get_param_grad(param)
     if grad is None:
-        return {
-            'cos_alignment': 0.0,
-            'radial_component': 0.0,
-            'tangential_component': 0.0,
-        }
+        return _ZERO
 
     with torch.no_grad():
-        grad_flat = grad.flatten().float()
-        weight_flat = param.data.flatten().float()
+        result = _cosine_similarity(grad.flatten().float(), param.data.flatten().float())
+        if result is None:
+            return _ZERO
 
-        grad_norm = grad_flat.norm()
-        weight_norm = weight_flat.norm()
-
-        if grad_norm < 1e-10 or weight_norm < 1e-10:
-            return {
-                'cos_alignment': 0.0,
-                'radial_component': 0.0,
-                'tangential_component': 0.0,
-            }
-
-        cos_align = (grad_flat @ weight_flat) / (grad_norm * weight_norm)
-        cos_align = cos_align.clamp(-1.0, 1.0)
-
-        # Decompose gradient into radial and tangential components
+        cos_align, grad_norm, _ = result
         radial = (grad_norm * cos_align).item()
         tangential = (grad_norm * torch.sqrt(1 - cos_align ** 2)).item()
 
@@ -285,48 +255,178 @@ def compute_gradient_weight_alignment(param: Tensor) -> Dict[str, float]:
     }
 
 
-def compute_grad_shard_norm_sq(param: Tensor, param_range) -> Tensor:
-    """Compute squared L2 norm of the gradient shard owned by this DP rank.
+_QKV_NAMES = ('Q', 'K', 'V')
 
-    For distributed optimizer, each DP rank owns a sub-range of each parameter's
-    gradient. This computes ||grad[start:end]||^2 as a scalar CUDA tensor,
-    suitable for batched all-reduce across the DP group.
+
+def _split_qkv_dim(
+    tensor: Tensor,
+    num_query_groups: int,
+    num_query_heads_per_group: int,
+    head_dim: int,
+    qkv_dim: int,
+) -> tuple:
+    """Reshape and split a fused QKV tensor into Q, K, V components.
+
+    The qkv_dim indexes the fused dimension of size ng*(nq+2)*hn.
+    That dimension is replaced by [ng, component_dim] and then split.
+
+    Use qkv_dim=-1 for activation tensors [*, total_qkv] and
+    qkv_dim=0 for weight tensors [total_qkv, in_features].
+
+    Returns:
+        (Q, K, V) tuple of tensors.
+    """
+    qkv_dim = qkv_dim % tensor.dim()
+    group_size = (num_query_heads_per_group + 2) * head_dim
+
+    shape = list(tensor.shape)
+    shape[qkv_dim:qkv_dim + 1] = [num_query_groups, group_size]
+    reshaped = tensor.reshape(shape)
+
+    split_sizes = [num_query_heads_per_group * head_dim, head_dim, head_dim]
+    return torch.split(reshaped, split_sizes, dim=qkv_dim + 1)
+
+
+def compute_weight_delta_qkv_split(
+    current: Tensor,
+    previous: Tensor,
+    num_query_groups: int,
+    num_query_heads_per_group: int,
+    head_dim: int,
+) -> Dict[str, Dict[str, float]]:
+    """Split a fused QKV weight into Q, K, V and compute delta_W per component.
+
+    Returns:
+        Dict mapping component name ('Q', 'K', 'V') to delta stats dicts.
+    """
+    with torch.no_grad():
+        if previous.device != current.device:
+            previous = previous.to(current.device)
+
+        in_features = current.shape[-1]
+        qkv_args = (num_query_groups, num_query_heads_per_group, head_dim)
+        curr_comps = _split_qkv_dim(current, *qkv_args, qkv_dim=0)
+        prev_comps = _split_qkv_dim(previous, *qkv_args, qkv_dim=0)
+
+        return {
+            name: compute_weight_delta_per_neuron(
+                c.reshape(-1, in_features), p.reshape(-1, in_features),
+            )
+            for name, c, p in zip(_QKV_NAMES, curr_comps, prev_comps)
+        }
+
+
+def compute_weight_delta_swiglu_split(
+    current: Tensor,
+    previous: Tensor,
+) -> Dict[str, Dict[str, float]]:
+    """Split a fused SwiGLU fc1 weight into gate and up components and compute delta_W.
+
+    Returns:
+        Dict mapping component name ('gate', 'up') to delta stats dicts.
+    """
+    with torch.no_grad():
+        if previous.device != current.device:
+            previous = previous.to(current.device)
+
+        curr_gate, curr_up = torch.chunk(current, 2, dim=0)
+        prev_gate, prev_up = torch.chunk(previous, 2, dim=0)
+
+        return {
+            'gate': compute_weight_delta_per_neuron(curr_gate, prev_gate),
+            'up': compute_weight_delta_per_neuron(curr_up, prev_up),
+        }
+
+
+def _relative_norm_change(new_tensor: Tensor, old_tensor: Tensor) -> float:
+    """Compute ||new - old|| / ||old||. Handles cross-device tensors."""
+    if old_tensor.device != new_tensor.device:
+        old_tensor = old_tensor.to(new_tensor.device)
+    new_f = new_tensor.float()
+    old_f = old_tensor.float()
+    delta_norm = (new_f - old_f).norm().item()
+    old_norm = old_f.norm().item()
+    if old_norm > 1e-10:
+        return delta_norm / old_norm
+    return 0.0
+
+
+def _mean_squared_norm_change(new_tensor: Tensor, old_tensor: Tensor) -> Tuple[float, float]:
+    """Return (mean(|new - old|²), mean(|old|²)) for deferred ratio computation.
+
+    Basically computes the average l2 norm of vectors, and looks at the ratio of the change to the old l2 norm.
+    """
+    if old_tensor.device != new_tensor.device:
+        old_tensor = old_tensor.to(new_tensor.device)
+    new_f = new_tensor.float()
+    old_f = old_tensor.float()
+    delta_msq = (new_f - old_f).pow(2).sum(-1).mean().item()
+    old_msq = old_f.pow(2).sum(-1).mean().item()
+    return delta_msq, old_msq
+
+
+def _rerun_linear(
+    linear_module: nn.Module,
+    stored_input: Tensor,
+) -> Tensor:
+    """Re-run a linear layer with stored input and return the output tensor."""
+    new_output = linear_module(stored_input)
+    if isinstance(new_output, tuple):
+        return new_output[0]
+    return new_output
+
+
+def _zero_scalar() -> Tensor:
+    """Return a scalar zero tensor on the current CUDA device."""
+    return torch.zeros(1, dtype=torch.float32, device=torch.cuda.current_device())
+
+
+def _get_grad_shard(param: Tensor, param_range) -> Optional[Tensor]:
+    """Extract the gradient shard owned by this DP rank.
 
     Args:
         param: Model parameter with main_grad attribute.
-        param_range: Range object with .start and .end indicating the
-                     sub-range of the flattened parameter this rank owns.
+        param_range: Range object with .start and .end for the owned sub-range.
+
+    Returns:
+        Float shard tensor, or None if no gradient is available.
+    """
+    grad = get_param_grad(param)
+    if grad is None:
+        return None
+    return grad.view(-1)[param_range.start:param_range.end].float()
+
+
+def compute_grad_shard_norm_sq(param: Tensor, param_range) -> Tensor:
+    """Compute ||grad_shard||^2 as a scalar CUDA tensor for batched all-reduce.
+
+    Args:
+        param: Model parameter with main_grad attribute.
+        param_range: Range object with .start and .end for the owned sub-range.
 
     Returns:
         Scalar CUDA tensor containing ||grad_shard||^2.
     """
-    grad = get_param_grad(param)
-    if grad is None:
-        return torch.zeros(1, dtype=torch.float32, device=torch.cuda.current_device())
+    shard = _get_grad_shard(param, param_range)
+    if shard is None:
+        return _zero_scalar()
     with torch.no_grad():
-        shard = grad.view(-1)[param_range.start:param_range.end].float()
         return (shard * shard).sum().unsqueeze(0)
 
 
 def compute_grad_weight_dot_shard(param: Tensor, param_range) -> Tensor:
-    """Compute dot product of gradient shard and weight shard owned by this DP rank.
-
-    For gradient-weight alignment, we need grad . weight. With distributed optimizer,
-    weights are all-gathered (identical on all ranks), and the gradient shard
-    corresponds to the same sub-range. We compute the partial dot product on the
-    owned shard and all-reduce later.
+    """Compute grad_shard . weight_shard as a scalar CUDA tensor for batched all-reduce.
 
     Args:
         param: Model parameter with main_grad and data attributes.
-        param_range: Range object indicating owned sub-range.
+        param_range: Range object with .start and .end for the owned sub-range.
 
     Returns:
         Scalar CUDA tensor containing grad_shard . weight_shard.
     """
-    grad = get_param_grad(param)
-    if grad is None:
-        return torch.zeros(1, dtype=torch.float32, device=torch.cuda.current_device())
+    shard = _get_grad_shard(param, param_range)
+    if shard is None:
+        return _zero_scalar()
     with torch.no_grad():
-        grad_shard = grad.view(-1)[param_range.start:param_range.end].float()
         weight_shard = param.data.view(-1)[param_range.start:param_range.end].float()
-        return (grad_shard * weight_shard).sum().unsqueeze(0)
+        return (shard * weight_shard).sum().unsqueeze(0)

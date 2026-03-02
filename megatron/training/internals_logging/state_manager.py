@@ -8,9 +8,11 @@ from torch import Tensor
 import torch.nn as nn
 
 from .metrics import (
-    compute_weight_delta,
     compute_weight_delta_per_neuron,
+    compute_weight_delta_qkv_split,
+    compute_weight_delta_swiglu_split,
     compute_angular_update,
+    _extract_layer_index,
 )
 
 
@@ -55,11 +57,20 @@ class InternalsStateManager:
                     cloned = cloned.cpu()
                 self.previous_weights[name] = cloned
 
-    def compute_weight_deltas(self, model: nn.Module) -> Dict[str, float]:
+    def compute_weight_deltas(
+        self, model: nn.Module, split_info: Dict[int, dict],
+    ) -> Dict[str, float]:
         """Compute relative weight updates for all cached parameters.
+
+        For fused projections that pack distinct operations into one weight matrix,
+        the weight is split before computing delta_W per component:
+        - linear_qkv: split into Q, K, V (interleaved by query group)
+        - linear_fc1 with SwiGLU: split into gate and up
 
         Args:
             model: The model with current weights.
+            split_info: Pre-computed mapping from id(param) to split config,
+                built once by the logger via _build_model_info().
 
         Returns:
             Dictionary mapping metric names to relative weight changes.
@@ -68,18 +79,37 @@ class InternalsStateManager:
             return {}
 
         metrics = {}
-        layer_deltas = {}  # For aggregating per-layer metrics
-        layer_per_neuron_stats = {}  # For per-neuron stats aggregation
-
         for name, param in model.named_parameters():
-            if name in self.previous_weights:
-                # Compute per-neuron statistics
-                delta_stats = compute_weight_delta_per_neuron(param.data, self.previous_weights[name])
+            if name not in self.previous_weights:
+                continue
 
-                # Create a clean metric name (replace dots with slashes for W&B grouping)
-                clean_name = name.replace('.', '/')
+            previous = self.previous_weights[name]
+            clean_name = name.replace('.', '/')
+            info = split_info.get(id(param))
 
-                # Log full matrix delta
+            if info is not None and info['type'] == 'qkv':
+                comp_stats = compute_weight_delta_qkv_split(
+                    param.data, previous,
+                    num_query_groups=info['num_query_groups'],
+                    num_query_heads_per_group=info['num_query_heads_per_group'],
+                    head_dim=info['head_dim'],
+                )
+                for comp, stats in comp_stats.items():
+                    comp_name = clean_name.replace('linear_qkv', comp)
+                    metrics[f'delta_W/{comp_name}'] = stats['full']
+                    if 'per_neuron_mean' in stats:
+                        metrics[f'delta_W_per_neuron/mean/{comp_name}'] = stats['per_neuron_mean']
+
+            elif info is not None and info['type'] == 'swiglu':
+                comp_stats = compute_weight_delta_swiglu_split(param.data, previous)
+                for comp, stats in comp_stats.items():
+                    comp_name = clean_name.replace('linear_fc1', comp)
+                    metrics[f'delta_W/{comp_name}'] = stats['full']
+                    if 'per_neuron_mean' in stats:
+                        metrics[f'delta_W_per_neuron/mean/{comp_name}'] = stats['per_neuron_mean']
+
+            else:
+                delta_stats = compute_weight_delta_per_neuron(param.data, previous)
                 metrics[f'delta_W/{clean_name}'] = delta_stats['full']
 
                 # Log per-neuron stats for weight matrices (2D+)
@@ -112,21 +142,6 @@ class InternalsStateManager:
         #                         pass
         #                     break
 
-        # # Compute per-layer aggregate deltas
-        # for layer_idx, deltas in layer_deltas.items():
-        #     if deltas:
-        #         avg_delta = sum(deltas) / len(deltas)
-        #         max_delta = max(deltas)
-        #         metrics[f'per_layer_delta_W/avg/layer_{layer_idx}'] = avg_delta
-        #         metrics[f'delta_W_max/layer_{layer_idx}'] = max_delta
-
-        #         # Per-neuron aggregates at layer level
-        #         pn_stats = layer_per_neuron_stats.get(layer_idx, {})
-        #         if pn_stats.get('means'):
-        #             metrics[f'per_layer_delta_W_per_neuron/mean/layer_{layer_idx}/mean'] = sum(pn_stats['means']) / len(pn_stats['means'])
-        #             metrics[f'per_layer_delta_W_per_neuron/max/layer_{layer_idx}/max'] = max(pn_stats['maxs'])
-        #             metrics[f'per_layer_delta_W_per_neuron/std/layer_{layer_idx}/std'] = sum(pn_stats['stds']) / len(pn_stats['stds'])
-
         return metrics
 
     def compute_angular_updates(self, model: nn.Module) -> Dict[str, float]:
@@ -155,23 +170,15 @@ class InternalsStateManager:
                 metrics[f'angular/cos_similarity/{clean_name}'] = angular_stats['cos_similarity']
                 metrics[f'angular/degrees/{clean_name}'] = angular_stats['angular_change_degrees']
 
-                # Aggregate by layer for summary metrics
-                if 'layers' in name:
-                    parts = name.split('.')
-                    for i, part in enumerate(parts):
-                        if part == 'layers' and i + 1 < len(parts):
-                            try:
-                                layer_idx = int(parts[i + 1])
-                                if layer_idx not in layer_angular:
-                                    layer_angular[layer_idx] = {
-                                        'cos_sims': [],
-                                        'degrees': [],
-                                    }
-                                layer_angular[layer_idx]['cos_sims'].append(angular_stats['cos_similarity'])
-                                layer_angular[layer_idx]['degrees'].append(angular_stats['angular_change_degrees'])
-                            except ValueError:
-                                pass
-                            break
+                layer_idx = _extract_layer_index(name)
+                if layer_idx is not None:
+                    if layer_idx not in layer_angular:
+                        layer_angular[layer_idx] = {
+                            'cos_sims': [],
+                            'degrees': [],
+                        }
+                    layer_angular[layer_idx]['cos_sims'].append(angular_stats['cos_similarity'])
+                    layer_angular[layer_idx]['degrees'].append(angular_stats['angular_change_degrees'])
 
         # Compute per-layer aggregate angular metrics
         for layer_idx, stats in layer_angular.items():

@@ -2126,6 +2126,9 @@ def _add_logging_args(parser):
                        help='Log per-layer gradient statistics.')
     group.add_argument('--log-relative-updates', action='store_true',
                        help='Log relative weight changes (delta_W) between iterations.')
+    group.add_argument('--log-delta-y', action='store_true', default=False,
+                       help='Log delta_Y: relative output change of linear layers '
+                       'after weight update. Requires --log-model-internals.')
     group.add_argument('--log-angular-metrics', action='store_true',
                        help='Log angular updates and gradient-weight alignment '
                        '(useful for spherical/normalized training analysis).')
