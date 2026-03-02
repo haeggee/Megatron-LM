@@ -687,6 +687,7 @@ LOGGING=(
 	--tensorboard-log-interval 1
 	--log-throughput
 	--log-timers-to-tensorboard
+	--log-delta-y
 )
 LOGGING=(${LOGGING[@]} ${EXTRA_LOGS[@]})
 
