@@ -2134,6 +2134,8 @@ def _add_logging_args(parser):
     group.add_argument('--internals-weights-on-gpu', action='store_true',
                        help='Keep previous weights on GPU for delta computation. '
                        'Eliminates GPU-CPU transfer overhead but uses more GPU memory.')
+    group.add_argument('--internals-log-interval', type=int, default=100,
+                       help='How often to log model internals (in iterations).')
 
     return parser
 

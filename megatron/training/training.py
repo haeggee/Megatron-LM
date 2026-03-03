@@ -2566,7 +2566,7 @@ def train(
         args.curr_iteration = iteration
 
         # Enable internals capture if this is a logging iteration.
-        if internals_logger is not None and (iteration + 1) % args.log_interval == 0:
+        if internals_logger is not None and (iteration + 1) % args.internals_log_interval == 0:
             internals_logger.hook_manager.enable_capture()
             internals_logger.snapshot_weights(model[0])
 
@@ -2718,7 +2718,7 @@ def train(
 
         # Log model internals to W&B if enabled.
         # All DP ranks must call log_internals for distributed gradient collectives.
-        if internals_logger is not None and iteration % args.log_interval == 0:
+        if internals_logger is not None and iteration % args.internals_log_interval == 0:
             wandb_writer = get_wandb_writer()  # None on non-logging ranks
             internals_logger.log_internals(model[0], iteration, wandb_writer)
             internals_logger.hook_manager.disable_capture()
