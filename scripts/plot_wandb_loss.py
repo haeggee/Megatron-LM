@@ -32,6 +32,8 @@ EXPERIMENTS_TO_PLOT = [
     ######## muon
     "110M-muon_m0.95_urm-n1",
     "110M-muon_m0.95-lr0.004-n1",
+    "110M-muon_m0.95_mlr2_urm_nest-n1",
+    "110M-muon_m0.95_urm_nest-n1",
     ####### ngpt baselines
     "110M-master_a0-wd0-HSrow1_l2_emb_sh-std0.044-L2Norm-fz-nPre-nFin-pst-ppst-usmr-ss-lsS-qklsS-mlplsG-lgslsS-nw-n1",
     # with projection
@@ -42,6 +44,10 @@ EXPERIMENTS_TO_PLOT = [
     ######## hypermuon
     "110M-master_o_b0.9_none-wd0-HSrow1_l2_sh-lr0.004-std0.044-ngpt-nw-n1",
     "110M-master_o_b0.9-wd0-HSrow1_l2_u_sh-lr0.004-std0.044-ngpt-nw-n1",
+    "110M-master_o_b0.9_mlr2_urm-wd0-HSrow1_l2_embNO_sh-std0.044-ngpt-nw-n1",
+    "110M-master_o_b0.9-wd0-HSrow1_l2_u_embNO_sh-lr0.004-std0.044-ngpt-nw-n1",
+    "110M-master_o_b0.9_urm-wd0-HSrow1_l2_embNO_sh-std0.044-ngpt-nw-n1",
+    "110M-master_o_b0.9_mlr2_urm-wd0-HSrow1_l2_sh-std0.044-ngpt-nw-n1",
 ]
 
 METRIC_KEY = "lm loss"
