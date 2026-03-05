@@ -3063,7 +3063,14 @@ def get_train_valid_test_num_samples():
         eval_samples = eval_iters * args.global_batch_size
     test_samples = args.eval_iters * args.global_batch_size
 
-    return (train_samples, eval_samples, test_samples)
+    # Get train_samples in current phase.
+    if args.phase_transition_iterations:
+        last_transition = max(t for t in [0] + args.phase_transition_iterations if t <= args.iteration)
+        train_samples_in_current_phase = train_samples - last_transition * args.global_batch_size
+    else:
+        train_samples_in_current_phase = train_samples
+
+    return (train_samples_in_current_phase, eval_samples, test_samples)
 
 
 def build_train_valid_test_datasets(build_train_valid_test_datasets_provider, train_valid_test_num_samples=None):
@@ -3091,12 +3098,20 @@ def build_train_valid_test_data_loaders(build_train_valid_test_datasets_provider
         assert (
             args.train_samples is None
         ), 'Only backward compatiblity support for iteration-based training'
+
         args.consumed_train_samples = args.iteration * args.global_batch_size
     if args.iteration > 0 and args.consumed_valid_samples == 0:
         if args.train_samples is None:
             args.consumed_valid_samples = (
                 (args.iteration // args.eval_interval) * args.eval_iters * args.global_batch_size
             )
+
+    # Get consumed train samples in this phase.
+    if args.phase_transition_iterations:
+        last_transition = max(iteration for iteration in (0, *args.phase_transition_iterations) if iteration <= args.iteration)
+        consumed_train_samples_in_current_phase = (args.iteration - last_transition) * args.global_batch_size
+    else:
+        consumed_train_samples_in_current_phase = args.consumed_train_samples
 
     # Rely on distributed-aware core datasets, temporary
     is_distributed = getattr(build_train_valid_test_datasets_provider, "is_distributed", False)
@@ -3121,7 +3136,7 @@ def build_train_valid_test_data_loaders(build_train_valid_test_datasets_provider
             if args.skip_train:
                 train_dataloader = None
             else:
-                train_dataloader = build_pretraining_data_loader(train_ds, args.consumed_train_samples)
+                train_dataloader = build_pretraining_data_loader(train_ds, consumed_train_samples_in_current_phase)
             valid_dataloaders = []
             for valid_d in valid_ds:
                 if args.skip_train or args.full_validation:

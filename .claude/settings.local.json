@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /iopsstor/scratch/cscs/xyixuan/apertus/Megatron-LM log --all --oneline --grep=\"vocab\\\\|embed\\\\|extension\")",
+      "Bash(git -C /iopsstor/scratch/cscs/xyixuan/apertus/Megatron-LM log --all --oneline)",
+      "Bash(git -C /iopsstor/scratch/cscs/xyixuan/apertus/Megatron-LM show 1fb6978f1 --stat)",
+      "Bash(git -C /iopsstor/scratch/cscs/xyixuan/apertus/Megatron-LM show ca6d5d9a1 --stat)",
+      "Bash(python3:*)",
+      "Bash(sort:*)",
+      "Bash(join:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(sacct:*)",
+      "Bash(for:*)"
+    ]
+  }
+}
