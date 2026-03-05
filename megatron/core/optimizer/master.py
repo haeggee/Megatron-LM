@@ -119,6 +119,15 @@ class MasterOptimizer(torch.optim.Optimizer):
         )
         super().__init__(params, default_args_dict)
 
+        # Normalize parameters at initialization so the first forward pass
+        # uses weights that are already on the hypersphere.
+        if self.hypersphere_mode is not None:
+            with torch.no_grad():
+                for group in self.param_groups:
+                    for p in group["params"]:
+                        is_qkv = self.is_qkv_fn(p)
+                        self._normalize(p, p, is_qkv=is_qkv)
+
     @torch.no_grad()  # type: ignore[misc]
     @override
     def step(self, closure: Callable[[], float] | None = None) -> float | None:
