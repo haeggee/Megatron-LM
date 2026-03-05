@@ -383,7 +383,8 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optio
 
         sum_list = []
         weighted_count_list = []
-        raw_count_list =[]
+        raw_count_list = []
+        raw_error_list = []
         for name, offset, vocab_size in modalities:
             in_range = (labels_flat >= offset) & (labels_flat < offset + vocab_size)
             in_range_f = in_range.float()
@@ -391,14 +392,17 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optio
             sum_list.append(torch.sum(losses_flat * weights))
             weighted_count_list.append(torch.sum(weights))
             raw_count_list.append(torch.sum(in_range_f))
+            raw_error_list.append(torch.sum(losses_flat * in_range_f))
 
-        # Stack as [num_modalities, 3] where dim=1 is [loss_sum, loss_weight_sum, token_count]
+        # Stack as [num_modalities, 4] where dim=1 is [loss_sum, loss_weight_sum, token_count, raw_error]
+        # Raw error is not affected by loss masking or weighting - enables track of error for modality tokens even if not supervising them in loss.
         # Don't reduce here - train_step() handles the DP/CP reduction for all report entries
-        modality_stats = torch.stack((torch.stack(sum_list), torch.stack(weighted_count_list), torch.stack(raw_count_list)), dim=1)
+        modality_stats = torch.stack((torch.stack(sum_list), torch.stack(weighted_count_list), torch.stack(raw_count_list), torch.stack(raw_error_list)), dim=1)
 
         for i, (name, _, _) in enumerate(modalities):
             report[f'{name}_token_loss'] = modality_stats[i][[0,1]]
             report[f'{name}_weighted_loss'] = modality_stats[i][[0,2]]
+            report[f'{name}_error'] = modality_stats[i][[3, 2]]
 
     for modality, weight in (current_modality_weights or {}).items():
         if getattr(args, f"log_{modality}_weight", False):
