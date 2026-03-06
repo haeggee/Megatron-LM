@@ -618,6 +618,9 @@ def get_megatron_master_optimizer(
         "extra_scale_factor": config.muon_extra_scale_factor,
         "pg_collection": pg_collection,
         "mode": config.muon_tp_mode,
+
+        "qkv_split_shapes": qkv_split_shapes,
+        "qkv_dim": kv_channels,  # head dim for split_heads when split_qkv_heads=True
     }
 
     # freezing nonlinear params and get param groups for muon
