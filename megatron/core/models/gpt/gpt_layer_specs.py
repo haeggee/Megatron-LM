@@ -344,11 +344,13 @@ def get_gpt_layer_with_transformer_engine_spec(
                 post_attention_layernorm=post_attention_layer_norm,
                 post_attention_block_layernorm=post_attention_block_layer_norm,
                 attention_layerscale=IdentityOp if config.layer_scale is None else LayerScale,
+                residual_attention_layerscale=IdentityOp if config.residual_layer_scale is None else LayerScale,
                 self_attn_bda=get_bias_dropout_add,
                 pre_mlp_layernorm=pre_mlp_layernorm,
                 post_mlp_layernorm=post_mlp_layernorm,
                 post_mlp_block_layernorm=post_mlp_block_layernorm,
                 mlp_layerscale=IdentityOp if config.layer_scale is None else LayerScale,
+                residual_mlp_layerscale=IdentityOp if config.residual_layer_scale is None else LayerScale,
                 mlp=mlp,
                 mlp_bda=get_bias_dropout_add,
                 sharded_state_dict_keys_map={

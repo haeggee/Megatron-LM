@@ -394,10 +394,17 @@ class MegatronOptimizer(ABC):
         Raises:
             ValueError: If parameter groups in state dict don't match current optimizer.
         """
+        # Some optimizers have extra keys.
+        extra_keys = "use_orthogonal_updates",
+        use_param_group_identifier_keys = param_group_identifier_keys
+        for extra_key in extra_keys:
+            if all(extra_key in g for g in current_groups):
+                use_param_group_identifier_keys += extra_key,
+
         # Define groups order that is needed in the current optimizer (coming from runtime)
         needed_groups = [
             # NeMo may have different key for required fields, e.g., "wd_mult" to "pre_wd_mult"
-            tuple(g[key] if key in g else g[f"pre_{key}"] for key in param_group_identifier_keys)
+            tuple(g[key] if key in g else g[f"pre_{key}"] for key in use_param_group_identifier_keys)
             for g in current_groups
         ]
 
@@ -408,7 +415,7 @@ class MegatronOptimizer(ABC):
             tuple(
                 # NeMo may have different key for required fields, e.g., "wd_mult" to "pre_wd_mult"
                 group[key] if key in group else group[f"pre_{key}"]
-                for key in param_group_identifier_keys
+                for key in use_param_group_identifier_keys
             ): group
             for group in state_dict_groups
         }
@@ -420,7 +427,7 @@ class MegatronOptimizer(ABC):
                 raise ValueError(
                     f"Could not find parameter group with key {key} in loaded checkpoint.\n"
                     f"Available keys:\n{available_keys}\n"
-                    f"Parameter group key definition: {param_group_identifier_keys}"
+                    f"Parameter group key definition: {use_param_group_identifier_keys}"
                 )
 
             # Update group's parameters to preserve state dict ordering
@@ -673,6 +680,10 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                             tensor_parallel.copy_tensor_model_parallel_attributes(main_param, param)
                             if hasattr(param, 'shared'):
                                 main_param.shared = param.shared
+                            if hasattr(param, 'is_qkv'):
+                                main_param.is_qkv = param.is_qkv
+                            if hasattr(param, 'expert_tp'):
+                                main_param.expert_tp = param.expert_tp
                             # Replace the optimizer params with the new fp32 copy.
                             param_group['params'][i] = main_param
 

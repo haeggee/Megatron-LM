@@ -75,7 +75,6 @@ class MasterOptimizer(torch.optim.Optimizer):
         mode: Literal["blockwise", "duplicated", "distributed"] = "duplicated",
     ):
 
-        self.use_orthogonal_updates = use_orthogonal_updates
         self.fp32_matmul_prec = fp32_matmul_prec
         self.use_nesterov = use_nesterov
         self.weight_decay_method = weight_decay_method
@@ -116,8 +115,19 @@ class MasterOptimizer(torch.optim.Optimizer):
             beta3_warmup=beta3_warmup,
             alpha_warmup=alpha_warmup,
             eps=eps,
+
+            use_orthogonal_updates=use_orthogonal_updates,
         )
         super().__init__(params, default_args_dict)
+
+        # Normalize parameters at initialization so the first forward pass
+        # uses weights that are already on the hypersphere.
+        if self.hypersphere_mode is not None:
+            with torch.no_grad():
+                for group in self.param_groups:
+                    for p in group["params"]:
+                        is_qkv = self.is_qkv_fn(p)
+                        self._normalize(p, p, is_qkv=is_qkv)
 
     @torch.no_grad()  # type: ignore[misc]
     @override
@@ -153,7 +163,7 @@ class MasterOptimizer(torch.optim.Optimizer):
         if len(state) == 0:
             state["exp_avg"] = torch.zeros_like(grad)
             # TODO: Make it such that we can use ademamix-like updates with muon.
-            if not self.use_orthogonal_updates:  # Enables g^2 EMA as in adam & ademamix.
+            if not group["use_orthogonal_updates"]:  # Enables g^2 EMA as in adam & ademamix.
                 state["exp_avg_sq"] = torch.zeros_like(grad)
                 if group["alpha"] != 0:  # Enables slow momentum as in ademamix.
                     state["exp_avg_slow"] = torch.zeros_like(grad)
@@ -168,7 +178,7 @@ class MasterOptimizer(torch.optim.Optimizer):
             grad = self._project(p, grad, is_qkv=is_qkv)
 
         # Get update direction.
-        if self.use_orthogonal_updates:  # Muon branch.
+        if group["use_orthogonal_updates"]:  # Muon branch.
             assert emerging_optimizers is not None
 
             # Weight deacy.
@@ -522,7 +532,7 @@ def get_megatron_master_optimizer(
             for p in group['params']:
                 if len(opt.state[p]) == 0:
                     opt.state[p]["exp_avg"] = torch.zeros_like(p.data)
-                    if not config.use_orthogonal_updates:  # Enables g^2 EMA as in adam & ademamix.
+                    if not group["use_orthogonal_updates"]:  # Enables g^2 EMA as in adam & ademamix.
                         opt.state[p]["exp_avg_sq"] = torch.zeros_like(p.data)
                         if group["alpha"] != 0:  # Enables slow momentum as in ademamix.
                             opt.state[p]["exp_avg_slow"] = torch.zeros_like(p.data)
@@ -600,6 +610,8 @@ def get_megatron_master_optimizer(
         "split_qkv": config.muon_split_qkv,
         "split_qkv_heads": config.hypersphere_split_heads,
         "is_qkv_fn": lambda p: getattr(p, "is_qkv", False),
+        "qkv_split_shapes": qkv_split_shapes,
+        "qkv_dim": kv_channels,  # head dim for split_heads when split_qkv_heads=True
         "fp32_matmul_prec": config.muon_fp32_matmul_prec,
         "num_ns_steps": config.muon_num_ns_steps,
         "scale_mode": config.muon_scale_mode,
@@ -614,6 +626,8 @@ def get_megatron_master_optimizer(
 
     config_overrides_master = {**config_overrides}
     config_overrides_master[ParamKey(name="*")] = ParamGroupOverride(max_lr=config.muon_lr_factor * config.lr)
+    if config.use_orthogonal_updates and not config.use_orthogonal_embeddings:
+        config_overrides_master[ParamKey(attr="is_embedding_or_output_parameter")] = ParamGroupOverride(use_orthogonal_updates=False)
 
     linear_param_groups = _get_param_groups(model_chunks, config, config_overrides_master)
     # if layerwise distributed optimizer is not used, need to handle ep params separately

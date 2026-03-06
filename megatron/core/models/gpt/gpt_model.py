@@ -311,6 +311,8 @@ class GPTModel(LanguageModule):
             pass
         elif self.pre_process:
             decoder_input = self.embedding(input_ids=input_ids, position_ids=position_ids)
+            if self.config.upscale_embedding is not None:
+                decoder_input = self.config.upscale_embedding * decoder_input
         else:
             # intermediate stage of pipeline
             # decoder will get hidden_states from encoder.input_tensor

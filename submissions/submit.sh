@@ -54,6 +54,7 @@ COOLDOWN=0.2
 
 # Misc. defaults.
 EXTRA_LOG=true
+NO_SAVE=false
 
 # Usage function.
 usage () {
@@ -65,6 +66,8 @@ usage () {
 	echo " --debug: Enable debug mode"
 	echo " --extra-name <name>: Add a suffix to the name"
 	echo " --time (default=$TIME): Change the sbatch time limit"
+	echo " --no-extra-logs: Disable costly logging"
+	echo " --no-save: Disable saving checkpoint"
 	# FP8 settings.
 	echo " --fp8: Enables fp8"
 	# Training settings..
@@ -84,12 +87,16 @@ usage () {
 	echo " --use-stream-minus-residual"
 	echo " --layer-scale <float>"
 	echo " --layer-scale-scale <float>"
+	echo " --residual-layer-scale <float>"
+	echo " --residual-layer-scale-scale <float>"
 	echo " --softmax-scale <float>"
 	echo " --qk-norm <RMSNorm/L2Norm>"
 	echo " --mlp-layer-scale <float>"
 	echo " --mlp-layer-scale-gate-scale <float>"
+	echo " --mlp-out-scale <float>"
 	echo " --logits-layer-scale <float>"
 	echo " --logits-layer-scale-scale <float>"
+	echo " --upscale-embedding <float>"
 	# Optimizer settings.
 	echo " --opt <adam/dmuon/muon/dmaster/master/ademamix> (default=$OPT)"
 	echo " --master-orthogonalize"
@@ -108,12 +115,12 @@ usage () {
 	echo " --hs-r <learnable/float>: hypersphere radius"
 	echo " --hs-u: hypersphere normalize update"
 	echo " --hs-embed: hypersphere normalize embeddings"
+	echo " --hs-emb-no-orthogonal: Don't use muon update on embeddings, but keep fixed to the sphere (if --hs-embed is also set, otherwise no effect)"
 	echo " --hs-split-heads: hypersphere normalize q,k,v heads separately"
 	echo " --hs-p: project gradient to tangent space"
 	echo " --hs-s: soft hyperball norm clipping."
 	# Logs.
 	echo " --wandb-name <str>: Specify wandb name."
-	echo " --no-extra-log"
 }
 
 if [[ $# -eq 0 ]]; then
@@ -146,6 +153,7 @@ if [[ $1 -eq 110 ]]; then
 	INTERMEDIATE_METRICS_INTERVAL=10
 	SCALE=M
 	UNTIE=false
+	LOG_FREQ=50
 elif [[ $1 -eq 390 ]]; then 
 	# batch_size: ~0.52M.
 	LAYERS=16
@@ -163,6 +171,7 @@ elif [[ $1 -eq 390 ]]; then
 	INTERMEDIATE_METRICS_INTERVAL=10
 	SCALE=M
 	UNTIE=false
+	LOG_FREQ=100
 elif [[ $1 -eq 1 ]]; then 
 	# batch_size: ~1.05M.
 	LAYERS=16
@@ -178,6 +187,7 @@ elif [[ $1 -eq 1 ]]; then
 	SAVE_FREQ=5000
 	DEF_TOKENS=125
 	INTERMEDIATE_METRICS_INTERVAL=100
+	LOG_FREQ=200
 else
 	>&2 echo "Invalid model size: $1"
 	usage
@@ -198,6 +208,10 @@ while [[ $# -gt 0 ]]; do
 			EXTRA_NAME="-$2"; shift 2;;
 		--time)
 			TIME=$2; shift 2;;
+		--no-extra-logs)
+			EXTRA_LOG=false; shift;;
+		--no-save)
+			NO_SAVE=true; shift;;
 		# FP8 settings.
 		--fp8)
 			FP8=true; shift;;
@@ -235,6 +249,10 @@ while [[ $# -gt 0 ]]; do
 			LAYER_SCALE=$2; shift 2;;
 		--layer-scale-scale)
 			LAYER_SCALE_SCALE=$2; shift 2;;
+		--residual-layer-scale)
+			RESIDUAL_LAYER_SCALE=$2; shift 2;;
+		--residual-layer-scale-scale)
+			RESIDUAL_LAYER_SCALE_SCALE=$2; shift 2;;
 		--softmax-scale)
 			SOFT_MAX_SCALE=$2; shift 2;;
 		--qk-norm)
@@ -247,10 +265,14 @@ while [[ $# -gt 0 ]]; do
 			MLP_LAYER_SCALE=$2; shift 2;;
 		--mlp-layer-scale-gate-scale)
 			MLP_LAYER_SCALE_GATE_SCALE=$2; shift 2;;
+		--mlp-out-scale)
+			MLP_OUT_SCALE=$2; shift 2;;
 		--logits-layer-scale)
 			LOGITS_LAYER_SCALE=$2; shift 2;;
 		--logits-layer-scale-scale)
 			LOGITS_LAYER_SCALE_SCALE=$2; shift 2;;
+		--upscale-embedding)
+			UPSCALE_EMBEDDING=$2; shift 2;;
 		# Opt settings.
 		--opt)
 			OPT=$2; shift 2;;
@@ -286,6 +308,8 @@ while [[ $# -gt 0 ]]; do
 			HS_UPDATE=true; shift;;
 		--hs-embed)
 			HS_EMBED=true; shift;;
+		--hs-embed-no-orthogonal)
+			HS_EMBED_NO_ORTHOGONAL=true; shift;;
 		--hs-split-heads)
 			HS_SPLIT_HEADS=true; shift;;
 		--hs-p)
@@ -295,8 +319,6 @@ while [[ $# -gt 0 ]]; do
 		# Logs.
 		--wandb-name)
 			WANDB_NAME=$2; shift 2;;
-		--no-extra-log)
-			EXTRA_LOG=false; shift;;
 		*)
 			echo "Unexpected argument $1"
 			usage
@@ -313,7 +335,7 @@ if [[ $OPT = adam ]]; then
 		SUFFIX=${SUFFIX}-b${BETA1}_$BETA2
 	fi
 elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
-	SUFFIX=$SUFFIX-$OPT
+	SUFFIX=$SUFFIX-${OPT}_h
 	if [[ $BETA1 != 0.9 ]]; then
 		SUFFIX=${SUFFIX}_m$BETA1
 	fi
@@ -341,7 +363,7 @@ elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
 	MUON_MOMENTUM=$BETA1
 	BETA1=$ADAMBETA1
 elif [[ $OPT = dmaster ]] || [[ $OPT = master ]]; then
-	SUFFIX=$SUFFIX-$OPT
+	SUFFIX=$SUFFIX-${OPT}_h
 	IS_MASTER_OPT=true
 	if [[ $MASTER_ORTHOGONALIZE = true ]]; then
 		SUFFIX=${SUFFIX}_o
@@ -369,9 +391,9 @@ elif [[ $OPT = dmaster ]] || [[ $OPT = master ]]; then
 		if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.99 ]] || [[ $BETA3 != 0.999 ]]; then
 			SUFFIX=${SUFFIX}_b${BETA1}_${BETA2}_$BETA3
 		fi
-		if [[ $ALPHA != 5 ]]; then
-			SUFFIX=${SUFFIX}_a$ALPHA
-		fi
+	fi
+	if [[ $ALPHA != 5 ]]; then
+		SUFFIX=${SUFFIX}_a$ALPHA
 	fi
 	if [[ $OPT = dmaster ]]; then
 		OPT=dist_master
@@ -406,7 +428,7 @@ if [[ $HYPERBALL != false ]]; then
 		echo "hypersphere only implemented for master optimizer"
 		exit 1
 	fi
-	SUFFIX=$SUFFIX-HS${HYPERBALL}${HS_R}_$HS_KIND
+	SUFFIX=$SUFFIX-HS${HYPERBALL}${HS_R}_${HS_KIND}_it0
 	OPT_ARGS+=(--hypersphere-mode $HYPERBALL --hypersphere-kind $HS_KIND --hypersphere-radius $HS_R)
 	if [[ $HS_UPDATE = true ]]; then
 		SUFFIX=${SUFFIX}_u
@@ -416,6 +438,10 @@ if [[ $HYPERBALL != false ]]; then
 	if [[ $HS_EMBED = true ]]; then
 		SUFFIX=${SUFFIX}_emb
 		OPT_ARGS+=(--hypersphere-embeddings)
+		if [[ $HS_EMBED_NO_ORTHOGONAL = true ]]; then
+			SUFFIX=${SUFFIX}NO
+			OPT_ARGS+=(--no-use-orthogonal-embeddings)
+		fi
 	fi
 	if [[ $HS_SPLIT_HEADS = true ]]; then
 		SUFFIX=${SUFFIX}_sh
@@ -490,53 +516,88 @@ if [[ $USE_STREAM_MINUS_RESIDUAL = true ]]; then
 	SUFFIX=$SUFFIX-usmr
 	ARCH_ARGS+=(--use-stream-minus-residual)
 fi
+LONG_SUFFIX=$SUFFIX  # To save checkpoints haha.
 if [[ ! -z "${SOFT_MAX_SCALE+xxx}" ]]; then
 	SUFFIX=$SUFFIX-ss
+	LONG_SUFFIX=$LONG_SUFFIX-ss$SOFT_MAX_SCALE
 	ARCH_ARGS+=(--softmax-scale $SOFT_MAX_SCALE)
 fi
 
 if [[ ! -z "${LAYER_SCALE+xxx}" ]]; then
 	SUFFIX=$SUFFIX-ls
+	LONG_SUFFIX=$LONG_SUFFIX-ls$LAYER_SCALE
 	ARCH_ARGS+=(--layer-scale $LAYER_SCALE)
 	if [[ ! -z "${LAYER_SCALE_SCALE+xxx}" ]]; then
 		SUFFIX=${SUFFIX}S
+		LONG_SUFFIX=${LONG_SUFFIX}S$LAYER_SCALE_SCALE
 		ARCH_ARGS+=(--layer-scale-scale $LAYER_SCALE_SCALE)
 	fi
 fi
+
+if [[ ! -z "${RESIDUAL_LAYER_SCALE+xxx}" ]]; then
+	SUFFIX=$SUFFIX-rls
+	LONG_SUFFIX=$LONG_SUFFIX-rls$RESIDUAL_LAYER_SCALE
+	ARCH_ARGS+=(--residual-layer-scale $RESIDUAL_LAYER_SCALE)
+	if [[ ! -z "${RESIDUAL_LAYER_SCALE_SCALE+xxx}" ]]; then
+		SUFFIX=${SUFFIX}S
+		LONG_SUFFIX=${LONG_SUFFIX}S$RESIDUAL_LAYER_SCALE_SCALE
+		ARCH_ARGS+=(--residual-layer-scale-scale $RESIDUAL_LAYER_SCALE_SCALE)
+	fi
+fi
+
 if [[ ! -z "${QK_LAYER_SCALE+xxx}" ]]; then
 	SUFFIX=$SUFFIX-qkls
+	LONG_SUFFIX=$LONG_SUFFIX-qkls$QK_LAYER_SCALE
 	ARCH_ARGS+=(--qk-layer-scale $QK_LAYER_SCALE)
 	if [[ ! -z "${QK_LAYER_SCALE_SCALE+xxx}" ]]; then
+		LONG_SUFFIX=${LONG_SUFFIX}S$QK_LAYER_SCALE_SCALE
 		SUFFIX=${SUFFIX}S
 		ARCH_ARGS+=(--qk-layer-scale-scale $QK_LAYER_SCALE_SCALE)
 	fi
 fi
 if [[ ! -z "${MLP_LAYER_SCALE+xxx}" ]]; then
 	SUFFIX=$SUFFIX-mlpls
+	LONG_SUFFIX=$LONG_SUFFIX-mlpls$MLP_LAYER_SCALE
 	ARCH_ARGS+=(--mlp-layer-scale $MLP_LAYER_SCALE)
 	if [[ ! -z "${MLP_LAYER_SCALE_GATE_SCALE+xxx}" ]]; then
 		SUFFIX=${SUFFIX}G
+		LONG_SUFFIX=${LONG_SUFFIX}G$MLP_LAYER_SCALE_GATE_SCALE
 		ARCH_ARGS+=(--mlp-layer-scale-gate-scale $MLP_LAYER_SCALE_GATE_SCALE --no-bias-swiglu-fusion)
 	fi
 fi
+if [[ ! -z "${MLP_OUT_SCALE+xxx}" ]]; then
+	SUFFIX=$SUFFIX-mlpO
+	LONG_SUFFIX=$LONG_SUFFIX-mlpO$MLP_OUT_SCALE
+	ARCH_ARGS+=(--mlp-out-scale $MLP_OUT_SCALE)
+fi
 if [[ ! -z "${LOGITS_LAYER_SCALE+xxx}" ]]; then
 	SUFFIX=$SUFFIX-lgsls
+	LONG_SUFFIX=$LONG_SUFFIX-lgsls$LOGITS_LAYER_SCALE
 	ARCH_ARGS+=(--logits-layer-scale $LOGITS_LAYER_SCALE)
 	if [[ ! -z "${LOGITS_LAYER_SCALE_SCALE+xxx}" ]]; then
 		SUFFIX=${SUFFIX}S
+		LONG_SUFFIX=${LONG_SUFFIX}S$LOGITS_LAYER_SCALE_SCALE
 		ARCH_ARGS+=(--logits-layer-scale-scale $LOGITS_LAYER_SCALE_SCALE)
 	fi
 fi
+if [[ ! -z "${UPSCALE_EMBEDDING+xxx}" ]]; then
+	SUFFIX=$SUFFIX-ue
+	LONG_SUFFIX=$LONG_SUFFIX-up$UPSCALE_EMBEDDING
+	ARCH_ARGS+=(--upscale-embedding $UPSCALE_EMBEDDING)
+fi
+
 
 # Training settings.
 if [[ $NO_WARMUP = true ]]; then
 	SUFFIX=$SUFFIX-nw
+	LONG_SUFFIX=$LONG_SUFFIX-nw
 	WARMUP=0
 else
 	WARMUP=5000
 fi
 if [[ $TOKENS != $DEF_TOKENS ]]; then
 	SUFFIX=$SUFFIX-${TOKENS}BT
+	LONG_SUFFIX=$LONG_SUFFIX-${TOKENS}BT
 fi
 ITERS=$((ITERS_PER_BT*TOKENS))
 
@@ -544,6 +605,7 @@ DECAY_ARGS=()
 if [[ $DECAY = wsd ]]; then
 	if [[ $COOLDOWN != 0.2 ]]; then
 		SUFFIX=$SUFFIX-cd$COOLDOWN
+		LONG_SUFFIX=$LONG_SUFFIX-cd${COOLDOWN}
 	fi
 	DECAY_ITERS=$(python3 -c "print(int($ITERS * $COOLDOWN))")
 	DECAY_ARGS+=(
@@ -553,6 +615,7 @@ if [[ $DECAY = wsd ]]; then
 	)
 elif [[ $DECAY = cos ]]; then
 	SUFFIX=$SUFFIX-cos
+	LONG_SUFFIX=$LONG_SUFFIX-cos
 	DECAY_ITERS=$((ITERS - WARMUP))
 	DECAY_ARGS+=(
 		--lr-decay-style cosine
@@ -568,8 +631,9 @@ fi
 NGPT_SUBSTRING=-L2Norm-fz-nPre-nFin-pst-ppst-usmr-ss-lsS-qklsS-mlplsG-lgslsS
 SUFFIX="${SUFFIX/$NGPT_SUBSTRING/-ngpt}"
 
-EXTRA_LOGS=()
 SUFFIX=$SUFFIX$EXTRA_NAME
+LONG_SUFFIX=$LONG_SUFFIX$EXTRA_NAME
+EXTRA_LOGS=()
 if [[ $EXTRA_LOG = true ]]; then
 	EXTRA_LOGS+=(
 		--log-validation-ppl-to-tensorboard
@@ -577,18 +641,21 @@ if [[ $EXTRA_LOG = true ]]; then
 		--log-num-zeros-in-grad
 		--log-params-norm
 		--log-progress
+		--log-timers-to-tensorboard
 		--log-model-internals
 		--log-activation-stats
 		--log-gradient-stats
 		--log-angular-metrics
 		--log-relative-updates
+		--log-delta-y
+		--internals-log-interval $LOG_FREQ
 	)
 fi
 
 # Final preparations.
 WANDB_PROJECT=opt_$SCRIPT_VERSION
 EXP_NAME=$SIZE$SCALE$SUFFIX
-ROOT_PATH=$TRAIN_ROOT/$SCRIPT_VERSION/$EXP_NAME
+ROOT_PATH=$TRAIN_ROOT/$SCRIPT_VERSION/$SIZE$SCALE$LONG_SUFFIX
 DEBUG_ROOT=$ROOT_PATH/debug
 SAVE_PATH=$ROOT_PATH/checkpoints
 DIFFS_PATH=$ROOT_PATH/diffs
@@ -677,8 +744,6 @@ DATA_ARGS=(
 
 LOGGING=(
 	--log-interval 1
-	--save-interval $SAVE_FREQ
-	--save $SAVE_PATH
 	--load $SAVE_PATH
 	--tensorboard-dir $ROOT_PATH/tensorboard
 	--wandb-project $WANDB_PROJECT
@@ -686,9 +751,13 @@ LOGGING=(
 	--timing-log-level 1
 	--tensorboard-log-interval 1
 	--log-throughput
-	--log-timers-to-tensorboard
-	--log-delta-y
 )
+if [[ $NO_SAVE = false ]]; then
+	LOGGING+=(
+		--save-interval $SAVE_FREQ
+		--save $SAVE_PATH
+	)
+fi
 LOGGING=(${LOGGING[@]} ${EXTRA_LOGS[@]})
 
 SCHEDULER_ARGS=(

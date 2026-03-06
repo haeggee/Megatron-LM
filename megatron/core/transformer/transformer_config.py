@@ -162,6 +162,9 @@ class TransformerConfig(ModelParallelConfig):
     layer_scale_scale: Optional[float] = None
     """If set, layerscale parameters will be multiplied by `layer_scale/layer_scale_scale` during forward as in nGPT eigen learning rates."""
 
+    residual_layer_scale: Optional[float] = None
+    residual_layer_scale_scale: Optional[float] = None
+
     qk_layer_scale: Optional[float] = None
     qk_layer_scale_scale: Optional[float] = None
 
@@ -171,6 +174,9 @@ class TransformerConfig(ModelParallelConfig):
     mlp_layer_scale: Optional[float] = None
     mlp_layer_scale_gate_scale: Optional[float] = None
     mlp_layer_scale_scale: Optional[float] = None
+    mlp_out_scale: Optional[float] = None
+
+    upscale_embedding: Optional[float] = None
 
     use_stream_minus_residual: bool = False
     """If set, `output <- output - residual` is computed after the post_attention_layernorm (or post_mlp_layernorm)

@@ -224,6 +224,7 @@ class TransformerLayerSubmodules:
     self_attention: Union[ModuleSpec, type] = IdentityOp
     self_attn_bda: Union[ModuleSpec, type] = IdentityFuncOp
     attention_layerscale: Union[ModuleSpec, type] = IdentityOp
+    residual_attention_layerscale: Union[ModuleSpec, type] = IdentityOp
     post_attention_layernorm: Union[ModuleSpec, type] = IdentityOp
     post_attention_block_layernorm: Union[ModuleSpec, type] = IdentityOp
 
@@ -235,6 +236,7 @@ class TransformerLayerSubmodules:
     mlp: Union[ModuleSpec, type] = IdentityOp
     mlp_bda: Union[ModuleSpec, type] = IdentityFuncOp
     mlp_layerscale: Union[ModuleSpec, type] = IdentityOp
+    residual_mlp_layerscale: Union[ModuleSpec, type] = IdentityOp
     post_mlp_layernorm: Union[ModuleSpec, type] = IdentityOp
     post_mlp_block_layernorm: Union[ModuleSpec, type] = IdentityOp
 
@@ -339,6 +341,15 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             scale=self.config.layer_scale_scale,
             eps=self.config.layernorm_epsilon,
         )
+
+        # [Module 2.4: Attention residual LayerScale]
+        self.residual_attention_layerscale = build_module(
+            submodules.residual_attention_layerscale,
+            hidden_size=self.config.hidden_size,
+            initial_value=self.config.residual_layer_scale,
+            scale=self.config.residual_layer_scale_scale,
+            sequence_parallel=self.config.sequence_parallel,
+        )
         
         # [Module 3: BiasDropoutFusion]
         self.self_attn_bda = build_module(submodules.self_attn_bda)
@@ -425,6 +436,15 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             config=self.config,
             hidden_size=self.config.hidden_size,
             eps=self.config.layernorm_epsilon,
+        )
+
+        # [Module 8.4: MLP residual LayerScale]
+        self.residual_mlp_layerscale = build_module(
+            submodules.residual_mlp_layerscale,
+            hidden_size=self.config.hidden_size,
+            initial_value=self.config.residual_layer_scale,
+            scale=self.config.residual_layer_scale_scale,
+            sequence_parallel=self.config.sequence_parallel,
         )
 
         # [Module 9: BiasDropoutFusion]
@@ -593,6 +613,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
 
         # Residual connection.
         residual = hidden_states
+        residual = self.residual_attention_layerscale(residual)
 
         # Optional Input Layer norm
         if self.recompute_input_layernorm:
@@ -697,6 +718,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
 
         # Residual connection.
         residual = hidden_states
+        residual = self.residual_mlp_layerscale(residual)
 
         # Optional Layer norm post the cross-attention.
         if self.recompute_pre_mlp_layernorm:
@@ -758,6 +780,8 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output)
 
         mlp_output, bias = mlp_output_with_bias
+        if self.config.mlp_out_scale is not None:
+            mlp_output = self.config.mlp_out_scale * mlp_output
         mlp_output = self.post_mlp_layernorm(mlp_output)
         if self.config.use_stream_minus_residual:
             mlp_output = mlp_output - residual

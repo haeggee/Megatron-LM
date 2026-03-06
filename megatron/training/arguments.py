@@ -1846,12 +1846,16 @@ def _add_network_size_args(parser):
     group.add_argument('--qk-layer-scale-scale', type=float)
     group.add_argument('--layer-scale', type=float)
     group.add_argument('--layer-scale-scale', type=float)
+    group.add_argument('--residual-layer-scale', type=float)
+    group.add_argument('--residual-layer-scale-scale', type=float)
     group.add_argument('--use-stream-minus-residual', action='store_true')
     group.add_argument('--no-final-layernorm', action='store_false', dest='final_layernorm')
     group.add_argument('--logits-layer-scale', type=float)
     group.add_argument('--logits-layer-scale-scale', type=float)
     group.add_argument('--mlp-layer-scale', type=float)
     group.add_argument('--mlp-layer-scale-gate-scale', type=float)
+    group.add_argument('--upscale-embedding', type=float)
+    group.add_argument('--mlp-out-scale', type=float)
     group.add_argument('--softmax-scale', type=float)
     group.add_argument('--seednorm-init', type=float, default=1.0,
                           help='Initial value for the seednorm scaling parameter.')
@@ -2137,7 +2141,8 @@ def _add_logging_args(parser):
     group.add_argument('--internals-weights-on-gpu', action='store_true',
                        help='Keep previous weights on GPU for delta computation. '
                        'Eliminates GPU-CPU transfer overhead but uses more GPU memory.')
-
+    group.add_argument('--internals-log-interval', type=int, default=100,
+                       help='How often to log model internals (in iterations).')
     return parser
 
 
