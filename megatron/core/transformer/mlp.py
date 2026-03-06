@@ -234,7 +234,7 @@ class MLP(MegatronModule):
 
                 def glu(x):
                     x_glu, x_linear = torch.chunk(x, 2, dim=-1)
-                    if self.layer_scale is not None and self.config.mlp_layer_scale_gate_scale is not None:
+                    if self.config.mlp_layer_scale_gate_scale is not None:
                         x_glu = self.config.mlp_layer_scale_gate_scale * x_glu
                     if (val := self.config.activation_func_clamp_value) is not None:
                         x_glu = x_glu.clamp(min=None, max=val)

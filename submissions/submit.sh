@@ -48,6 +48,8 @@ HS_UPDATE=false
 HS_EMBED=false
 HS_SPLIT_HEADS=false
 
+ACTIVATION=swiglu
+
 NO_WARMUP=false
 DECAY=wsd
 COOLDOWN=0.2
@@ -78,6 +80,7 @@ usage () {
 	echo " --cooldown <float>: Fraction to do cooldown"
 	# Architecture settings.
 	echo " --init <float>: Change init std."
+	echo " --activation (default=$ACTIVATION): MLP activation. Choices=[swiglu, gelu]."
 	echo " --no-pre-norm"
 	echo " --no-final-layernorm"
 	echo " --normalization <RMSNorm/L2Norm>"
@@ -231,6 +234,8 @@ while [[ $# -gt 0 ]]; do
 		# Architecture settings.
 		--init)
 			NEW_INIT_STD=$2; shift 2;;
+		--activation)
+			ACTIVATION=$2; shift 2;;
 		--no-pre-norm)
 			NO_PRE_NORM=true; shift;;
 		--no-final-layernorm)
@@ -475,6 +480,16 @@ if [[ ! -z ${NEW_INIT_STD+x} ]]; then
 	INIT_STD=$NEW_INIT_STD
 fi
 
+if [[ $ACTIVATION = gelu ]]; then
+	FFN_SIZE=$((3*$FFN_SIZE/2))
+	SUFFIX=$SUFFIX-$ACTIVATION
+elif [[ $ACTIVATION = swiglu ]]; then
+	ARCH_ARGS+=(--swiglu)
+else
+	>&2 echo Unknown activation: $ACTIVATION
+	exit 1
+fi
+
 if [[ $NORMALIZATION != RMSNorm ]]; then
 	SUFFIX=$SUFFIX-$NORMALIZATION
 fi
@@ -562,6 +577,12 @@ if [[ ! -z "${MLP_LAYER_SCALE+xxx}" ]]; then
 	if [[ ! -z "${MLP_LAYER_SCALE_GATE_SCALE+xxx}" ]]; then
 		SUFFIX=${SUFFIX}G
 		LONG_SUFFIX=${LONG_SUFFIX}G$MLP_LAYER_SCALE_GATE_SCALE
+		ARCH_ARGS+=(--mlp-layer-scale-gate-scale $MLP_LAYER_SCALE_GATE_SCALE --no-bias-swiglu-fusion)
+	fi
+else
+	if [[ ! -z "${MLP_LAYER_SCALE_GATE_SCALE+xxx}" ]]; then
+		SUFFIX=${SUFFIX}-mlpG
+		LONG_SUFFIX=${LONG_SUFFIX}-mlpG$MLP_LAYER_SCALE_GATE_SCALE
 		ARCH_ARGS+=(--mlp-layer-scale-gate-scale $MLP_LAYER_SCALE_GATE_SCALE --no-bias-swiglu-fusion)
 	fi
 fi
@@ -705,7 +726,6 @@ LLAMA_ARGS=(
 	--optimizer $OPT
 	--adam-eps 0.00000001
 	--norm-epsilon 0.00001
-	--swiglu
 )
 if [[ $UNTIE = true ]]; then
 	LLAMA_ARGS+=(--untie-embeddings-and-output-weights)
