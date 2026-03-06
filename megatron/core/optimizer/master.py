@@ -610,8 +610,6 @@ def get_megatron_master_optimizer(
         "split_qkv": config.muon_split_qkv,
         "split_qkv_heads": config.hypersphere_split_heads,
         "is_qkv_fn": lambda p: getattr(p, "is_qkv", False),
-        "qkv_split_shapes": qkv_split_shapes,
-        "qkv_dim": kv_channels,  # head dim for split_heads when split_qkv_heads=True
         "fp32_matmul_prec": config.muon_fp32_matmul_prec,
         "num_ns_steps": config.muon_num_ns_steps,
         "scale_mode": config.muon_scale_mode,
