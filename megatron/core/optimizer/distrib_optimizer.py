@@ -373,6 +373,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         )
                         if hasattr(model_param, 'shared'):
                             shard_model_param.shared = model_param.shared
+                        if hasattr(model_param, 'is_qkv'):
+                            shard_main_param.is_qkv = model_param.is_qkv
+                        if hasattr(model_param, 'expert_tp'):
+                            shard_main_param.expert_tp = model_param.expert_tp
 
                     # Generate main param.
                     if not config.use_precision_aware_optimizer_no_fp8_or_ds_fp8:
@@ -403,6 +407,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         )
                         if hasattr(model_param, 'shared'):
                             shard_main_param.shared = model_param.shared
+                        if hasattr(model_param, 'is_qkv'):
+                            shard_main_param.is_qkv = model_param.is_qkv
+                        if hasattr(model_param, 'expert_tp'):
+                            shard_main_param.expert_tp = model_param.expert_tp
                     else:
                         # When using precision-aware optimizer, main params are held by FusedAdam.
                         shard_main_param = None
