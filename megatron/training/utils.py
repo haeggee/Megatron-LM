@@ -87,6 +87,11 @@ def calc_params_l2_norm(model, force_create_fp32_copy=False):
                         if getattr(param, 'main_param_sharded', False):
                             if param.main_param is not None:
                                 sharded_params_data.append(param.main_param)
+                            else:
+                                # Precision-aware optimizer: main_param is None
+                                # because master weights are held by FusedAdam.
+                                # Fall back to using the model param directly.
+                                moe_params_data.append(param.data.float())
                         else:
                             moe_params_data.append(param.main_param)
                     else:
@@ -103,6 +108,11 @@ def calc_params_l2_norm(model, force_create_fp32_copy=False):
                             if getattr(param, 'main_param_sharded', False):
                                 if param.main_param is not None:
                                     sharded_params_data.append(param.main_param)
+                                else:
+                                    # Precision-aware optimizer: main_param is None
+                                    # because master weights are held by FusedAdam.
+                                    # Fall back to using the model param directly.
+                                    params_data.append(param.data.float())
                             else:
                                 params_data.append(param.main_param)
                         else:

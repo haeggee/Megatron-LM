@@ -1786,6 +1786,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     for src_tensors, (model_param, param_range_map) in zip(
                         bucket_state, gbuf_range_map["param_map"].items()
                     ):
+                        # Remove non-tensor metadata before restoring optimizer states.
+                        src_tensors.pop('padding', None)
                         # Main param & optimizer states.
                         self._set_main_param_and_optimizer_states(model_param, src_tensors)
 
