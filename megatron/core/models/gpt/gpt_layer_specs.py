@@ -26,7 +26,7 @@ from megatron.core.transformer.multi_token_prediction import (
 )
 from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
 from megatron.core.transformer.spec_utils import ModuleSpec
-from megatron.core.transformer.torch_norm import L2Norm
+from megatron.core.transformer.torch_norm import L2Norm, LayerScale
 from megatron.core.transformer.transformer_block import (
     TransformerBlockSubmodules,
     get_num_layers_to_build,
@@ -185,6 +185,7 @@ def get_gpt_layer_with_transformer_engine_spec(
     differential_transformer: bool = False,
     use_kitchen_attention: bool = False,
     kitchen_attention_backend: str = "sdpa",
+    config: TransformerConfig = None,
 ) -> ModuleSpec:
     """Use this spec to use lower-level Transformer Engine modules (required for fp8 training).
 
@@ -204,6 +205,7 @@ def get_gpt_layer_with_transformer_engine_spec(
         ModuleSpec: Module specification with TE modules
 
     """
+    assert config is not None
     if fp8 is not None:
         warnings.warn(
             'The fp8 argument in "get_gpt_layer_with_transformer_engine_spec" has been deprecated'
@@ -231,6 +233,7 @@ def get_gpt_layer_with_transformer_engine_spec(
         moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
         use_te_op_fuser=use_te_op_fuser,
         use_te_activation_func=use_te_activation_func,
+        config=config,
     )
 
     if multi_latent_attention:
@@ -272,6 +275,49 @@ def get_gpt_layer_with_transformer_engine_spec(
         )
     else:
         qk_norm = backend.layer_norm(for_qk=True)
+
+        # Choose main layernorm class.
+        if config.learnable_norms and config.normalization in {"RMSNorm", "LayerNorm"}:
+            main_norm_cls = backend.layer_norm()
+        elif config.learnable_norms and config.normalization == "L2Norm":
+            raise NotImplementedError(f"learnable l2norm nyi")
+        elif not config.learnable_norms and config.normalization == "L2Norm":
+            main_norm_cls = L2Norm
+        else:
+            raise NotImplementedError(f"Norm {config.normalization} nyi")
+
+        # Prenorm logic: slightly more convoluted due to the TE fusion.
+        if config.pre_norm and config.learnable_norms and config.normalization in {"RMSNorm", "LayerNorm"}:
+            # prenorms can be identity as we use TELayerNormColumnParallelLinear fusion instead.
+            input_layernorm = IdentityOp
+            pre_mlp_layernorm = IdentityOp
+            linear_qkv = backend.column_parallel_layer_norm_linear()
+        elif config.pre_norm:  # non-learnable norm or L2Norm.
+            input_layernorm = main_norm_cls
+            pre_mlp_layernorm = main_norm_cls
+            linear_qkv = backend.column_parallel_linear()
+        else:  # no prenorm at all.
+            input_layernorm = IdentityOp
+            pre_mlp_layernorm = IdentityOp
+            linear_qkv = backend.column_parallel_linear()
+
+        # Postnorm logic: easier because there's no fusion.
+        if config.post_norm:
+            post_attention_layer_norm = main_norm_cls
+            post_mlp_layernorm = main_norm_cls
+        else:
+            post_attention_layer_norm = IdentityOp
+            post_mlp_layernorm = IdentityOp
+
+        # post_block logic: same as previous case.
+        if config.post_block_norm:
+            post_attention_block_layer_norm = main_norm_cls
+            post_mlp_block_layernorm = main_norm_cls
+        else:
+            post_attention_block_layer_norm = IdentityOp
+            post_mlp_block_layernorm = IdentityOp
+
+
         return ModuleSpec(
             module=TransformerLayer,
             submodules=TransformerLayerSubmodules(
@@ -279,7 +325,7 @@ def get_gpt_layer_with_transformer_engine_spec(
                     module=SelfAttention,
                     params={"attn_mask_type": AttnMaskType.causal},
                     submodules=SelfAttentionSubmodules(
-                        linear_qkv=backend.column_parallel_layer_norm_linear(),
+                        linear_qkv=linear_qkv,
                         core_attention=backend.core_attention(),
                         linear_proj=backend.row_parallel_linear(),
                         q_layernorm=(
@@ -288,13 +334,23 @@ def get_gpt_layer_with_transformer_engine_spec(
                         k_layernorm=(
                             L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
                         ),
+                        qk_layer_scale=LayerScale if config.qk_layer_scale is not None else IdentityOp,
                         subln=(
                             IdentityOp if not differential_transformer else qk_norm
                         ),
                     ),
                 ),
+                input_layernorm=input_layernorm,
+                post_attention_layernorm=post_attention_layer_norm,
+                post_attention_block_layernorm=post_attention_block_layer_norm,
+                attention_layerscale=IdentityOp if config.layer_scale is None else LayerScale,
+                residual_attention_layerscale=IdentityOp if config.residual_layer_scale is None else LayerScale,
                 self_attn_bda=get_bias_dropout_add,
-                pre_mlp_layernorm=backend.layer_norm() if num_experts else IdentityOp,
+                pre_mlp_layernorm=pre_mlp_layernorm,
+                post_mlp_layernorm=post_mlp_layernorm,
+                post_mlp_block_layernorm=post_mlp_block_layernorm,
+                mlp_layerscale=IdentityOp if config.layer_scale is None else LayerScale,
+                residual_mlp_layerscale=IdentityOp if config.residual_layer_scale is None else LayerScale,
                 mlp=mlp,
                 mlp_bda=get_bias_dropout_add,
                 sharded_state_dict_keys_map={
@@ -488,8 +544,11 @@ def get_mlp_module_spec_for_backend(
     moe_use_legacy_grouped_gemm: Optional[bool] = False,
     use_te_op_fuser: Optional[bool] = False,
     use_te_activation_func: bool = False,
+    config: TransformerConfig = None,
 ) -> ModuleSpec:
     """Helper function to get module spec for MLP/MoE"""
+
+    assert config is not None
 
     linear_fc2 = backend.row_parallel_linear()
     activation_func = backend.activation_func() if use_te_activation_func else None
@@ -497,7 +556,8 @@ def get_mlp_module_spec_for_backend(
     if num_experts is None:
         # Dense MLP w/ or w/o TE modules.
         module = TEFusedMLP if use_te_op_fuser else MLP
-        if backend.fuse_layernorm_and_linear():
+
+        if config.pre_norm and config.learnable_norms and config.normalization in {"RMSNorm", "LayerNorm"} and backend.fuse_layernorm_and_linear():
             linear_fc1 = backend.column_parallel_layer_norm_linear()
             assert linear_fc1 is not None
         else:
@@ -505,7 +565,8 @@ def get_mlp_module_spec_for_backend(
         return ModuleSpec(
             module=module,
             submodules=MLPSubmodules(
-                linear_fc1=linear_fc1, linear_fc2=linear_fc2, activation_func=activation_func
+                linear_fc1=linear_fc1, linear_fc2=linear_fc2, activation_func=activation_func,
+                layer_scale=None if config.mlp_layer_scale is None else LayerScale,
             ),
         )
     else:

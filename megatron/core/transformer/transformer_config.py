@@ -144,6 +144,47 @@ class TransformerConfig(ModelParallelConfig):
     """If set to True, the LayerNorm is adjusted to center the gamma values around 0. This improves
     numerical stability."""
 
+    pre_norm: bool = True
+    """If set, pre-attn and pre-mlp layernorm will be used."""
+
+    post_norm: bool = False
+    """If set, post-attn and post-mlp layernorm will be used."""
+
+    post_block_norm: bool = False
+    """If set, post-attn block and post-mlp block layernorm will be used (applied after the residual connection)."""
+
+    learnable_norms: bool = True
+    """Learnable layernorms."""
+
+    layer_scale: Optional[float] = None
+    """If not none, layer scale will be applied (after any potential post_norm and before residual) initialized to this value."""
+
+    layer_scale_scale: Optional[float] = None
+    """If set, layerscale parameters will be multiplied by `layer_scale/layer_scale_scale` during forward as in nGPT eigen learning rates."""
+
+    residual_layer_scale: Optional[float] = None
+    residual_layer_scale_scale: Optional[float] = None
+
+    qk_layer_scale: Optional[float] = None
+    qk_layer_scale_scale: Optional[float] = None
+
+    logits_layer_scale: Optional[float] = None
+    logits_layer_scale_scale: Optional[float] = None
+
+    mlp_layer_scale: Optional[float] = None
+    mlp_layer_scale_gate_scale: Optional[float] = None
+    mlp_layer_scale_scale: Optional[float] = None
+    mlp_out_scale: Optional[float] = None
+
+    upscale_embedding: Optional[float] = None
+
+    use_stream_minus_residual: bool = False
+    """If set, `output <- output - residual` is computed after the post_attention_layernorm (or post_mlp_layernorm)
+    and just before the attention_layerscale (or mlp_layerscale), like nGPT."""
+
+    final_layernorm: bool = True
+    """If set, a layernorm will be applied to the output of the very last transformer layer (just before the output projection)."""
+
     add_bias_linear: bool = True
     """Include a bias term in all linear layers (QKV projections, after core attention, and two in
     MLP layer)."""

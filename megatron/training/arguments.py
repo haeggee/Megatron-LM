@@ -49,6 +49,12 @@ from megatron.core.quantization.utils import (
 
 from megatron.training.argument_utils import ArgumentGroupFactory
 
+def _float_or_str(val: str) -> float | str:
+    try:
+        return float(val)
+    except ValueError:
+        return val
+
 def add_megatron_arguments(parser: argparse.ArgumentParser):
     """"Add Megatron-LM arguments to the given parser."""
 
@@ -1217,6 +1223,18 @@ def validate_args(args, defaults={}):
         if args.rank == 0:
             print('Warning: enabling --no-load-optim when skipping training.')
 
+    # Muon optimizer check
+    if 'muon' in args.optimizer:
+
+        # TODO: remove these checks once we support them
+        assert not args.overlap_grad_reduce, "Muon optimizer does not support overlap grad reduce for now."
+        assert not args.overlap_param_gather, "Muon optimizer does not support overlap param gather for now."
+
+        assert not args.use_distributed_optimizer, "Muon optimizer does not support distributed optimizer for now."
+        assert not args.use_torch_fsdp2, "Muon optimizer does not support Torch-FSDP2 for now."
+        assert not args.use_megatron_fsdp, "Muon optimizer does not support Megatron-FSDP for now."
+        assert args.ckpt_format in ["torch", "torch_dist"], "Muon optimizer supports torch and torch_dist checkpoint format."
+
     # Optimizer CPU offload check
     if args.optimizer_cpu_offload:
         assert args.use_precision_aware_optimizer, (
@@ -1454,6 +1472,15 @@ def core_transformer_config_from_args(args, config_class=None):
         kw_args['use_kitchen_attention'] = args.use_kitchen_attention
     if hasattr(args, "kitchen_attention_backend"):
         kw_args['kitchen_attention_backend'] = args.kitchen_attention_backend
+
+    if args.mlp_layer_scale is not None:
+        # We don't support TP yet because fc1 is column parallel, thus the input
+        # of the layerscale has size hidden_dim/tp, so we need to actually pass
+        # that hidden_size in the kwargs when constructing it.
+        assert args.tensor_model_parallel_size < 2
+        if args.mlp_layer_scale_gate_scale is not None:
+            assert args.swiglu
+            assert not kw_args['bias_activation_fusion']
 
     # Return config.
     return config_class(**kw_args)
@@ -1809,8 +1836,27 @@ def _add_network_size_args(parser):
                        help='Pad the vocab size to be divisible by this value.'
                        'This is added for computational efficieny reasons.')
     group.add_argument('--normalization', default='LayerNorm',
-                       choices=['LayerNorm', 'RMSNorm', 'SeeDNorm'],
+                       choices=['LayerNorm', 'RMSNorm', 'SeeDNorm', 'L2Norm'],
                        help='Which normalization technique to use.')
+    group.add_argument('--no-pre-norm', action='store_false', dest='pre_norm')
+    group.add_argument('--post-norm', action='store_true')
+    group.add_argument('--post-block-norm', action='store_true')
+    group.add_argument('--no-learnable-norms', action='store_false', dest='learnable_norms')
+    group.add_argument('--qk-layer-scale', type=float)
+    group.add_argument('--qk-layer-scale-scale', type=float)
+    group.add_argument('--layer-scale', type=float)
+    group.add_argument('--layer-scale-scale', type=float)
+    group.add_argument('--residual-layer-scale', type=float)
+    group.add_argument('--residual-layer-scale-scale', type=float)
+    group.add_argument('--use-stream-minus-residual', action='store_true')
+    group.add_argument('--no-final-layernorm', action='store_false', dest='final_layernorm')
+    group.add_argument('--logits-layer-scale', type=float)
+    group.add_argument('--logits-layer-scale-scale', type=float)
+    group.add_argument('--mlp-layer-scale', type=float)
+    group.add_argument('--mlp-layer-scale-gate-scale', type=float)
+    group.add_argument('--upscale-embedding', type=float)
+    group.add_argument('--mlp-out-scale', type=float)
+    group.add_argument('--softmax-scale', type=float)
     group.add_argument('--seednorm-init', type=float, default=1.0,
                           help='Initial value for the seednorm scaling parameter.')
     group.add_argument('--seednorm-activation', type=str, default='tanh',
@@ -2095,7 +2141,8 @@ def _add_logging_args(parser):
     group.add_argument('--internals-weights-on-gpu', action='store_true',
                        help='Keep previous weights on GPU for delta computation. '
                        'Eliminates GPU-CPU transfer overhead but uses more GPU memory.')
-
+    group.add_argument('--internals-log-interval', type=int, default=100,
+                       help='How often to log model internals (in iterations).')
     return parser
 
 
@@ -2136,6 +2183,38 @@ def _add_regularization_args(parser):
                        'numerical stability')
     group.add_argument('--sgd-momentum', type=float, default=0.9,
                        help='Momentum factor for sgd')
+    group.add_argument('--muon-momentum', type=float, default=0.9,
+                       help='Momentum factor for Muon optimizer')
+    group.add_argument('--muon-no-split-qkv', action='store_false', default=True,
+                       dest='muon_split_qkv',
+                       help='Whether to split QKV parameters for Muon optimizer')
+    group.add_argument('--muon-use-nesterov', action='store_true',
+                       help='Whether to use Nesterov-style momentum in the internal SGD')
+    group.add_argument('--muon-scale-mode', type=str, default='spectral',
+                       choices=['spectral', 'unit_rms_norm', 'shape_scaling', 'none'],
+                       help='Scale mode for Muon optimizer')
+    group.add_argument('--muon-fp32-matmul-prec', type=str, default='medium',
+                       choices=['low', 'medium', 'high'],
+                       help='FP32 matmul precision for Newton-Schulz iteration')
+    group.add_argument('--muon-num-ns-steps', type=int, default=5,
+                       help='Number of Newton-Schulz steps for Muon optimizer')
+    group.add_argument('--muon-tp-mode', type=str, default='blockwise',
+                       choices=['blockwise', 'duplicated', 'distributed'],
+                       help='How to perform NS calculation for tensor model parallel weights')
+    group.add_argument('--muon-extra-scale-factor', type=float, default=1.0,
+                       help='Additional scale factor for the muon update')
+    group.add_argument('--muon-lr-factor', type=float, default=1.0)
+    group.add_argument('--hypersphere-mode', type=_float_or_str)
+    group.add_argument('--hypersphere-kind', type=_float_or_str, default="l2")
+    group.add_argument('--hypersphere-radius', type=_float_or_str, default=1.0)
+    group.add_argument('--hypersphere-no-update', action="store_false", dest="hypersphere_update")
+    group.add_argument('--hypersphere-embeddings', action="store_true")
+    group.add_argument('--hypersphere-split-heads', action="store_true")
+    group.add_argument('--hypersphere-project', action="store_true")
+    group.add_argument('--hypersphere-soft', action="store_true")
+    group.add_argument('--weight-decay-method', choices=["decoupled", "independent"], default="decoupled")
+    group.add_argument('--use-orthogonal-updates', action="store_true")
+    group.add_argument('--no-use-orthogonal-embeddings', action="store_false", dest="use_orthogonal_embeddings")
     return parser
 
 
@@ -2429,7 +2508,7 @@ def _add_training_args(parser):
     group.add_argument('--qk-clip-threshold', type=float, default=100,
                        help='The balancing threshold for qk-clip.')
     group.add_argument('--optimizer', type=str, default='adam',
-                       choices=['adam', 'sgd', 'ademamix'],
+                       choices=['adam', 'sgd', 'muon', 'dist_muon', 'ademamix', 'master', 'dist_master'],
                        help='Optimizer function')
     group.add_argument('--optimizer-cpu-offload', action='store_true',
                        help='Offload optimizer state to CPU')

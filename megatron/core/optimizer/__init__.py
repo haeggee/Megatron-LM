@@ -153,6 +153,8 @@ def _get_param_groups(
                 param_override: ParamGroupOverride | None = combine_param_group_overrides(
                     param_overrides_list
                 )
+            else:
+                param_override: ParamGroupOverride | None = None
 
             is_expert_parallel = not getattr(param, 'allreduce', True)
 

@@ -2,7 +2,7 @@
 
 import fnmatch
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, Optional, Tuple, Union, Literal
 
 import torch
 
@@ -197,6 +197,65 @@ class OptimizerConfig:
     # SGD.
     sgd_momentum: float = 0.9
     """Momentum factor for SGD optimizer."""
+
+    # Muon.
+    # TODO: move muon configs to it's own `MuonConfig`.
+    muon_momentum: float = 0.95
+    """The momentum used by the internal SGD."""
+
+    muon_split_qkv: bool = True
+    """Whether to split QKV parameters for Muon optimizer."""
+
+    muon_use_nesterov: bool = False
+    """Whether to use Nesterov-style momentum in the internal SGD."""
+
+    muon_scale_mode: str = "spectral"
+    """The mode to use for the scale factor. Defaults to "spectral"."""
+
+    muon_fp32_matmul_prec: str = "medium"
+    """The precision to use for the fp32 matmul. Defaults to "medium"."""
+
+    muon_num_ns_steps: int = 5
+    """The number of iteration steps to use in the Newton-Schulz iteration."""
+
+    muon_tp_mode: str = "blockwise"
+    """How to perform NS calculation for tensor parallel weights. Defaults to "blockwise"."""
+
+    muon_extra_scale_factor: float = 1.0
+    """Additional scale factor for the muon update."""
+
+    muon_lr_factor: float = 1.0
+    """Muon parameters will use a learning rate of lr * muon_lr_factor instead of just lr."""
+
+    hypersphere_mode: Optional[Literal["row", "col", "rowcol", "flat"]] = None
+    """When specified, enables hypersphere constraint of the parameters, either row-wise, column-wise, row+column-wise or of the flattened vector."""
+
+    hypersphere_kind: Optional[Literal["l2", "standard", "spectral"]] = "l2"
+    """When hypersphere constraint is enabled, specified the normalization to perform, either l2 normalization, (x-mu)/std standardization or spectral norm."""
+
+    hypersphere_radius: Literal["learnable"] | float = 1.0
+    """When hypersphere constraint is enabled, sets the hypersphere radius (float), or sets it as a learnable scale."""
+
+    hypersphere_update: bool = True
+    """If enabled, then updates will also be projected to the hypersphere."""
+
+    hypersphere_embeddings: bool = False
+    """If enabled, then embeddings will also be normalized."""
+
+    hypersphere_split_heads: bool = False
+    """If enabled, then each q,k,v head matrix will be normalized separately."""
+
+    hypersphere_project: bool = False
+    """If enabled, do u - (w·u/||w||²) before the momentum accumulation."""
+
+    hypersphere_soft: bool = False
+    """If enabled, do R*w/max(||w||, R) instead of just R*w/||w||."""
+
+    weight_decay_method: Literal["decoupled", "independent"] = "decoupled"
+
+    use_orthogonal_updates: bool = False
+
+    use_orthogonal_embeddings: bool = True
 
     # AdEMAMix
     ademamix_alpha: float = 2.0
@@ -396,3 +455,6 @@ class AdemamixOptimizerConfig(OptimizerConfig):
     optimizer: str = 'ademamix'
     """Optimizer name."""
 
+
+class MasterOptimizerConfig(OptimizerConfig):
+    optimizer: str = 'master'

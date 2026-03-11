@@ -27,7 +27,7 @@ from megatron.core.parallel_state import (
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.mappings import all_gather_last_dim_from_tensor_parallel_region
-from megatron.core.transformer.identity_op import IdentityOp
+from megatron.core.transformer.identity_op import IdentityOp, LoggingProbe
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.utils import (
@@ -123,6 +123,7 @@ class SelfAttentionSubmodules:
     linear_proj: Union[ModuleSpec, type] = None
     q_layernorm: Union[ModuleSpec, type] = None
     k_layernorm: Union[ModuleSpec, type] = None
+    qk_layer_scale: Union[ModuleSpec, type] = None
     subln: Union[ModuleSpec, type] = None
 
 
@@ -1137,6 +1138,7 @@ class SelfAttention(Attention):
         self.linear_qkv_out_dim = self.query_projection_size + 2 * self.kv_projection_size
         if self.config.attention_output_gate:
             self.linear_qkv_out_dim += self.config.kv_channels * self.config.num_attention_heads
+        self.log_after_qkv = LoggingProbe("qkv", self.layer_number)
         self.linear_qkv = build_module(
             submodules.linear_qkv,
             self.config.hidden_size,
@@ -1170,6 +1172,18 @@ class SelfAttention(Attention):
             )
         else:
             self.k_layernorm = None
+
+        if submodules.qk_layer_scale is not None:
+            # TODO: What about TP>1? Can setting sequence_parallel here fix it?
+            self.qk_layer_scale = build_module(
+                submodules.qk_layer_scale,
+                hidden_size=self.hidden_size_per_attention_head,
+                initial_value=self.config.qk_layer_scale,
+                scale=self.config.qk_layer_scale_scale,
+                dtype=torch.float32,
+            )
+        else:
+            self.qk_layer_scale = None
 
     def run_realtime_tests(self):
         """Performs a consistency check.
@@ -1259,6 +1273,7 @@ class SelfAttention(Attention):
         # If no output gate: Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn)]
         # If have output gate: Attention heads [sq, b, h] --> [sq, b, ng * (2 * np/ng + 2) * hn)]
         mixed_qkv, _ = self.linear_qkv(hidden_states)
+        self.log_after_qkv(mixed_qkv)
         num_query_heads_per_group = (
             self.num_attention_heads_per_partition // self.num_query_groups_per_partition
         )
@@ -1347,9 +1362,13 @@ class SelfAttention(Attention):
 
         if self.q_layernorm is not None:
             query = self.q_layernorm(query)
+        if self.qk_layer_scale is not None:
+            query = self.qk_layer_scale(query)
 
         if self.k_layernorm is not None:
             key = self.k_layernorm(key)
+        if self.qk_layer_scale is not None:
+            key = self.qk_layer_scale(key)
 
         if self.config.test_mode:
             self.run_realtime_tests()

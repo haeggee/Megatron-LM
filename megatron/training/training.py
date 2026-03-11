@@ -16,6 +16,8 @@ import sys
 from contextlib import nullcontext
 from typing import Any, Optional, Dict
 
+from megatron.core.optimizer.master import get_megatron_master_optimizer
+from megatron.core.optimizer.optimizer_config import MasterOptimizerConfig
 import torch.distributed
 
 from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
@@ -92,6 +94,7 @@ except ImportError:
 from megatron.core.distributed import finalize_model_grads
 from megatron.core.enums import ModelType
 from megatron.core.optimizer import get_megatron_optimizer, AdamOptimizerConfig, SGDOptimizerConfig, AdemamixOptimizerConfig, OptimizerConfig, ParamKey
+from megatron.core.optimizer.muon import get_megatron_muon_optimizer
 from megatron.core.rerun_state_machine import (
     get_rerun_state_machine,
     destroy_rerun_state_machine,
@@ -838,7 +841,7 @@ def pretrain(
 
         iteration = 0
         if args.do_train and args.train_iters > 0:
-            iteration, num_floating_point_operations_so_far = train(
+            iteration, num_floating_point_operations_so_far, gpuh_so_far = train(
                 forward_step_func,
                 model,
                 optimizer,
@@ -856,7 +859,7 @@ def pretrain(
 
         if args.save and iteration != 0 and iteration % args.save_interval != 0:
             save_checkpoint(iteration, model, optimizer, opt_param_scheduler,
-                            num_floating_point_operations_so_far, checkpointing_context,
+                            num_floating_point_operations_so_far, gpuh_so_far, checkpointing_context,
                             train_data_iterator=train_data_iterator,
                             preprocess_common_state_dict_fn=preprocess_common_state_dict)
             if args.log_progress:
@@ -872,7 +875,8 @@ def pretrain(
 
         iteration = args.iteration
 
-    if args.do_valid:
+    #if args.do_valid:
+    if False:
         prefix = f'iteration {iteration} on validation set'
         if getattr(args, 'perform_rl_step', False):
             rl_utils.evaluate_and_print_results_rl(
@@ -1212,7 +1216,13 @@ def get_megatron_optimizer_config(args: Any) -> OptimizerConfig:
     """Return a Megatron optimizer config object from Megatron's arguments."""
 
     config = None
-    if args.optimizer == 'adam':
+    if "master" in args.optimizer:
+        kwargs = {}
+        for f in dataclasses.fields(MasterOptimizerConfig):
+            if hasattr(args, f.name):
+                kwargs[f.name] = getattr(args, f.name)
+        config = MasterOptimizerConfig(**kwargs)
+    elif args.optimizer == 'adam' or 'muon' in args.optimizer:
         kwargs = {}
         for f in dataclasses.fields(AdamOptimizerConfig):
             if hasattr(args, f.name):
@@ -1261,16 +1271,33 @@ def setup_model_and_optimizer(
         config, config_overrides = get_megatron_optimizer_config(args)
         config.timers = timers
 
-        # If the user is asking for a non-zero embedding init std, skip weight decay for embeddings
-        # to avoid embeddings from shrinking to zero as recommended in https://arxiv.org/abs/2312.16903
-        # default_skip_embedding_weight_decay=args.embedding_init_method_std is not None,
-        optimizer = get_megatron_optimizer(
-            config,
-            model,
-            config_overrides=config_overrides,
-            use_gloo_process_groups=args.enable_gloo_process_groups,
-            dump_param_to_param_group_map=args.dump_param_to_param_group_map,
-        )
+        if "master" in config.optimizer:
+            optimizer = get_megatron_master_optimizer(
+                config,
+                model,
+                config_overrides=config_overrides,
+                use_gloo_process_groups=args.enable_gloo_process_groups,
+                layer_wise_distributed_optimizer="dist" in config.optimizer,
+            )
+        elif 'muon' not in config.optimizer:
+            # If the user is asking for a non-zero embedding init std, skip weight decay for embeddings
+            # to avoid embeddings from shrinking to zero as recommended in https://arxiv.org/abs/2312.16903
+            # default_skip_embedding_weight_decay=args.embedding_init_method_std is not None,
+            optimizer = get_megatron_optimizer(
+                config,
+                model,
+                config_overrides=config_overrides,
+                use_gloo_process_groups=args.enable_gloo_process_groups,
+                dump_param_to_param_group_map=args.dump_param_to_param_group_map,
+            )
+        else:
+            optimizer = get_megatron_muon_optimizer(
+                config,
+                model,
+                config_overrides=config_overrides,
+                use_gloo_process_groups=args.enable_gloo_process_groups,
+                layer_wise_distributed_optimizer='dist' in config.optimizer,
+            )
         opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
     one_logger and one_logger.log_metrics({"app_build_optimzer_finish_time": one_logger_utils.get_timestamp_in_ms()})
 
@@ -1313,7 +1340,7 @@ def setup_model_and_optimizer(
         )
         args.iteration = 1
         save_checkpoint(
-            args.iteration, model, None, None, args.num_floating_point_operations_so_far
+            args.iteration, model, None, None, args.num_floating_point_operations_so_far, gpuh_so_far,
         )
         torch.distributed.barrier()
         del dense_model_for_upcycling
@@ -1329,7 +1356,7 @@ def setup_model_and_optimizer(
         )
         timers('load-checkpoint', log_level=0).start(barrier=True)
 
-        args.iteration, args.num_floating_point_operations_so_far, args.tokens_so_far = load_checkpoint(
+        args.iteration, args.num_floating_point_operations_so_far, args.tokens_so_far, args.gpuh_so_far  = load_checkpoint(
                 model, optimizer, opt_param_scheduler, checkpointing_context=checkpointing_context,
                 skip_load_to_model_and_opt=HAVE_FSDP2 and getattr(args, "use_torch_fsdp2", False) and args.ckpt_format == "torch_dist",)
         timers('load-checkpoint').stop(barrier=True)
@@ -1343,6 +1370,7 @@ def setup_model_and_optimizer(
     else:
         args.iteration = 0
         args.num_floating_point_operations_so_far = 0
+        args.gpuh_so_far = 0
 
     # get model without FP16 and/or DDP wrappers
     if (
@@ -1368,6 +1396,7 @@ def setup_model_and_optimizer(
             optimizer,
             opt_param_scheduler,
             args.num_floating_point_operations_so_far,
+            args.gpuh_so_far,
             preprocess_common_state_dict_fn=preprocess_common_state_dict,
         )
 
@@ -1545,6 +1574,7 @@ def training_log(
     params_norm_per_param,
     num_zeros_in_grad,
     max_attention_logit,
+    gpuh_so_far,
 ):
     """Log training information such as losses, timing, ...."""
     args = get_args()
@@ -1755,6 +1785,9 @@ def training_log(
         MTPLossLoggingHelper.track_mtp_metrics(
             mtp_loss_scale, iteration, writer, wandb_writer, total_loss_dict
         )
+    elapsed_time = timers('interval-time').elapsed(barrier=True)
+    elapsed_time_per_iteration = elapsed_time / total_iterations
+    gpuh_so_far += elapsed_time_per_iteration * args.world_size / 60 / 60
     if iteration % args.log_interval == 0:
         if args.record_memory_history and (is_last_rank() or torch.distributed.get_backend() == 'fake'):
             snapshot = torch.cuda.memory._snapshot()
@@ -1763,8 +1796,6 @@ def training_log(
             with open(args.memory_snapshot_path, 'wb') as f:
                 dump(snapshot, f)
 
-        elapsed_time = timers('interval-time').elapsed(barrier=True)
-        elapsed_time_per_iteration = elapsed_time / total_iterations
 
         throughput = num_floating_point_operations(args, batch_size) / (
             elapsed_time_per_iteration * 10**12 * args.world_size
@@ -1782,12 +1813,14 @@ def training_log(
 
         if writer:
             writer.add_scalar('iteration-time', elapsed_time_per_iteration, iteration)
+            writer.add_scalar('gpuh', gpuh_so_far, iteration)
             writer.add_scalar('tokens-per-sec-per-GPU', tokens_per_sec_per_gpu, iteration)
             writer.add_scalar('eta-seconds', eta_seconds, iteration)
 
         if wandb_writer:
             wandb_writer.log({
                 'iteration-time': elapsed_time_per_iteration,
+                'gpuh': gpuh_so_far,
                 'tokens-per-sec-per-GPU': tokens_per_sec_per_gpu,
                 'eta-seconds': eta_seconds
             }, iteration)
@@ -1868,7 +1901,7 @@ def training_log(
         # Log timers to stdout
         timers.log(timers_to_log, normalizer=args.log_interval)
 
-    return report_memory_flag
+    return report_memory_flag, gpuh_so_far
 
 
 def compute_throughputs_and_append_to_progress_log(iteration, num_floating_point_operations_so_far):
@@ -1934,6 +1967,7 @@ def save_checkpoint_and_time(
     optimizer,
     opt_param_scheduler,
     num_floating_point_operations_so_far,
+    gpuh_so_far,
     checkpointing_context,
     non_persistent_ckpt=False,
     train_data_iterator=None,
@@ -1960,6 +1994,7 @@ def save_checkpoint_and_time(
         optimizer,
         opt_param_scheduler,
         num_floating_point_operations_so_far,
+        gpuh_so_far,
         checkpointing_context,
         non_persistent_ckpt=non_persistent_ckpt,
         train_data_iterator=train_data_iterator,
@@ -2058,6 +2093,7 @@ def checkpoint_and_decide_exit(
     opt_param_scheduler,
     iteration,
     num_floating_point_operations_so_far,
+    gpuh_so_far,
     checkpointing_context,
     train_data_iterator,
 ):
@@ -2076,6 +2112,7 @@ def checkpoint_and_decide_exit(
                 save_checkpoint_and_time(iteration, model, optimizer,
                                          opt_param_scheduler,
                                          num_floating_point_operations_so_far,
+                                         gpuh_so_far,
                                          checkpointing_context, train_data_iterator=train_data_iterator)
             print_datetime('exiting program after receiving SIGUSR2.')
 
@@ -2089,6 +2126,7 @@ def checkpoint_and_decide_exit(
             optimizer,
             opt_param_scheduler,
             num_floating_point_operations_so_far,
+            gpuh_so_far,
             checkpointing_context,
             train_data_iterator=train_data_iterator,
         )
@@ -2105,6 +2143,7 @@ def checkpoint_and_decide_exit(
             optimizer,
             opt_param_scheduler,
             num_floating_point_operations_so_far,
+            gpuh_so_far,
             checkpointing_context,
             non_persistent_ckpt=True,
             train_data_iterator=train_data_iterator,
@@ -2127,6 +2166,7 @@ def checkpoint_and_decide_exit(
                     optimizer,
                     opt_param_scheduler,
                     num_floating_point_operations_so_far,
+                    gpuh_so_far,
                     checkpointing_context,
                     train_data_iterator=train_data_iterator,
                 )
@@ -2143,6 +2183,7 @@ def checkpoint_and_decide_exit(
                 optimizer,
                 opt_param_scheduler,
                 num_floating_point_operations_so_far,
+                gpuh_so_far,
                 checkpointing_context,
                 train_data_iterator=train_data_iterator,
             )
@@ -2158,6 +2199,7 @@ def checkpoint_and_decide_exit(
                 save_checkpoint_and_time(iteration, model, optimizer,
                                 opt_param_scheduler,
                                 num_floating_point_operations_so_far,
+                                gpuh_so_far,
                                 checkpointing_context, train_data_iterator=train_data_iterator)
             torch.distributed.barrier()
             if is_rank0():
@@ -2299,6 +2341,7 @@ def train(
     )
 
     num_floating_point_operations_so_far = args.num_floating_point_operations_so_far
+    gpuh_so_far = args.gpuh_so_far
 
     # Setup some training config params.
     config.grad_scale_func = optimizer.scale_loss
@@ -2376,6 +2419,7 @@ def train(
             'eval_iterations': eval_iterations,
             'total_flops_since_current_train_start': num_floating_point_operations_since_current_train_start,
             'num_floating_point_operations_so_far': num_floating_point_operations_so_far,
+            'gpuh_so_far': gpuh_so_far,
             'consumed_train_samples': args.consumed_train_samples,
             'world_size': args.world_size,
             'seq_length': args.seq_length,
@@ -2485,6 +2529,7 @@ def train(
                         optimizer,
                         opt_param_scheduler,
                         num_floating_point_operations_so_far,
+                        gpuh_so_far,
                         checkpointing_context,
                         train_data_iterator=train_data_iterator,
                     )
@@ -2521,7 +2566,7 @@ def train(
         args.curr_iteration = iteration
 
         # Enable internals capture if this is a logging iteration.
-        if internals_logger is not None and (iteration + 1) % args.log_interval == 0:
+        if internals_logger is not None and iteration % args.internals_log_interval == 0:
             internals_logger.hook_manager.enable_capture()
             internals_logger.snapshot_weights(model[0])
 
@@ -2558,6 +2603,7 @@ def train(
                 optimizer,
                 opt_param_scheduler,
                 num_floating_point_operations_so_far,
+                gpuh_so_far,
                 checkpointing_context,
                 train_data_iterator=train_data_iterator,
             )
@@ -2654,7 +2700,7 @@ def train(
                 continue
             if param_group['default_config']:
                 learning_rate = param_group['lr']
-        report_memory_flag = training_log(
+        report_memory_flag, gpuh_so_far = training_log(
             loss_dict,
             total_loss_dict,
             learning_rate,
@@ -2667,11 +2713,12 @@ def train(
             params_norm_per_param,
             num_zeros_in_grad,
             max_attention_logit,
+            gpuh_so_far,
         )
 
         # Log model internals to W&B if enabled.
         # All DP ranks must call log_internals for distributed gradient collectives.
-        if internals_logger is not None and iteration % args.log_interval == 0:
+        if internals_logger is not None and (iteration - 1) % args.internals_log_interval == 0:
             wandb_writer = get_wandb_writer()  # None on non-logging ranks
             internals_logger.log_internals(model[0], iteration, wandb_writer)
             internals_logger.hook_manager.disable_capture()
@@ -2734,6 +2781,7 @@ def train(
             opt_param_scheduler,
             iteration,
             num_floating_point_operations_so_far,
+            gpuh_so_far,
             checkpointing_context,
             train_data_iterator,
         )
@@ -2785,7 +2833,7 @@ def train(
         print(f"Training finished after {iteration} iterations; Canceling pending scheduled jobs.")
         Path(args.exit_trigger).touch()
 
-    return iteration, num_floating_point_operations_so_far
+    return iteration, num_floating_point_operations_so_far, gpuh_so_far
 
 
 def evaluate(

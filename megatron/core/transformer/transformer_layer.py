@@ -223,6 +223,10 @@ class TransformerLayerSubmodules:
     input_layernorm: Union[ModuleSpec, type] = IdentityOp
     self_attention: Union[ModuleSpec, type] = IdentityOp
     self_attn_bda: Union[ModuleSpec, type] = IdentityFuncOp
+    attention_layerscale: Union[ModuleSpec, type] = IdentityOp
+    residual_attention_layerscale: Union[ModuleSpec, type] = IdentityOp
+    post_attention_layernorm: Union[ModuleSpec, type] = IdentityOp
+    post_attention_block_layernorm: Union[ModuleSpec, type] = IdentityOp
 
     pre_cross_attn_layernorm: Union[ModuleSpec, type] = IdentityOp
     cross_attention: Union[ModuleSpec, type] = IdentityOp
@@ -231,6 +235,11 @@ class TransformerLayerSubmodules:
     pre_mlp_layernorm: Union[ModuleSpec, type] = IdentityOp
     mlp: Union[ModuleSpec, type] = IdentityOp
     mlp_bda: Union[ModuleSpec, type] = IdentityFuncOp
+    mlp_layerscale: Union[ModuleSpec, type] = IdentityOp
+    residual_mlp_layerscale: Union[ModuleSpec, type] = IdentityOp
+    post_mlp_layernorm: Union[ModuleSpec, type] = IdentityOp
+    post_mlp_block_layernorm: Union[ModuleSpec, type] = IdentityOp
+
 
     # Mapping for sharded tensor keys to be applied in `sharded_state_dict` method
     sharded_state_dict_keys_map: Dict[str, str] = field(default_factory=dict)
@@ -307,6 +316,41 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             **attention_optional_kwargs,
         )
 
+        # [Module 2.1: PostSelfAttention Layernorm (but pre residual)]
+        self.post_attention_layernorm = build_module(
+            submodules.post_attention_layernorm,
+            config=self.config,
+            hidden_size=self.config.hidden_size,
+            eps=self.config.layernorm_epsilon,
+        )
+        
+        # [Module 2.2: PostAttention LayerScale]
+        self.attention_layerscale = build_module(
+            submodules.attention_layerscale,
+            hidden_size=self.config.hidden_size,
+            initial_value=self.config.layer_scale,
+            scale=self.config.layer_scale_scale,
+            sequence_parallel=self.config.sequence_parallel,
+        )
+
+        # [Module 2.3: PostSelfAttention Layernorm (and post residual)]
+        self.post_attention_block_layernorm = build_module(
+            submodules.post_attention_block_layernorm,
+            config=self.config,
+            hidden_size=self.config.hidden_size,
+            scale=self.config.layer_scale_scale,
+            eps=self.config.layernorm_epsilon,
+        )
+
+        # [Module 2.4: Attention residual LayerScale]
+        self.residual_attention_layerscale = build_module(
+            submodules.residual_attention_layerscale,
+            hidden_size=self.config.hidden_size,
+            initial_value=self.config.residual_layer_scale,
+            scale=self.config.residual_layer_scale_scale,
+            sequence_parallel=self.config.sequence_parallel,
+        )
+        
         # [Module 3: BiasDropoutFusion]
         self.self_attn_bda = build_module(submodules.self_attn_bda)
 
@@ -369,6 +413,39 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         self.mlp = build_module(submodules.mlp, config=self.config, **additional_mlp_kwargs)
         if hasattr(self.mlp, 'set_layer_number'):
             self.mlp.set_layer_number(self.layer_number)
+
+        # [Module 8.1: Post MLP layernorm (pre-residual).
+        self.post_mlp_layernorm = build_module(
+            submodules.post_mlp_layernorm,
+            config=self.config,
+            hidden_size=self.config.hidden_size,
+            eps=self.config.layernorm_epsilon,
+        )
+
+        # [Module 8.2: PostMLP LayerScale]
+        self.mlp_layerscale = build_module(
+            submodules.mlp_layerscale,
+            hidden_size=self.config.hidden_size,
+            initial_value=self.config.layer_scale,
+            sequence_parallel=self.config.sequence_parallel,
+        )
+
+        # [Module 8.3: Post MLP block layernorm (post-residual).
+        self.post_mlp_block_layernorm = build_module(
+            submodules.post_mlp_block_layernorm,
+            config=self.config,
+            hidden_size=self.config.hidden_size,
+            eps=self.config.layernorm_epsilon,
+        )
+
+        # [Module 8.4: MLP residual LayerScale]
+        self.residual_mlp_layerscale = build_module(
+            submodules.residual_mlp_layerscale,
+            hidden_size=self.config.hidden_size,
+            initial_value=self.config.residual_layer_scale,
+            scale=self.config.residual_layer_scale_scale,
+            sequence_parallel=self.config.sequence_parallel,
+        )
 
         # [Module 9: BiasDropoutFusion]
         self.mlp_bda = build_module(submodules.mlp_bda)
@@ -536,6 +613,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
 
         # Residual connection.
         residual = hidden_states
+        residual = self.residual_attention_layerscale(residual)
 
         # Optional Input Layer norm
         if self.recompute_input_layernorm:
@@ -557,7 +635,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
 
         # Self attention.
         nvtx_range_push(suffix="self_attention")
-        attention_output_with_bias = self.self_attention(
+        attention_output, bias = self.self_attention(
             input_layernorm_output,
             attention_mask=attention_mask,
             inference_context=inference_context,
@@ -571,10 +649,12 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         )
         nvtx_range_pop(suffix="self_attention")
 
-        # Probe raw attention output (before residual addition)
-        attention_output_with_bias = (
-            self.log_after_attention(attention_output_with_bias[0]),
-        ) + attention_output_with_bias[1:]
+        attention_output = self.post_attention_layernorm(attention_output)
+        if self.config.use_stream_minus_residual:
+            attention_output = attention_output - residual
+        attention_output = self.attention_layerscale(attention_output)
+        attention_output = self.log_after_attention(attention_output)
+        attention_output_with_bias = (attention_output, bias)
 
         if self.recompute_input_layernorm:
             # discard the output of the input layernorm and register the recompute
@@ -622,6 +702,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
                 attention_output_with_bias, residual, self.hidden_dropout
             )
 
+        hidden_states = self.post_attention_block_layernorm(hidden_states)
         return hidden_states, context
 
     def _forward_mlp(self, hidden_states, inference_context=None):
@@ -637,6 +718,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
 
         # Residual connection.
         residual = hidden_states
+        residual = self.residual_mlp_layerscale(residual)
 
         # Optional Layer norm post the cross-attention.
         if self.recompute_pre_mlp_layernorm:
@@ -696,6 +778,15 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
                 # operation in MLP's fc2.
                 self._set_fc2_residual(residual)
             mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output)
+
+        mlp_output, bias = mlp_output_with_bias
+        if self.config.mlp_out_scale is not None:
+            mlp_output = self.config.mlp_out_scale * mlp_output
+        mlp_output = self.post_mlp_layernorm(mlp_output)
+        if self.config.use_stream_minus_residual:
+            mlp_output = mlp_output - residual
+        mlp_output = self.mlp_layerscale(mlp_output)
+        mlp_output_with_bias = (mlp_output, bias)
 
         if self.recompute_pre_mlp_layernorm:
             # discard the output of the pre-mlp layernorm and register the recompute
@@ -768,6 +859,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
         )
 
+        output = self.post_mlp_block_layernorm(output)
         output = self.log_after_layer(output)
         return output
 

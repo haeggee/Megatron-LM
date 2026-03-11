@@ -1,12 +1,15 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
-from typing import Callable, Union
+from typing import Callable, Union, Optional
 
 import torch
 import torch.nn.functional as F
+from torch import nn
 
 from megatron.core.jit import jit_fuser
 from megatron.core.transformer import TransformerConfig
 from megatron.core.utils import is_torch_min_version
+from megatron.core.tensor_parallel.mappings import _reduce
+from megatron.core.transformer.module import MegatronModule
 
 _SEEDNORM_ACTIVATIONS = {
     "tanh": torch.tanh,
@@ -100,7 +103,7 @@ class L2Norm(torch.nn.Module):
             torch.Tensor: The L2-normalized tensor.
         """
         x_float = x.float()
-        return (x_float * torch.rsqrt(x_float.pow(2).mean(-1, keepdim=True) + self.eps)).type_as(x)
+        return (x_float * torch.rsqrt(x_float.pow(2).sum(-1, keepdim=True) + self.eps)).type_as(x)
 
     def forward(self, x):
         """
@@ -187,3 +190,45 @@ class SeeDNorm(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self._seed_norm(x)
+
+
+class LayerScale(MegatronModule):
+    def __init__(self, hidden_size: int, config=None, initial_value: float = 1.0, scale: Optional[float] = None,
+                 sequence_parallel: bool = False, dtype: Optional[torch.dtype] = None):
+        super().__init__(config=config)
+        assert not sequence_parallel, "NYI"
+        self.weight = nn.Parameter(torch.empty(hidden_size, dtype=dtype))
+        self.dtype = dtype
+        self.init_value = initial_value
+        self.scale = scale
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        if self.scale is None:
+            nn.init.constant_(self.weight, self.init_value)
+        else:
+            nn.init.constant_(self.weight, self.scale)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        xdtype = x.dtype
+        if self.dtype is not None:
+            x = x.to(self.dtype)
+
+        if self.scale is None:
+            y = layer_scale(x, self.weight)
+        else:
+            y = layer_scale_with_scale(x, self.weight, self.init_value, self.scale)
+
+        if self.type is not None:
+            y = y.to(xdtype)
+        return y
+
+
+@torch.compile
+def layer_scale(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    return (x * weight)
+
+
+@torch.compile
+def layer_scale_with_scale(x: torch.Tensor, weight: torch.Tensor, init_value: float, scale: float) -> torch.Tensor:
+    return (x * weight) * (init_value / scale)

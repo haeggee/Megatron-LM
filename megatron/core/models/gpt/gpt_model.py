@@ -3,6 +3,7 @@
 from collections import OrderedDict
 from typing import Dict, Literal, Optional
 
+from megatron.core.transformer.torch_norm import LayerScale
 import torch
 from torch import Tensor
 
@@ -250,6 +251,14 @@ class GPTModel(LanguageModule):
                 tp_group=self.pg_collection.tp,
             )
 
+            if self.config.logits_layer_scale is not None:
+                # TODO: check vocab parallel sync when TP>1.
+                self.layer_scale = LayerScale(
+                    hidden_size=self.vocab_size,
+                    initial_value=self.config.logits_layer_scale,
+                    scale=self.config.logits_layer_scale_scale,
+                )
+
         if self.pre_process or self.post_process:
             self.setup_embeddings_and_output_layer()
 
@@ -302,6 +311,8 @@ class GPTModel(LanguageModule):
             pass
         elif self.pre_process:
             decoder_input = self.embedding(input_ids=input_ids, position_ids=position_ids)
+            if self.config.upscale_embedding is not None:
+                decoder_input = self.config.upscale_embedding * decoder_input
         else:
             # intermediate stage of pipeline
             # decoder will get hidden_states from encoder.input_tensor
@@ -626,6 +637,8 @@ class GPTModel(LanguageModule):
         logits, _ = self.output_layer(
             hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output
         )
+        if self.config.logits_layer_scale:
+            logits = self.layer_scale(logits)
 
         # Restore sequence parallel execution to the output layer if necessary.
         if sequence_parallel_override:
