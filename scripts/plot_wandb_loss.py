@@ -27,27 +27,42 @@ EXPERIMENTS_TO_PLOT = [
     ## baselines
     "110M-n1",
     # with cosine
-    "110M-lr0.004-cos-n1",
+    # "110M-lr0.004-cos-n1",
     "110M-lr0.003-cos-n1",
+    # OP
+    "110M-qkRMS-nPre-nFin-pst-ls-n1",
     ######## muon
-    "110M-muon_m0.95_urm-n1",
-    "110M-muon_m0.95-lr0.004-n1",
+    # "110M-muon_m0.95_urm-n1",
+    # "110M-muon_m0.95-lr0.004-n1",
     "110M-muon_m0.95_mlr2_urm_nest-n1",
-    "110M-muon_m0.95_urm_nest-n1",
-    ####### ngpt baselines
+    # "110M-muon_m0.95_urm_nest-n1",
+    # after fix
+    "110M-muon_h_m0.95_mlr2_urm-n1",
+    ################# ngpt baselines
     "110M-master_a0-wd0-HSrow1_l2_emb_sh-std0.044-L2Norm-fz-nPre-nFin-pst-ppst-usmr-ss-lsS-qklsS-mlplsG-lgslsS-nw-n1",
     # with projection
     "110M-master_a0-wd0-HSrow1_l2_emb_sh_p-std0.044-ngpt-nw-n1",
     # with cosine
     "110M-master_a0-wd0-HSrow1_l2_emb_sh-std0.044-ngpt-nw-cos-n1",
-    "110M-master_a0-wd0-HSrow1_l2_emb_sh-lr0.004-std0.044-ngpt-nw-cos-n1",
-    ######## hypermuon
-    "110M-master_o_b0.9_none-wd0-HSrow1_l2_sh-lr0.004-std0.044-ngpt-nw-n1",
+    # "110M-master_a0-wd0-HSrow1_l2_emb_sh-lr0.004-std0.044-ngpt-nw-cos-n1",
+    # after fix
+    "110M-master_h_a0-wd0-HSrow1_l2_it0_emb_sh-std0.044-ngpt-nw-cos-n1",
+    # FOG
+    "110M-master_h_a0-wd0-HSrow1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls-lgsls-n1",
+    "110M-master_h_a0-wd0-HSrow1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls-lgsls-nw-n1",
+    # FOG + cosine
+    "110M-master_h_a0-wd0-HSrow1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls-lgsls-nw-cos-n1",
+    # ngpt without weight normalization, just arch
+    "110M-lr0.004-std0.044-ngpt-n1",
+    ################## hypermuon
+    # "110M-master_o_b0.9_none-wd0-HSrow1_l2_sh-lr0.004-std0.044-ngpt-nw-n1",
     "110M-master_o_b0.9-wd0-HSrow1_l2_u_sh-lr0.004-std0.044-ngpt-nw-n1",
-    "110M-master_o_b0.9_mlr2_urm-wd0-HSrow1_l2_embNO_sh-std0.044-ngpt-nw-n1",
-    "110M-master_o_b0.9-wd0-HSrow1_l2_u_embNO_sh-lr0.004-std0.044-ngpt-nw-n1",
-    "110M-master_o_b0.9_urm-wd0-HSrow1_l2_embNO_sh-std0.044-ngpt-nw-n1",
-    "110M-master_o_b0.9_mlr2_urm-wd0-HSrow1_l2_sh-std0.044-ngpt-nw-n1",
+    # "110M-master_o_b0.9_mlr2_urm-wd0-HSrow1_l2_embNO_sh-std0.044-ngpt-nw-n1",
+    # "110M-master_o_b0.9-wd0-HSrow1_l2_u_embNO_sh-lr0.004-std0.044-ngpt-nw-n1",
+    # "110M-master_o_b0.9_urm-wd0-HSrow1_l2_embNO_sh-std0.044-ngpt-nw-n1",
+    # "110M-master_o_b0.9_mlr2_urm-wd0-HSrow1_l2_sh-std0.044-ngpt-nw-n1",
+    # after fix
+    # "110M-master_h_o_b0.9-wd0-HSrow1_l2_it0_u_sh-lr0.004-std0.044-ngpt-nw-n1",
 ]
 
 METRIC_KEY = "lm loss"
@@ -217,9 +232,12 @@ def main():
         ax.plot(plot_steps, plot_vals, linewidth=1.2, label=exp_name)
 
     ax.set_xlabel("Iteration", fontsize=12)
-    ax.set_ylabel("LM Loss", fontsize=12)
-    ax.set_ylim(2.8, 3.5)
-    ax.set_title("Language-Model Loss", fontsize=14)
+    ax.set_ylabel(args.metric, fontsize=12)
+    if args.metric == "lm loss":
+        ax.set_ylim(2.8, 3.5)
+    else:
+        ax.set_ylim(0, 2)
+    ax.set_title(args.metric, fontsize=14)
     ax.legend(fontsize=9, loc="upper right")
     ax.grid(True, alpha=0.3)
     ax.spines["top"].set_visible(False)
