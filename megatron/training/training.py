@@ -1646,6 +1646,17 @@ def training_log(
     # Calculate batch size.
     batch_size = args.micro_batch_size * args.data_parallel_size * get_num_microbatches()
 
+    # Phase-relative metrics for multi-phase training.
+    if args.phase_transition_iterations:
+        boundaries = [0] + args.phase_transition_iterations
+        phase_idx = sum(1 for t in boundaries if t <= iteration) - 1
+        phase_iteration = iteration - boundaries[phase_idx]
+        phase_consumed_samples = phase_iteration * args.global_batch_size
+    else:
+        phase_idx = 0
+        phase_iteration = iteration
+        phase_consumed_samples = args.consumed_train_samples
+
     # Track app tag & app tag ID
     one_logger_utils.track_app_tag(batch_size, args.world_size, args.seq_length)
 
@@ -1657,10 +1668,13 @@ def training_log(
     if writer and (iteration % args.tensorboard_log_interval == 0):
         if wandb_writer:
             wandb_writer.log({
-                              'consumed-samples': args.consumed_train_samples,
-                              'consumed-tokens': args.consumed_train_samples * args.seq_length ,
-                             },
-                             iteration)
+                'consumed-samples': args.consumed_train_samples,
+                'consumed-tokens': args.consumed_train_samples * args.seq_length,
+                'phase': phase_idx + 1,
+                'phase-iteration': phase_iteration,
+                'phase-consumed-samples': phase_consumed_samples,
+                'phase-consumed-tokens': phase_consumed_samples * args.seq_length,
+            }, iteration)
         writer.add_scalar('learning-rate', learning_rate, iteration)
         writer.add_scalar('learning-rate vs samples', learning_rate, args.consumed_train_samples)
         if wandb_writer:
@@ -1685,6 +1699,8 @@ def training_log(
             writer.add_scalar(key + ' vs samples', loss_dict[key], args.consumed_train_samples)
             if wandb_writer:
                 wandb_writer.log({key: loss_dict[key]}, iteration)
+                if args.phase_transition_iterations:
+                    wandb_writer.log({f'phase_{phase_idx + 1}/{key}': loss_dict[key]}, iteration)
         if args.log_loss_scale_to_tensorboard:
             writer.add_scalar('loss-scale', loss_scale, iteration)
             writer.add_scalar('loss-scale vs samples', loss_scale, args.consumed_train_samples)
@@ -1817,6 +1833,9 @@ def training_log(
         log_string = f" [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
         log_string += ' iteration {:8d}/{:8d} |'.format(
             iteration, args.train_iters)
+        if args.phase_transition_iterations:
+            log_string += ' phase {:d} iteration {:8d} |'.format(
+                phase_idx + 1, phase_iteration)
         log_string += ' consumed samples: {:12d} |'.format(
             args.consumed_train_samples)
         consumed_tokens = args.consumed_train_samples * args.seq_length / 1e9

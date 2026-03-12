@@ -3157,6 +3157,11 @@ def _add_data_args(parser):
                        help='Dropout factor k for goldfish loss masking, where dropout probability is 1/k.')
     group.add_argument('--goldfish-h', type=int, default=50,
                         help='Context width for hashing in goldfish loss masking. Controls how many preceding tokens determine masking.')
+    group.add_argument('--loss-mask-token-ids', nargs='+', type=int, default=None,
+                       help='Token IDs to mask from the loss (loss_mask=0). '
+                            'Useful for task-control tokens (e.g. <|stt_transcribe|>, '
+                            '<|tts_continue|>) that should condition the model but never '
+                            'be predicted.')
     group.add_argument('--vision-weight', dest='vision_weight', type=float, default=1.0,
                        help='Loss mask weight for vision tokens between <|img_start|> and <|img_end|>. '
                             'Default 1.0 (normal loss). Set to 0.0 to fully mask vision tokens.')

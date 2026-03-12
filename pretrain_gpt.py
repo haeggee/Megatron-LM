@@ -553,6 +553,7 @@ def core_gpt_dataset_config_from_args(args):
         "modality_weights": modality_weights,
         "vision_weight": args.vision_weight,
         "audio_weight": args.audio_weight,
+        "loss_mask_token_ids": getattr(args, "loss_mask_token_ids", None),
     }
 
     # add FIM args to the config
