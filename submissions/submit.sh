@@ -1,6 +1,3 @@
-# TODO: fp8dpa
-# TODO: extra logs
-
 #= Prelude =#
 # General settings.
 #CONTAINER=/iopsstor/scratch/cscs/ahernnde/ngc_25-12-alps1.toml
@@ -73,6 +70,7 @@ usage () {
 	echo " --no-save: Disable saving checkpoint"
 	# FP8 settings.
 	echo " --fp8: Enables fp8"
+	echo " --fp8dpa: Enables fp8dpa"
 	# Training settings..
 	echo " --tokens <int>: Amount of tokens to train with (in B)."
 	echo " --lr <float>: Learning rate."
@@ -219,6 +217,8 @@ while [[ $# -gt 0 ]]; do
 		# FP8 settings.
 		--fp8)
 			FP8=true; shift;;
+		--fp8-dpa)
+			FP8DPA=true; shift;;
 		# Training settings.
 		--tokens)
 			TOKENS=$2; shift 2;;
@@ -478,6 +478,10 @@ FP8_ARGS=()
 if [[ $FP8 = true ]]; then
 	SUFFIX=$SUFFIX-fp8
 	FP8_ARGS+=(--fp8-margin 0 --fp8-format hybrid --fp8-amax-history-len 1024 --fp8-amax-compute-algo max --fp8-recipe delayed)
+fi
+if [[ $FP8DPA = true ]]; then
+	SUFFIX=$SUFFIX-fp8dpa
+	FP8_ARGS+=(--fp8-margin 0 --fp8-format hybrid --fp8-amax-history-len 1024 --fp8-amax-compute-algo max --fp8-recipe delayed --fp8-dot-product-attention)
 fi
 
 # Arch settings.
