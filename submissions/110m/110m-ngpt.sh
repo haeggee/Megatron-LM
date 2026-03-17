@@ -16,9 +16,9 @@ SQRT_MODELDIM=22.62  # approx sqrt(hidden_dim)
 #  - 0.5x LR & 2x LR.
 bash submissions/submit.sh 110 \
 	--no-pre-norm --no-final-layernorm \
-	--opt master --alpha 0 --hs row --hs-embed --hs-split-heads \
+	--opt master --alpha 0 --hs embed --hs-embed --hs-split-heads \
 	--normalization L2Norm --no-learnable-norms --post-norm --post-block-norm --use-stream-minus-residual --layer-scale $INV_LAYERS --layer-scale-scale $INV_SQRTMODELDIM \
-	--softmax-scale $SQRT_KDIM --qk-layer-scale 1 --qk-layer-scale-scale $INV_SQRTKDIM \
+	--softmax-scale $SQRT_KDIM --qk-layer-scale 1 --qk-layer-scale-scale $INV_SQRTMODELDIM \
 	--mlp-layer-scale 1 --mlp-layer-scale-gate-scale $SQRT_MODELDIM \
 	--logits-layer-scale 1 --logits-layer-scale-scale $INV_SQRTMODELDIM \
 	--no-warmup --wd 0 \
