@@ -49,7 +49,7 @@ class MasterOptimizer(torch.optim.Optimizer):
         eps: float = 1e-8,
 
         # Hypersphere optimization.
-        hypersphere_mode: Optional[Literal["row", "col", "rowcol", "flat", "embed"]] = None,
+        hypersphere_mode: Optional[Literal["row", "col", "rowcol", "invrowcol", "flat", "embed"]] = None,
         hypersphere_kind: Optional[Literal["l2", "standard", "spectral", "orthogonal"]] = None,
         hypersphere_radius: Literal["learnable"] | float = 1.0,
         hypersphere_eps: float = 1e-8,
@@ -342,7 +342,7 @@ class MasterOptimizer(torch.optim.Optimizer):
             return
         if is_qkv and self.split_qkv:
             qs, ks, vs = split_qkv(x, self.qkv_split_shapes)
-            if self.split_qkv_heads and self.hypersphere_mode in {"col", "rowcol", "flat"}:
+            if self.split_qkv_heads and self.hypersphere_mode in {"col", "rowcol", "invrowcol", "flat"}:
                 # When splitting heads using torch.split, we only get views of the
                 # original tensor, meaning the qs tensor gets modified in-place,
                 # no need to copy the updated q to qs after.
@@ -369,7 +369,7 @@ class MasterOptimizer(torch.optim.Optimizer):
             dim = 0
         elif self.hypersphere_mode == "row":
             dim = 1
-        elif self.hypersphere_mode in {"flat", "rowcol"}:
+        elif self.hypersphere_mode in {"flat", "rowcol", "invrowcol"}:
             dim = None
         elif self.hypersphere_mode == "embed":
             if is_out_proj:
@@ -381,10 +381,10 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         eps = self.hypersphere_radius if self.hypersphere_soft else self.hypersphere_eps
 
-        if self.hypersphere_mode == "rowcol":
+        if self.hypersphere_mode in {"rowcol", "invrowcol"}:
             assert self.hypersphere_kind == "l2"
             assert self.hypersphere_radius == 1.0
-            sinkhorn(x, eps=eps)
+            sinkhorn(x, eps=eps, first_norm_col="inv" not in self.hypersphere_mode)
         elif self.hypersphere_kind == "l2":
             norm = torch.norm(x, dim=dim, keepdim=True).clamp_min(eps)
             #if torch.any(norm < eps):
@@ -434,7 +434,7 @@ class MasterOptimizer(torch.optim.Optimizer):
             dim = 1
         elif self.hypersphere_mode == "flat":
             dim = None
-        elif self.hypersphere_mode == "rowcol":
+        elif self.hypersphere_mode in {"rowcol", "invrowcol"}:
             raise ValueError(f"Project rowcol nyi")
         elif self.hypersphere_mode == "embed":
             if is_out_proj:
@@ -491,11 +491,14 @@ def spectral_norm(x, n_iters: int = 10):
     return torch.norm(u)**0.5
 
 
-def sinkhorn(x, n_iters: int = 10, eps: float = 1e-8):
+def sinkhorn(x, n_iters: int = 10, eps: float = 1e-8, first_norm_col: bool = True):
     for _ in range(n_iters):
         norm_col = torch.norm(x, dim=0, keepdim=True).clamp_min(eps)
         norm_row = torch.norm(x, dim=1, keepdim=True).clamp_min(eps)
-        x.div_(norm_col).div_(norm_row)
+        if first_norm_col:
+            x.div_(norm_col).div_(norm_row)
+        else:
+            x.div_(norm_row).div_(norm_col)
 
 
 

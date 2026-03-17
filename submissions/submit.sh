@@ -112,7 +112,7 @@ usage () {
 	echo " --mlr: muon learning rate"
 	echo " --wd: weight decay"
 	echo " --wd-method (decoupled/independent): weight decay method"
-	echo " --hs <row/col/rowcol/flat>: Enables hypersphere training"
+	echo " --hs <row/col/rowcol/invrowcol/flat>: Enables hypersphere training"
 	echo " --hs-kind <l2/standard/spectral>: hypersphere kind"
 	echo " --hs-r <learnable/float>: hypersphere radius"
 	echo " --hs-u: hypersphere normalize update"
@@ -819,7 +819,7 @@ cat > $ROOT_PATH/submission.sbatch <<- EOM
 #SBATCH --cpus-per-task=36
 #SBATCH --mem=460000
 #SBATCH --exclusive
-#SBATCH --account=a-infra01-1
+#SBATCH --account=infra01
 #SBATCH --partition=${PARTITION:-normal}
 #SBATCH --signal=SIGTERM@180
 #SBATCH --dependency=singleton
