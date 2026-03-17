@@ -245,6 +245,10 @@ class MLP(MegatronModule):
 
                 intermediate_parallel = glu(intermediate_parallel)
             else:
+                if self.config.mlp_layer_scale_gate_scale is not None:
+                    intermediate_parallel = self.config.mlp_layer_scale_gate_scale * intermediate_parallel
+                if (val := self.config.activation_func_clamp_value) is not None:
+                    intermediate_parallel = intermediate_parallel.clamp(min=-val, max=val)
                 intermediate_parallel = self.activation_func(intermediate_parallel)
 
             if per_token_scale is not None:

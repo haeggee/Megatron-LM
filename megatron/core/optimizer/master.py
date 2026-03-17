@@ -49,7 +49,7 @@ class MasterOptimizer(torch.optim.Optimizer):
         eps: float = 1e-8,
 
         # Hypersphere optimization.
-        hypersphere_mode: Optional[Literal["row", "col", "rowcol", "flat"]] = None,
+        hypersphere_mode: Optional[Literal["row", "col", "rowcol", "flat", "embed"]] = None,
         hypersphere_kind: Optional[Literal["l2", "standard", "spectral", "orthogonal"]] = None,
         hypersphere_radius: Literal["learnable"] | float = 1.0,
         hypersphere_eps: float = 1e-8,
@@ -62,7 +62,8 @@ class MasterOptimizer(torch.optim.Optimizer):
         momentum_beta: float = 0.95,
         use_nesterov: bool = True,
         split_qkv: bool = True,  # Also applies to hypersphere optimization.
-        split_qkv_heads: bool = True,  # Also applies to hypersphere optimization.
+        split_qkv_heads: bool = True,  # only applies to hypersphere of weights
+        split_qkv_heads_update: bool = True,  # only applies to hypersphere of updates
         qkv_split_shapes: Optional[tuple[int, int, int]] = None,
         qkv_dim: Optional[int] = None,
         is_qkv_fn: Callable[[torch.Tensor], bool] | None = None,
@@ -89,6 +90,7 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         self.split_qkv = split_qkv
         self.split_qkv_heads  = split_qkv_heads
+        self.split_qkv_heads_update = split_qkv_heads_update
         self.is_qkv_fn = is_qkv_fn
         self.qkv_split_shapes = qkv_split_shapes
         self.qkv_dim = qkv_dim
@@ -127,7 +129,8 @@ class MasterOptimizer(torch.optim.Optimizer):
                 for group in self.param_groups:
                     for p in group["params"]:
                         is_qkv = self.is_qkv_fn(p)
-                        self._normalize(p, p, is_qkv=is_qkv)
+                        is_out_proj = getattr(p, "is_out_proj", False)
+                        self._normalize(p, p, is_qkv=is_qkv, is_out_proj=is_out_proj)
 
     @torch.no_grad()  # type: ignore[misc]
     @override
@@ -172,10 +175,11 @@ class MasterOptimizer(torch.optim.Optimizer):
         beta1 = group["beta1"]
         momentum_beta = group["momentum_beta"]
         is_qkv = self.is_qkv_fn(p)
+        is_out_proj = getattr(p, "is_out_proj", False)
 
         # TODO: potentially project gradient to tangent space here.
         if self.hypersphere_project:
-            grad = self._project(p, grad, is_qkv=is_qkv)
+            grad = self._project(p, grad, is_qkv=is_qkv, is_out_proj=is_out_proj)
 
         # Get update direction.
         if group["use_orthogonal_updates"]:  # Muon branch.
@@ -233,7 +237,7 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         # Optionally, normalize update.
         if self.hypersphere_mode is not None and self.hypersphere_update:
-            self._normalize(p, update, is_qkv=is_qkv)
+            self._normalize(p, update, is_qkv=is_qkv, is_out_proj=is_out_proj)
 
         # Update parameter.
         lr = group["lr"]
@@ -241,7 +245,7 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         # Optionally, normalize parameter.
         if self.hypersphere_mode is not None:
-            self._normalize(p, p, is_qkv=is_qkv)
+            self._normalize(p, p, is_qkv=is_qkv, is_out_proj=is_out_proj)
 
     def _apply_weight_decay_inplace(self, p, update, group):
         weight_decay = group["weight_decay"]
@@ -285,7 +289,7 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         if self.split_qkv and is_qkv:  # type: ignore[misc]
             qs, ks, vs = split_qkv(grad, self.qkv_split_shapes)
-            if self.split_qkv_heads:
+            if self.split_qkv_heads_update:
                 qs = merge_heads([self._orthogonalize(q, tp_group, partition_dim, ignore_scale=ignore_scale)
                                 for q in split_heads(qs, self.qkv_dim)])
                 ks = merge_heads([self._orthogonalize(k, tp_group, partition_dim, ignore_scale=ignore_scale)
@@ -333,7 +337,7 @@ class MasterOptimizer(torch.optim.Optimizer):
         return orth_grad * scale_factor * self.extra_scale_factor
 
 
-    def _normalize(self, p: torch.Tensor, x: torch.Tensor, is_qkv: bool = False):
+    def _normalize(self, p: torch.Tensor, x: torch.Tensor, is_qkv: bool = False, is_out_proj: bool = False):
         if self.hypersphere_mode is None:
             return
         if is_qkv and self.split_qkv:
@@ -367,6 +371,11 @@ class MasterOptimizer(torch.optim.Optimizer):
             dim = 1
         elif self.hypersphere_mode in {"flat", "rowcol"}:
             dim = None
+        elif self.hypersphere_mode == "embed":
+            if is_out_proj:
+                dim = 0
+            else:
+                dim = 1
         else:
             raise ValueError(f"Unknown normalization {self.hypersphere_mode}")
 
@@ -398,7 +407,7 @@ class MasterOptimizer(torch.optim.Optimizer):
         else:
             raise ValueError(f"Unknown hypersphere_kind {self.hypersphere_kind}")
 
-    def _project(self, p, g, is_qkv: bool = False):
+    def _project(self, p, g, is_qkv: bool = False, is_out_proj: bool = False):
         if self.hypersphere_mode is None or not self.hypersphere_project:
             return
         if is_qkv and self.split_qkv and self.hypersphere_mode != "row":
@@ -427,6 +436,11 @@ class MasterOptimizer(torch.optim.Optimizer):
             dim = None
         elif self.hypersphere_mode == "rowcol":
             raise ValueError(f"Project rowcol nyi")
+        elif self.hypersphere_mode == "embed":
+            if is_out_proj:
+                dim = 0
+            else:
+                dim = 1
         else:
             raise ValueError(f"Unknown normalization {self.hypersphere_mode}")
 
@@ -574,6 +588,8 @@ def get_megatron_master_optimizer(
             # TODO(deyuf): support MLA
             if 'linear_qkv.weight' in name and len(param.shape) == 2:
                 param.is_qkv = True
+            if "linear_fc2" in name or "linear_proj" in name and len(param.shape) == 2:
+                param.is_out_proj = True
             # TODO(deyuf): currently only allow 2D non-embedding weight to avoid breaking
             if (
                 (config.hypersphere_embeddings or not getattr(param, 'is_embedding_or_output_parameter', False))
@@ -609,6 +625,7 @@ def get_megatron_master_optimizer(
         "use_nesterov": config.muon_use_nesterov,
         "split_qkv": config.muon_split_qkv,
         "split_qkv_heads": config.hypersphere_split_heads,
+        "split_qkv_heads_update": config.hypersphere_split_heads_update,
         "is_qkv_fn": lambda p: getattr(p, "is_qkv", False),
         "fp32_matmul_prec": config.muon_fp32_matmul_prec,
         "num_ns_steps": config.muon_num_ns_steps,

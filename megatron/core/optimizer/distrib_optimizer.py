@@ -404,6 +404,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                             shard_main_param.shared = model_param.shared
                         if hasattr(model_param, 'is_qkv'):
                             shard_main_param.is_qkv = model_param.is_qkv
+                        if hasattr(model_param, 'is_out_proj'):
+                            shard_main_param.is_out_proj = model_param.is_out_proj
                         if hasattr(model_param, 'expert_tp'):
                             shard_main_param.expert_tp = model_param.expert_tp
                     else:
@@ -431,6 +433,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         shard_model_param.shared = model_param.shared
                     if hasattr(model_param, 'is_qkv'):
                         shard_model_param.is_qkv = model_param.is_qkv
+                    if hasattr(model_param, 'is_out_proj'):
+                        shard_model_param.is_out_proj = model_param.is_out_proj
                     if hasattr(model_param, 'expert_tp'):
                         shard_model_param.expert_tp = model_param.expert_tp
 

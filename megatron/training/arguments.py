@@ -1479,7 +1479,6 @@ def core_transformer_config_from_args(args, config_class=None):
         # that hidden_size in the kwargs when constructing it.
         assert args.tensor_model_parallel_size < 2
         if args.mlp_layer_scale_gate_scale is not None:
-            assert args.swiglu
             assert not kw_args['bias_activation_fusion']
 
     # Return config.
@@ -2210,6 +2209,7 @@ def _add_regularization_args(parser):
     group.add_argument('--hypersphere-no-update', action="store_false", dest="hypersphere_update")
     group.add_argument('--hypersphere-embeddings', action="store_true")
     group.add_argument('--hypersphere-split-heads', action="store_true")
+    group.add_argument('--hypersphere-split-heads-update', action="store_true")
     group.add_argument('--hypersphere-project', action="store_true")
     group.add_argument('--hypersphere-soft', action="store_true")
     group.add_argument('--weight-decay-method', choices=["decoupled", "independent"], default="decoupled")

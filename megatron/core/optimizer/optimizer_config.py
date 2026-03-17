@@ -245,6 +245,9 @@ class OptimizerConfig:
     hypersphere_split_heads: bool = False
     """If enabled, then each q,k,v head matrix will be normalized separately."""
 
+    hypersphere_split_heads_update: bool = False
+    """If enabled, then each q,k,v head matrix will be normalized separately."""
+
     hypersphere_project: bool = False
     """If enabled, do u - (w·u/||w||²) before the momentum accumulation."""
 

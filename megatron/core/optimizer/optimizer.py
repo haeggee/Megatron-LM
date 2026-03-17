@@ -682,6 +682,8 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                                 main_param.shared = param.shared
                             if hasattr(param, 'is_qkv'):
                                 main_param.is_qkv = param.is_qkv
+                            if hasattr(param, 'is_out_proj'):
+                                main_param.is_out_proj = param.is_out_proj
                             if hasattr(param, 'expert_tp'):
                                 main_param.expert_tp = param.expert_tp
                             # Replace the optimizer params with the new fp32 copy.
