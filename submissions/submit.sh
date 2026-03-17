@@ -47,6 +47,7 @@ HS_R=1
 HS_UPDATE=false
 HS_EMBED=false
 HS_SPLIT_HEADS=false
+HS_SPLIT_HEADS_UPDATE=false
 
 ACTIVATION=swiglu
 
@@ -164,17 +165,17 @@ elif [[ $1 -eq 390 ]]; then
 	FFN_SIZE=4096
 	NUM_HEADS=8
 	NUM_QUERY_GROUPS=4
-	MBS="${MBS:-8}"
+	MBS="${MBS:-4}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.001
+	LR=0.002
 	SIZE=390
 	SAVE_FREQ=10000
-	DEF_TOKENS=50
+	DEF_TOKENS=25
 	INTERMEDIATE_METRICS_INTERVAL=10
 	SCALE=M
 	UNTIE=false
-	LOG_FREQ=100
+	LOG_FREQ=50
 elif [[ $1 -eq 1 ]]; then 
 	# batch_size: ~1.05M.
 	LAYERS=16
@@ -317,6 +318,8 @@ while [[ $# -gt 0 ]]; do
 			HS_EMBED_NO_ORTHOGONAL=true; shift;;
 		--hs-split-heads)
 			HS_SPLIT_HEADS=true; shift;;
+		--hs-split-heads-update)
+			HS_SPLIT_HEADS_UPDATE=true; shift;;
 		--hs-p)
 			HS_PROJECT=true; shift;;
 		--hs-s)
@@ -451,6 +454,10 @@ if [[ $HYPERBALL != false ]]; then
 	if [[ $HS_SPLIT_HEADS = true ]]; then
 		SUFFIX=${SUFFIX}_sh
 		OPT_ARGS+=(--hypersphere-split-heads)
+	fi
+	if [[ $HS_SPLIT_HEADS_UPDATE = true ]]; then
+		SUFFIX=${SUFFIX}_shu
+		OPT_ARGS+=(--hypersphere-split-heads-update)
 	fi
 	if [[ $HS_PROJECT = true ]]; then
 		SUFFIX=${SUFFIX}_p
@@ -674,7 +681,8 @@ if [[ $EXTRA_LOG = true ]]; then
 fi
 
 # Final preparations.
-WANDB_PROJECT=opt_$SCRIPT_VERSION
+WANDB_ENTITY=epfl-relay
+WANDB_PROJECT=megatron_opt_$SCRIPT_VERSION
 EXP_NAME=$SIZE$SCALE$SUFFIX
 ROOT_PATH=$TRAIN_ROOT/$SCRIPT_VERSION/$SIZE$SCALE$LONG_SUFFIX
 DEBUG_ROOT=$ROOT_PATH/debug
@@ -768,6 +776,7 @@ LOGGING=(
 	--tensorboard-dir $ROOT_PATH/tensorboard
 	--wandb-project $WANDB_PROJECT
 	--wandb-save-dir $ROOT_PATH/wandb
+	--wandb-entity $WANDB_ENTITY
 	--timing-log-level 1
 	--tensorboard-log-interval 1
 	--log-throughput
@@ -810,12 +819,12 @@ cat > $ROOT_PATH/submission.sbatch <<- EOM
 #SBATCH --partition=${PARTITION:-normal}
 #SBATCH --signal=SIGTERM@180
 #SBATCH --dependency=singleton
-#SBATCH --environment=$CONTAINER 
+
 
 # Wake up.
 echo [\$(date)] Starting job
 echo [\$(date)] Using nodes: \$SLURM_JOB_NODELIST
-srun -l bash -c 'echo \$(hostname) \$(nvidia-smi | grep -o "|\\s*[0-9]*MiB")'
+srun --environment=$CONTAINER -l bash -c 'echo \$(hostname) \$(nvidia-smi | grep -o "|\\s*[0-9]*MiB")'
 
 
 # Log git status.
@@ -851,7 +860,7 @@ pip list > \$DEBUG_DIR/pip.txt
 nvidia-smi > \$DEBUG_DIR/cuda
 printenv > \$DEBUG_DIR/env.sh
 
-srun -lu --cpus-per-task \$SLURM_CPUS_PER_TASK bash -c "
+srun --environment=$CONTAINER -lu --cpus-per-task \$SLURM_CPUS_PER_TASK bash -c "
 	cd $CODE_PATH
 	export PYTHONPATH=\$PWD:$EMERGING_OPTIMIZERS_PATH
 	export RANK=\\\$SLURM_PROCID
