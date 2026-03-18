@@ -59,6 +59,7 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         # Muon.
         use_orthogonal_updates: bool = False,  # Enable or disable muon entirely.
+        poor_mans_ortho: bool = False,  # Use _normalize instead of _orthogonalize in the Muon branch.
         momentum_beta: float = 0.95,
         use_nesterov: bool = True,
         split_qkv: bool = True,  # Also applies to hypersphere optimization.
@@ -94,6 +95,8 @@ class MasterOptimizer(torch.optim.Optimizer):
         self.is_qkv_fn = is_qkv_fn
         self.qkv_split_shapes = qkv_split_shapes
         self.qkv_dim = qkv_dim
+
+        self.poor_mans_ortho = poor_mans_ortho
 
         self.coefficient_type = coefficient_type
         self.num_ns_steps = num_ns_steps
@@ -198,9 +201,13 @@ class MasterOptimizer(torch.optim.Optimizer):
                 grad = exp_avg
 
             # Get update.
-            with emerging_optimizers.utils.fp32_matmul_precision(self.fp32_matmul_prec):
-                group_kwargs = {k: v for k, v in group.items() if k != "params"}
-                update = self.orthogonalize(p, grad, **group_kwargs, is_qkv=is_qkv)
+            if self.poor_mans_ortho:
+                self._normalize(p, grad, is_qkv=is_qkv, is_out_proj=is_out_proj)
+                update = grad
+            else:
+                with emerging_optimizers.utils.fp32_matmul_precision(self.fp32_matmul_prec):
+                    group_kwargs = {k: v for k, v in group.items() if k != "params"}
+                    update = self.orthogonalize(p, grad, **group_kwargs, is_qkv=is_qkv)
 
         else: # AdamW & Ademamix branch.
             beta2 = group["beta2"]
@@ -624,6 +631,7 @@ def get_megatron_master_optimizer(
 
         # Muon.
         "use_orthogonal_updates": config.use_orthogonal_updates,
+        "poor_mans_ortho": config.poor_mans_ortho,
         "momentum_beta": config.muon_momentum,
         "use_nesterov": config.muon_use_nesterov,
         "split_qkv": config.muon_split_qkv,

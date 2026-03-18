@@ -2216,6 +2216,8 @@ def _add_regularization_args(parser):
     group.add_argument('--weight-decay-method', choices=["decoupled", "independent"], default="decoupled")
     group.add_argument('--use-orthogonal-updates', action="store_true")
     group.add_argument('--no-use-orthogonal-embeddings', action="store_false", dest="use_orthogonal_embeddings")
+    group.add_argument('--poor-mans-ortho', action="store_true",
+                       help='Use _normalize instead of _orthogonalize in the Muon branch (cheaper approximation).')
     return parser
 
 

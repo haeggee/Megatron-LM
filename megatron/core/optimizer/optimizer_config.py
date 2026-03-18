@@ -260,6 +260,9 @@ class OptimizerConfig:
 
     use_orthogonal_embeddings: bool = True
 
+    poor_mans_ortho: bool = False
+    """If enabled, use _normalize instead of _orthogonalize in the Muon branch (cheaper approximation)."""
+
     # AdEMAMix
     ademamix_alpha: float = 2.0
     """AdEMAMix alpha coefficient mixing the slow and fast EMAs."""
