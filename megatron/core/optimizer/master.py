@@ -169,8 +169,9 @@ class MasterOptimizer(torch.optim.Optimizer):
         if len(state) == 0:
             state["exp_avg"] = torch.zeros_like(grad)
             # TODO: Make it such that we can use ademamix-like updates with muon.
-            if not group["use_orthogonal_updates"]:  # Enables g^2 EMA as in adam & ademamix.
-                state["exp_avg_sq"] = torch.zeros_like(grad)
+            if not group["use_orthogonal_updates"]: 
+                if group["beta2"] != 0: # Enables g^2 EMA as in adam & ademamix.
+                    state["exp_avg_sq"] = torch.zeros_like(grad)
                 if group["alpha"] != 0:  # Enables slow momentum as in ademamix.
                     state["exp_avg_slow"] = torch.zeros_like(grad)
 
@@ -211,34 +212,53 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         else: # AdamW & Ademamix branch.
             beta2 = group["beta2"]
-            exp_avg_sq = state["exp_avg_sq"]
-
-            bias_correction1 = 1.0 - (beta1 ** group["step"])
-            bias_correction2 = 1.0 - (beta2 ** group["step"])
 
             exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
-            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
-            denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(group["eps"])
+            bias_correction1 = 1.0 - (beta1 ** group["step"])
 
-            if group["alpha"] == 0:  # adam logic.
-                update = exp_avg.div(bias_correction1) / denom  # TODO original equation.
-                #update = exp_avg.div(bias_correction1 * denom)  # TODO is this equivalent?
-            else:  # ademamix logic.
-                if group["alpha_warmup"] is None:
-                    alpha = group["alpha"]
-                else:
-                    alpha = linear_warmup_scheduler(group["step"], group["alpha"], alpha_start=0, warmup=group["alpha_warmup"])
+            if beta2 == 0:
+                # No second moment: use first momentum directly.
+                if group["alpha"] == 0: # adam
+                    update = exp_avg / bias_correction1
+                else: # ademamix
+                    if group["alpha_warmup"] is None:
+                        alpha = group["alpha"]
+                    else:
+                        alpha = linear_warmup_scheduler(group["step"], group["alpha"], alpha_start=0, warmup=group["alpha_warmup"])
 
-                if group["beta3_warmup"] is None:
-                    beta3 = group["beta3"]
-                else:
-                    beta3 = linear_hl_warmup_scheduler(group["step"], group["beta3"], beta_start=beta1, warmup=group["beta3_warmup"])
+                    if group["beta3_warmup"] is None:
+                        beta3 = group["beta3"]
+                    else:
+                        beta3 = linear_hl_warmup_scheduler(group["step"], group["beta3"], beta_start=beta1, warmup=group["beta3_warmup"])
 
+                    exp_avg_slow = state["exp_avg_slow"]
+                    exp_avg_slow.mul_(beta3).add_(grad, alpha=1 - beta3)
+                    update = exp_avg / bias_correction1 + alpha * exp_avg_slow
+            else:
+                exp_avg_sq = state["exp_avg_sq"]
+                bias_correction2 = 1.0 - (beta2 ** group["step"])
 
-                exp_avg_slow = state["exp_avg_slow"]
-                exp_avg_slow.mul_(beta3).add_(grad, alpha=1 - beta3)
-                update = (exp_avg.div(bias_correction1) + alpha * exp_avg_slow) / denom  # TODO Original equation.
-                #update = exp_avg.div(bias_correction1).add_(exp_avg_slow, alpha=alpha).div_(denom)  # TODO is this equivalent?
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(group["eps"])
+
+                if group["alpha"] == 0:  # adam logic.
+                    update = exp_avg.div(bias_correction1) / denom  # TODO original equation.
+                    #update = exp_avg.div(bias_correction1 * denom)  # TODO is this equivalent?
+                else:  # ademamix logic.
+                    if group["alpha_warmup"] is None:
+                        alpha = group["alpha"]
+                    else:
+                        alpha = linear_warmup_scheduler(group["step"], group["alpha"], alpha_start=0, warmup=group["alpha_warmup"])
+
+                    if group["beta3_warmup"] is None:
+                        beta3 = group["beta3"]
+                    else:
+                        beta3 = linear_hl_warmup_scheduler(group["step"], group["beta3"], beta_start=beta1, warmup=group["beta3_warmup"])
+
+                    exp_avg_slow = state["exp_avg_slow"]
+                    exp_avg_slow.mul_(beta3).add_(grad, alpha=1 - beta3)
+                    update = (exp_avg.div(bias_correction1) + alpha * exp_avg_slow) / denom  # TODO Original equation.
+                    #update = exp_avg.div(bias_correction1).add_(exp_avg_slow, alpha=alpha).div_(denom)  # TODO is this equivalent?
 
             self._apply_weight_decay_inplace(p, update, group)
 
@@ -417,7 +437,7 @@ class MasterOptimizer(torch.optim.Optimizer):
     def _project(self, p, g, is_qkv: bool = False, is_out_proj: bool = False):
         if self.hypersphere_mode is None or not self.hypersphere_project:
             return
-        if is_qkv and self.split_qkv and self.hypersphere_mode != "row":
+        if is_qkv and self.split_qkv and self.hypersphere_mode not in {"row", "embed"}:
             p_qs, p_ks, p_vs = split_qkv(p, self.qkv_split_shapes)
             g_qs, g_ks, g_vs = split_qkv(g.copy(), self.qkv_split_shapes)
             if self.split_qkv_heads:
@@ -557,7 +577,8 @@ def get_megatron_master_optimizer(
                 if len(opt.state[p]) == 0:
                     opt.state[p]["exp_avg"] = torch.zeros_like(p.data)
                     if not group["use_orthogonal_updates"]:  # Enables g^2 EMA as in adam & ademamix.
-                        opt.state[p]["exp_avg_sq"] = torch.zeros_like(p.data)
+                        if group["beta2"] != 0:
+                            opt.state[p]["exp_avg_sq"] = torch.zeros_like(p.data)
                         if group["alpha"] != 0:  # Enables slow momentum as in ademamix.
                             opt.state[p]["exp_avg_slow"] = torch.zeros_like(p.data)
 
