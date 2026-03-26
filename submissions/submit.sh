@@ -37,6 +37,7 @@ MUON_MOMENTUM=0.95
 ADAMBETA1=0.95
 ALPHA=5
 MUON_SCALE_MODE=spectral
+MUON_NUM_NS_STEPS=5
 
 HYPERBALL=false
 HS_KIND=l2
@@ -47,7 +48,7 @@ HS_SPLIT_HEADS=false
 HS_SPLIT_HEADS_UPDATE=false
 
 ACTIVATION=swiglu
-
+CLIP_GRAD=1.0
 NO_WARMUP=false
 DECAY=wsd
 COOLDOWN=0.2
@@ -77,6 +78,7 @@ usage () {
 	echo " --no-warmup: Deactivates learning rate warmup"
 	echo " --decay <wsd/cos>"
 	echo " --cooldown <float>: Fraction to do cooldown"
+	echo " --clip-grad <float>: Gradient clipping"
 	# Architecture settings.
 	echo " --init <float>: Change init std."
 	echo " --activation (default=$ACTIVATION): MLP activation. Choices=[swiglu, gelu]."
@@ -102,6 +104,7 @@ usage () {
 	# Optimizer settings.
 	echo " --opt <adam/dmuon/muon/dmaster/master/ademamix> (default=$OPT)"
 	echo " --master-orthogonalize"
+	echo " --poor-mans-ortho: Use _normalize instead of Newton-Schulz in the Muon branch"
 	echo " --b1: beta1 (master&adam&muon&ademamix)"
 	echo " --b2: beta2 (master&adam&ademamix)"
 	echo " --mb1: beta1 (master&muon)"
@@ -109,7 +112,8 @@ usage () {
 	echo " --alpha: ademamix alpha"
 	echo " --muon-scale <spectral/shape_scaling/unit_rms_norm/none>"
 	echo " --muon-nesterov: Enables muon nesterov momentum"
-	echo " --mlr: muon learning rate"
+	echo " --muon-num-ns-steps <int>: Number of Newton-Schulz steps for the Muon optimizer"
+	echo " --mlr: muon learning rate factor"
 	echo " --wd: weight decay"
 	echo " --wd-method (decoupled/independent): weight decay method"
 	echo " --hs <row/col/rowcol/invrowcol/flat>: Enables hypersphere training"
@@ -232,6 +236,8 @@ while [[ $# -gt 0 ]]; do
 			DECAY=$2; shift 2;;
 		--cooldown)
 			COOLDOWN=$2; shift 2;;
+		--clip-grad)
+			CLIP_GRAD=$2; shift 2;;
 		# Architecture settings.
 		--init)
 			NEW_INIT_STD=$2; shift 2;;
@@ -284,6 +290,8 @@ while [[ $# -gt 0 ]]; do
 			OPT=$2; shift 2;;
 		--master-orthogonalize)
 			MASTER_ORTHOGONALIZE=true; shift;;
+		--poor-mans-ortho)
+			POOR_MANS_ORTHO=true; shift;;
 		--b1)
 			BETA1=$2; shift 2;;
 		--b2)
@@ -300,6 +308,8 @@ while [[ $# -gt 0 ]]; do
 			MUON_SCALE_MODE=$2; shift 2;;
 		--muon-nesterov)
 			MUON_NESTEROV=true; shift;;
+		--muon-num-ns-steps)
+			MUON_NUM_NS_STEPS=$2; shift 2;;
 		--wd)
 			WEIGHT_DECAY=$2; shift 2;;
 		--wd-method)
@@ -354,12 +364,17 @@ elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
 		SUFFIX=${SUFFIX}_mlr$MUON_LR_FACTOR
 		OPT_ARGS+=(--muon-lr-factor $MUON_LR_FACTOR)
 	fi
+	if [[ $MUON_NUM_NS_STEPS != 5 ]]; then
+		SUFFIX=${SUFFIX}_mns$MUON_NUM_NS_STEPS
+	fi
 	if [[ $OPT = dmuon ]]; then
 		OPT=dist_muon
 	fi
 	if [[ $MUON_SCALE_MODE != spectral ]]; then
 		if [[ $MUON_SCALE_MODE = unit_rms_norm ]]; then
 			SUFFIX=${SUFFIX}_urm
+		elif [[ $MUON_SCALE_MODE = shape_scaling ]]; then
+			SUFFIX=${SUFFIX}_shsc
 		else
 			SUFFIX=${SUFFIX}_$MUON_SCALE_MODE
 		fi
@@ -385,12 +400,21 @@ elif [[ $OPT = dmaster ]] || [[ $OPT = master ]]; then
 			SUFFIX=${SUFFIX}_mlr$MUON_LR_FACTOR
 			OPT_ARGS+=(--muon-lr-factor $MUON_LR_FACTOR)
 		fi
+		if [[ $MUON_NUM_NS_STEPS != 5 ]]; then
+			SUFFIX=${SUFFIX}_mns$MUON_NUM_NS_STEPS
+		fi
 		OPT_ARGS+=(--use-orthogonal-updates)
+		if [[ $POOR_MANS_ORTHO = true ]]; then
+			SUFFIX=${SUFFIX}_pmo1
+			OPT_ARGS+=(--poor-mans-ortho)
+		fi
 		MUON_MOMENTUM=$BETA1
 		BETA1=$ADAMBETA1
 		if [[ $MUON_SCALE_MODE != spectral ]]; then
 			if [[ $MUON_SCALE_MODE = unit_rms_norm ]]; then
 				SUFFIX=${SUFFIX}_urm
+			elif [[ $MUON_SCALE_MODE = shape_scaling ]]; then
+				SUFFIX=${SUFFIX}_shsc
 			else
 				SUFFIX=${SUFFIX}_$MUON_SCALE_MODE
 			fi
@@ -418,6 +442,11 @@ elif [[ $OPT = ademamix ]]; then
 	if [[ $HYPERBALL = false ]]; then
 		OPT_ARGS+=(--use-distributed-optimizer)
 	fi
+fi
+
+if [[ $CLIP_GRAD != 1.0 ]]; then
+	SUFFIX=$SUFFIX-cg$CLIP_GRAD
+	ARCH_ARGS+=(--clip-grad $CLIP_GRAD)
 fi
 
 if [[ $WEIGHT_DECAY != 0.1 ]]; then
@@ -603,7 +632,7 @@ if [[ ! -z "${MLP_OUT_SCALE+xxx}" ]]; then
 	ARCH_ARGS+=(--mlp-out-scale $MLP_OUT_SCALE)
 fi
 if [[ ! -z "${LOGITS_LAYER_SCALE+xxx}" ]]; then
-	SUFFIX=$SUFFIX-lgsls
+	SUFFIX=$SUFFIX-lgsls$LOGITS_LAYER_SCALE
 	LONG_SUFFIX=$LONG_SUFFIX-lgsls$LOGITS_LAYER_SCALE
 	ARCH_ARGS+=(--logits-layer-scale $LOGITS_LAYER_SCALE)
 	if [[ ! -z "${LOGITS_LAYER_SCALE_SCALE+xxx}" ]]; then
@@ -660,7 +689,7 @@ fi
 
 # In order to make the name shorter, we will alias all the suffixes that correspond to
 # ngpt architecture to just show ngpt.
-NGPT_SUBSTRING=-L2Norm-fz-nPre-nFin-pst-ppst-usmr-ss-lsS-qklsS-mlplsG-lgslsS
+NGPT_SUBSTRING=-L2Norm-fz-nPre-nFin-pst-ppst-usmr-ss-lsS-qklsS-mlplsG-lgsls
 SUFFIX="${SUFFIX/$NGPT_SUBSTRING/-ngpt}"
 
 SUFFIX=$SUFFIX$EXTRA_NAME
@@ -754,13 +783,14 @@ TRAINING_ARGS=(
 	--adam-beta1 $BETA1
 	--muon-momentum $MUON_MOMENTUM
 	--muon-scale-mode $MUON_SCALE_MODE
+	--muon-num-ns-steps $MUON_NUM_NS_STEPS
 	--adam-beta2 $BETA2
 	--ademamix-beta3 $BETA3
 	--ademamix-alpha $ALPHA
 	--ademamix-beta3-warmup $ITERS
 	--ademamix-alpha-warmup $ITERS
 	--init-method-std $INIT_STD
-	--clip-grad 1.0
+	--clip-grad $CLIP_GRAD
 	--lr $LR
 	--min-lr $MIN_LR
 	--trigger-path $TRIGGER_DIR
