@@ -239,6 +239,9 @@ class OptimizerConfig:
     hypersphere_update: bool = True
     """If enabled, then updates will also be projected to the hypersphere."""
 
+    hypersphere_update_embeddings: bool = True
+    """If disabled, hypersphere_update normalization is skipped for embedding parameters."""
+
     hypersphere_embeddings: bool = False
     """If enabled, then embeddings will also be normalized."""
 
