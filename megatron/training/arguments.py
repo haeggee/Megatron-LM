@@ -2208,6 +2208,7 @@ def _add_regularization_args(parser):
     group.add_argument('--hypersphere-kind', type=_float_or_str, default="l2")
     group.add_argument('--hypersphere-radius', type=_float_or_str, default=1.0)
     group.add_argument('--hypersphere-no-update', action="store_false", dest="hypersphere_update")
+    group.add_argument('--hypersphere-no-update-embeddings', action="store_false", dest="hypersphere_update_embeddings")
     group.add_argument('--hypersphere-embeddings', action="store_true")
     group.add_argument('--hypersphere-split-heads', action="store_true")
     group.add_argument('--hypersphere-split-heads-update', action="store_true")
