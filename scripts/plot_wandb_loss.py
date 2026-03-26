@@ -8,11 +8,13 @@ concatenated in order and drawn as a single curve.
 import argparse
 import json
 import re
+from collections import OrderedDict, defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.ndimage import uniform_filter1d
+from tqdm import tqdm
 import wandb
 
 
@@ -23,37 +25,72 @@ WANDB_PROJECT = "opt_v1"
 
 CACHE_DIR = Path(__file__).resolve().parent / ".wandb_cache"
 
+
+# Each entry can be:
+#   "experiment_name"                           → uses default entity/project
+#   {"name": "exp", "entity": "X"}              → overrides entity
+#   {"name": "exp", "project": "Y"}             → overrides project
+#   {"name": "exp", "entity": "X", "project": "Y"} → overrides both
 EXPERIMENTS_TO_PLOT = [
     ## baselines
     "110M-n1",
     # with cosine
     # "110M-lr0.004-cos-n1",
-    "110M-lr0.003-cos-n1",
-    # OP
-    "110M-qkRMS-nPre-nFin-pst-ls-n1",
-    ######## muon
-    # "110M-muon_m0.95_urm-n1",
-    # "110M-muon_m0.95-lr0.004-n1",
-    "110M-muon_m0.95_mlr2_urm_nest-n1",
-    # "110M-muon_m0.95_urm_nest-n1",
-    # after fix
+    # "110M-lr0.003-cos-n1",
+    # # OP
+    # "110M-qkRMS-nPre-nFin-pst-ls-n1",
+    # ######## muon
+    # # "110M-muon_m0.95_urm-n1",
+    # # "110M-muon_m0.95-lr0.004-n1",
+    # "110M-muon_m0.95_mlr2_urm_nest-n1",
+    # # "110M-muon_m0.95_urm_nest-n1",
+    # # after fix
+    # "110M-muon_h_m0.95_mlr2_urm-n1",
+    # ################# ngpt baselines
+    # "110M-master_a0-wd0-HSrow1_l2_emb_sh-std0.044-L2Norm-fz-nPre-nFin-pst-ppst-usmr-ss-lsS-qklsS-mlplsG-lgslsS-nw-n1",
+    # # with projection
+    # "110M-master_a0-wd0-HSrow1_l2_emb_sh_p-std0.044-ngpt-nw-n1",
+    # # with cosine
+    # "110M-master_a0-wd0-HSrow1_l2_emb_sh-std0.044-ngpt-nw-cos-n1",
+    # # "110M-master_a0-wd0-HSrow1_l2_emb_sh-lr0.004-std0.044-ngpt-nw-cos-n1",
+    # # after fix
+    # "110M-master_h_a0-wd0-HSrow1_l2_it0_emb_sh-std0.044-ngpt-nw-cos-n1",
+    # # FOG
+    # "110M-master_h_a0-wd0-HSrow1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls-lgsls-n1",
+    # "110M-master_h_a0-wd0-HSrow1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls-lgsls-nw-n1",
+    # # FOG + cosine
+    # "110M-master_h_a0-wd0-HSrow1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls-lgsls-nw-cos-n1",
+    # # ngpt without weight normalization, just arch
+    # "110M-lr0.004-std0.044-ngpt-n1",
+    # # ngpt with colum norm for out projections
+    # cos
+    {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-std0.044-ngpt-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    # wsd
+    # {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-std0.044-ngpt-nw-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    # # ngpt with colum norm for out projections, warmup
+    # {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-lr0.004-std0.044-ngpt-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    
+    ## baseline with weight normalization
+    # cos
+    {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-std0.044-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    # wsd
+    # {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-std0.044-nw-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    # nOP with cosine and MLP scale
+    # {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-gelu-qkRMS-nPre-nFin-lsS-mlplsG-lgslsS-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    ###### nOP with cosine, upscaling embeddings, no mlp scale
+    # {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-gelu-qkRMS-nPre-nFin-ls0.083S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    ###### with 1/sqrt(L) scalig
+    # {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-gelu-qkRMS-nPre-nFin-ls0.28S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    # same as above, but nFOG, so post-norm
+    {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls0.083S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    # {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh1-lr0.004-qkRMS-nPre-nFin-pst-ls0.083S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    # {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh1-lr0.001-qkRMS-nPre-nFin-pst-ls0.083S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
     "110M-muon_h_m0.95_mlr2_urm-n1",
-    ################# ngpt baselines
-    "110M-master_a0-wd0-HSrow1_l2_emb_sh-std0.044-L2Norm-fz-nPre-nFin-pst-ppst-usmr-ss-lsS-qklsS-mlplsG-lgslsS-nw-n1",
-    # with projection
-    "110M-master_a0-wd0-HSrow1_l2_emb_sh_p-std0.044-ngpt-nw-n1",
-    # with cosine
-    "110M-master_a0-wd0-HSrow1_l2_emb_sh-std0.044-ngpt-nw-cos-n1",
-    # "110M-master_a0-wd0-HSrow1_l2_emb_sh-lr0.004-std0.044-ngpt-nw-cos-n1",
-    # after fix
-    "110M-master_h_a0-wd0-HSrow1_l2_it0_emb_sh-std0.044-ngpt-nw-cos-n1",
-    # FOG
-    "110M-master_h_a0-wd0-HSrow1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls-lgsls-n1",
-    "110M-master_h_a0-wd0-HSrow1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls-lgsls-nw-n1",
-    # FOG + cosine
-    "110M-master_h_a0-wd0-HSrow1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls-lgsls-nw-cos-n1",
-    # ngpt without weight normalization, just arch
-    "110M-lr0.004-std0.044-ngpt-n1",
+
+    # matrix norm
+    {"name": "110M-master_h_a0-wd0-HSflat22.62_l2_it0_emb-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    # with normlaized updates
+    {"name": "110M-master_h_a0-wd0-HSflat22.62_l2_it0_u_emb-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
     ################## hypermuon
     # "110M-master_o_b0.9_none-wd0-HSrow1_l2_sh-lr0.004-std0.044-ngpt-nw-n1",
     "110M-master_o_b0.9-wd0-HSrow1_l2_u_sh-lr0.004-std0.044-ngpt-nw-n1",
@@ -63,12 +100,176 @@ EXPERIMENTS_TO_PLOT = [
     # "110M-master_o_b0.9_mlr2_urm-wd0-HSrow1_l2_sh-std0.044-ngpt-nw-n1",
     # after fix
     # "110M-master_h_o_b0.9-wd0-HSrow1_l2_it0_u_sh-lr0.004-std0.044-ngpt-nw-n1",
+    # hypermuon with nFog
+    # {"name": "110M-master_h_o_b0.9_mlr2_urm_a0-wd0-HSembed1_l2_it0_emb_sh1-qkRMS-nPre-nFin-pst-ls0.083S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    # without split heads
+    # {"name": "110M-master_h_o_b0.9_mlr2_urm_a0-wd0-HSembed1_l2_it0_emb-qkRMS-nPre-nFin-pst-ls0.083S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    # nfog with cosine and hypermuon, lr 0.004 and mlr2.
+    # forgot embNO here
+    {"name": "110M-master_h_o_b0.9_mlr2_urm_a0-wd0-HSembed1_l2_it0_emb-lr0.004-qkRMS-nPre-nFin-pst-ls0.083S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    
+
+    # ngpt with hypermuon, lr 0.004, --hs-u and mlr2 (best)
+    {"name": "110M-master_h_o_b0.9_mlr2_urm-wd0-HSembed1_l2_it0_u-lr0.004-std0.044-ngpt-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    # nfog with hypermuon, fixed embNO and lr 0.008, --hs-u
+    {"name": "110M-master_h_o_b0.9_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.008-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+
+    # nfog with hypermuon, fixed embNO and lr 0.008, no -hs-u
+    {"name": "110M-master_h_o_b0.9_urm_a0-wd0-HSembed1_l2_it0_embNO-lr0.008-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    # nfog with hypermuon, fixed embNO and lr 0.004, no -hs-u
+    {"name": "110M-master_h_o_b0.9_urm_a0-wd0-HSembed1_l2_it0_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    
+    {"name": "110M-master_h_o_b0.9_urm_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    # nfog with hypermuon, fixed embNO and lr 0.012, no --hs-u
+    {"name": "110M-master_h_o_b0.9_urm_a0-wd0-HSembed1_l2_it0_embNO-lr0.012-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    # nfog with adam, hs u, lr 0.012
+    {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_u_emb-lr0.012-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    # nfog with adam, hs u, lr 0.016
+    {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_u_emb-lr0.016-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    # nfog with hypermuon, fixed embNO and lr 0.016, --hs-u
+    {"name": "110M-master_h_o_b0.9_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.016-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    # nfog with hypermuon, fixed embNO and lr 0.016, no --hs-u
+    {"name": "110M-master_h_o_b0.9_urm_a0-wd0-HSembed1_l2_it0_embNO-lr0.016-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    
+    # nfog with adam, hs u, lr 0.008, matrix norm
+    {"name": "110M-master_h_a0-wd0-HSflat22.62_l2_it0_u_emb-lr0.008-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_a0-wd0-HSflat22.62_l2_it0-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    # nfog with hypermuon, lr 0.004, --hs-u and mlr2, and emb O
+    {"name": "110M-master_h_o_b0.9_mlr2_urm_a0-wd0-HSembed1_l2_it0_u_emb-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    # best baseline nfog (row/col), no u, lr 0.002, but with no layerscale scale (so just set to 1) to check if using this 1/sqrt(d) actually helps. seems to be the same as before
+    {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-qkRMS-nPre-nFin-pst-ls1S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    # just muon fog with mlr 4
+
+    {"name": "110M-muon_h_m0.95_mlr2_urm-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    {"name": "110M-muon_h_m0.95_mlr4_urm-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    {"name": "110M-muon_h_m0.95_mlr8_urm-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    {"name": "110M-muon_h_m0.95_mlr4_mns10_urm-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    # nfog without hs embed and logit layerscale scale 1
+    {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    # with old layerscale scale
+    {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    # nfog with hypermuon, lr 0.004, and mlr2, layerscale scale 1, no hs-embed
+    {"name": "110M-master_h_o_b0.9_mlr2_urm_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    # nfog with hypermuon, lr 0.004, and mlr4, layerscale scale 1, no hs-embed
+    {"name": "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr2_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_u_emb-lr0.008-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0_u-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr2_urm_a0-wd0-HSembed1_l2_it0_u-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+
+    {"name": "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr4_pmo1_urm_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr2_pmo1_urm_a0-wd0-HSembed1_l2_it0_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr2_pmo1_urm_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr4_pmo1_urm_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr2_pmo1_urm_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr2_pmo1_urm_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+
+    {"name": "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0_u-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_a0-wd0-HScol1_l2_it0-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr4_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr4_mns10_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr4_none_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr8_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr8_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0_u-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    {"name": "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0_u-lr0.001-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    
+    {"name": "110M-master_h_o_b0.9_mlr4_shsc_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr8_shsc_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr4_shsc_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr4_shsc_a0-wd0-HSembed1_l2_it0_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr8_shsc_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+
+    {"name": "110M-master_h_o_b0.9_mlr8_shsc_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_o_b0.9_mlr4_shsc_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+
+    {"name": "110M-master_h_o_b0.9_mlr4_pmo1_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+    {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_u-lr0.008-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+
+    {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+
+
+    ### 390m
+    # nFog
+    # {"name": "390M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls0.0625S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    # # baseline
+    # {"name": "390M-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
 ]
 
 METRIC_KEY = "lm loss"
 STEP_KEY = "consumed-tokens"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def parse_experiment(exp, default_entity: str, default_project: str) -> tuple[str, str, str]:
+    """Parse an experiment entry into (entity, project, name).
+
+    Accepts either a plain string (uses defaults) or a dict with optional
+    'entity' and 'project' keys that override the defaults.
+    """
+    if isinstance(exp, dict):
+        name = exp["name"]
+        entity = exp.get("entity", default_entity)
+        project = exp.get("project", default_project)
+    else:
+        name = str(exp)
+        entity = default_entity
+        project = default_project
+    return entity, project, name
 
 
 def strip_run_suffix(name: str) -> str:
@@ -153,8 +354,8 @@ def main():
     )
     args = parser.parse_args()
 
-    experiments = args.experiments if args.experiments else EXPERIMENTS_TO_PLOT
-    if not experiments:
+    raw_experiments = args.experiments if args.experiments else EXPERIMENTS_TO_PLOT
+    if not raw_experiments:
         parser.error(
             "No experiments specified. Pass --experiments or edit EXPERIMENTS_TO_PLOT."
         )
@@ -164,24 +365,35 @@ def main():
         shutil.rmtree(CACHE_DIR)
         print(f"Cleared cache at {CACHE_DIR}")
 
+    # Parse each experiment entry into (entity, project, name) and group by
+    # (entity, project) so we issue one W&B query per project.
+    parsed_experiments: list[tuple[str, str, str]] = []
+    by_project: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for exp in raw_experiments:
+        entity, project, name = parse_experiment(exp, args.entity, args.project)
+        parsed_experiments.append((entity, project, name))
+        by_project[(entity, project)].append(name)
+
     api = wandb.Api()
-    path = f"{args.entity}/{args.project}"
 
-    # Build a server-side regex so W&B only returns relevant runs.
-    name_regex = "|".join(re.escape(name) for name in experiments)
-    filters = {"display_name": {"$regex": f"^({name_regex})(-j?\\d{{5,}})?$"}}
-    runs = api.runs(path, filters=filters, per_page=1000)
+    # Fetch runs for each (entity, project) group and collect into a unified map.
+    experiment_runs: OrderedDict[str, list] = OrderedDict()
+    for entity, project, name in parsed_experiments:
+        experiment_runs[name] = []
 
-    # Group runs by their base experiment name.
-    experiment_runs: dict[str, list] = {name: [] for name in experiments}
-    for run in runs:
-        base = strip_run_suffix(run.name)
-        if base in experiment_runs:
-            experiment_runs[base].append(run)
-        else:
-            print(f"  [warn] Run '{run.name}' matched filter but base '{base}' is unknown")
+    for (entity, project), names in by_project.items():
+        path = f"{entity}/{project}"
+        name_regex = "|".join(re.escape(n) for n in names)
+        filters = {"display_name": {"$regex": f"^({name_regex})(-j?\\d{{5,}})?$"}}
+        runs = api.runs(path, filters=filters, per_page=1000)
 
-    # Sort each group so segments are concatenated in order.
+        for run in runs:
+            base = strip_run_suffix(run.name)
+            if base in experiment_runs:
+                experiment_runs[base].append(run)
+            else:
+                print(f"  [warn] Run '{run.name}' matched filter but base '{base}' is unknown")
+
     for name in experiment_runs:
         experiment_runs[name].sort(key=lambda r: r.name)
 
@@ -191,14 +403,16 @@ def main():
     fig, ax = plt.subplots(figsize=(10, 5))
     ranking: list[tuple[str, float, int]] = []  # (name, tail_mean, n_points)
 
-    for exp_name, run_group in experiment_runs.items():
+    exp_pbar = tqdm(experiment_runs.items(), desc="Experiments", unit="exp")
+    for exp_name, run_group in exp_pbar:
+        exp_pbar.set_postfix_str(exp_name[:40])
         if not run_group:
-            print(f"  [skip] No runs found for '{exp_name}'")
+            tqdm.write(f"  [skip] No runs found for '{exp_name}'")
             continue
 
         all_steps, all_vals = [], []
-        for run in run_group:
-            print(f"  Loading {run.name} ({run.id}) …")
+        for run in tqdm(run_group, desc=f"  Runs ({exp_name[:30]})", unit="run", leave=False):
+            tqdm.write(f"  Loading {run.name} ({run.id}) …")
             rows = fetch_run_history(run, keys)
             for row in rows:
                 s, v = row.get(args.step_key), row.get(args.metric)
@@ -207,7 +421,7 @@ def main():
                     all_vals.append(v)
 
         if not all_steps:
-            print(f"  [skip] No data for '{exp_name}'")
+            tqdm.write(f"  [skip] No data for '{exp_name}'")
             continue
 
         order = np.argsort(all_steps)
@@ -234,7 +448,7 @@ def main():
     ax.set_xlabel("Iteration", fontsize=12)
     ax.set_ylabel(args.metric, fontsize=12)
     if args.metric == "lm loss":
-        ax.set_ylim(2.8, 3.5)
+        ax.set_ylim(2.5, 3.5)
     else:
         ax.set_ylim(0, 2)
     ax.set_title(args.metric, fontsize=14)
