@@ -408,6 +408,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                             shard_main_param.is_out_proj = model_param.is_out_proj
                         if hasattr(model_param, 'expert_tp'):
                             shard_main_param.expert_tp = model_param.expert_tp
+                        if hasattr(model_param, 'is_embedding_or_output_parameter'):
+                            shard_main_param.is_embedding_or_output_parameter = model_param.is_embedding_or_output_parameter
                     else:
                         # When using precision-aware optimizer, main params are held by FusedAdam.
                         shard_main_param = None
@@ -437,6 +439,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         shard_model_param.is_out_proj = model_param.is_out_proj
                     if hasattr(model_param, 'expert_tp'):
                         shard_model_param.expert_tp = model_param.expert_tp
+                    if hasattr(model_param, 'is_embedding_or_output_parameter'):
+                        shard_model_param.is_embedding_or_output_parameter = model_param.is_embedding_or_output_parameter
 
                 else:
                     raise TypeError(

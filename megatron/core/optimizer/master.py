@@ -54,6 +54,7 @@ class MasterOptimizer(torch.optim.Optimizer):
         hypersphere_radius: Literal["learnable"] | float = 1.0,
         hypersphere_eps: float = 1e-8,
         hypersphere_update: bool = True,
+        hypersphere_update_embeddings: bool = True,
         hypersphere_project: bool = False,
         hypersphere_soft: bool = False,
 
@@ -86,6 +87,7 @@ class MasterOptimizer(torch.optim.Optimizer):
         self.hypersphere_radius = hypersphere_radius
         self.hypersphere_eps = hypersphere_eps
         self.hypersphere_update = hypersphere_update
+        self.hypersphere_update_embeddings = hypersphere_update_embeddings
         self.hypersphere_project = hypersphere_project
         self.hypersphere_soft = hypersphere_soft
 
@@ -169,8 +171,9 @@ class MasterOptimizer(torch.optim.Optimizer):
         if len(state) == 0:
             state["exp_avg"] = torch.zeros_like(grad)
             # TODO: Make it such that we can use ademamix-like updates with muon.
-            if not group["use_orthogonal_updates"]:  # Enables g^2 EMA as in adam & ademamix.
-                state["exp_avg_sq"] = torch.zeros_like(grad)
+            if not group["use_orthogonal_updates"]: 
+                if group["beta2"] != 0: # Enables g^2 EMA as in adam & ademamix.
+                    state["exp_avg_sq"] = torch.zeros_like(grad)
                 if group["alpha"] != 0:  # Enables slow momentum as in ademamix.
                     state["exp_avg_slow"] = torch.zeros_like(grad)
 
@@ -202,8 +205,8 @@ class MasterOptimizer(torch.optim.Optimizer):
 
             # Get update.
             if self.poor_mans_ortho:
-                self._normalize(p, grad, is_qkv=is_qkv, is_out_proj=is_out_proj)
-                update = grad
+                update = grad.clone()
+                self._normalize(p, update, is_qkv=is_qkv, is_out_proj=is_out_proj, apply_muon_scaling=True)
             else:
                 with emerging_optimizers.utils.fp32_matmul_precision(self.fp32_matmul_prec):
                     group_kwargs = {k: v for k, v in group.items() if k != "params"}
@@ -211,39 +214,60 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         else: # AdamW & Ademamix branch.
             beta2 = group["beta2"]
-            exp_avg_sq = state["exp_avg_sq"]
-
-            bias_correction1 = 1.0 - (beta1 ** group["step"])
-            bias_correction2 = 1.0 - (beta2 ** group["step"])
 
             exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
-            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
-            denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(group["eps"])
+            bias_correction1 = 1.0 - (beta1 ** group["step"])
 
-            if group["alpha"] == 0:  # adam logic.
-                update = exp_avg.div(bias_correction1) / denom  # TODO original equation.
-                #update = exp_avg.div(bias_correction1 * denom)  # TODO is this equivalent?
-            else:  # ademamix logic.
-                if group["alpha_warmup"] is None:
-                    alpha = group["alpha"]
-                else:
-                    alpha = linear_warmup_scheduler(group["step"], group["alpha"], alpha_start=0, warmup=group["alpha_warmup"])
+            if beta2 == 0:
+                # No second moment: use first momentum directly.
+                if group["alpha"] == 0: # adam
+                    update = exp_avg / bias_correction1
+                else: # ademamix
+                    if group["alpha_warmup"] is None:
+                        alpha = group["alpha"]
+                    else:
+                        alpha = linear_warmup_scheduler(group["step"], group["alpha"], alpha_start=0, warmup=group["alpha_warmup"])
 
-                if group["beta3_warmup"] is None:
-                    beta3 = group["beta3"]
-                else:
-                    beta3 = linear_hl_warmup_scheduler(group["step"], group["beta3"], beta_start=beta1, warmup=group["beta3_warmup"])
+                    if group["beta3_warmup"] is None:
+                        beta3 = group["beta3"]
+                    else:
+                        beta3 = linear_hl_warmup_scheduler(group["step"], group["beta3"], beta_start=beta1, warmup=group["beta3_warmup"])
 
+                    exp_avg_slow = state["exp_avg_slow"]
+                    exp_avg_slow.mul_(beta3).add_(grad, alpha=1 - beta3)
+                    update = exp_avg / bias_correction1 + alpha * exp_avg_slow
+            else:
+                exp_avg_sq = state["exp_avg_sq"]
+                bias_correction2 = 1.0 - (beta2 ** group["step"])
 
-                exp_avg_slow = state["exp_avg_slow"]
-                exp_avg_slow.mul_(beta3).add_(grad, alpha=1 - beta3)
-                update = (exp_avg.div(bias_correction1) + alpha * exp_avg_slow) / denom  # TODO Original equation.
-                #update = exp_avg.div(bias_correction1).add_(exp_avg_slow, alpha=alpha).div_(denom)  # TODO is this equivalent?
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(group["eps"])
+
+                if group["alpha"] == 0:  # adam logic.
+                    update = exp_avg.div(bias_correction1) / denom  # TODO original equation.
+                    #update = exp_avg.div(bias_correction1 * denom)  # TODO is this equivalent?
+                else:  # ademamix logic.
+                    if group["alpha_warmup"] is None:
+                        alpha = group["alpha"]
+                    else:
+                        alpha = linear_warmup_scheduler(group["step"], group["alpha"], alpha_start=0, warmup=group["alpha_warmup"])
+
+                    if group["beta3_warmup"] is None:
+                        beta3 = group["beta3"]
+                    else:
+                        beta3 = linear_hl_warmup_scheduler(group["step"], group["beta3"], beta_start=beta1, warmup=group["beta3_warmup"])
+
+                    exp_avg_slow = state["exp_avg_slow"]
+                    exp_avg_slow.mul_(beta3).add_(grad, alpha=1 - beta3)
+                    update = (exp_avg.div(bias_correction1) + alpha * exp_avg_slow) / denom  # TODO Original equation.
+                    #update = exp_avg.div(bias_correction1).add_(exp_avg_slow, alpha=alpha).div_(denom)  # TODO is this equivalent?
 
             self._apply_weight_decay_inplace(p, update, group)
 
         # Optionally, normalize update.
-        if self.hypersphere_mode is not None and self.hypersphere_update:
+        is_embedding = getattr(p, "is_embedding_or_output_parameter", False)
+        apply_update_norm = self.hypersphere_update and (self.hypersphere_update_embeddings or not is_embedding)
+        if self.hypersphere_mode is not None and apply_update_norm:
             self._normalize(p, update, is_qkv=is_qkv, is_out_proj=is_out_proj)
 
         # Update parameter.
@@ -338,13 +362,29 @@ class MasterOptimizer(torch.optim.Optimizer):
             partition_dim=partition_dim,
             mode="duplicated" if self.mode == "blockwise" else self.mode,
         )
+    #     row_norm = orth_grad.norm(dim=1)
+    #     row_norm_max = row_norm.max()
+    #     row_norm_min = row_norm.min()
+    #     row_norm_mean = row_norm.mean()
+    #     row_norm_std = row_norm.std()
+    #     col_norm = orth_grad.norm(dim=0)
+    #     col_norm_max = col_norm.max()
+    #     col_norm_min = col_norm.min()
+    #     col_norm_mean = col_norm.mean()
+    #     col_norm_std = col_norm.std()
+    #     print(
+    #     f"orth_grad [Shape: {size}]\n"
+    #     f"  ├─ Row Norms : max = {row_norm_max:.4f} | min = {row_norm_min:.4f} | mean = {row_norm_mean:.4f} | std = {row_norm_std:.4f}\n"
+    #     f"  └─ Col Norms : max = {col_norm_max:.4f} | min = {col_norm_min:.4f} | mean = {col_norm_mean:.4f} | std = {col_norm_std:.4f}"
+    # )
         scale_factor = get_muon_scale_factor(size[0], size[1], mode=self.scale_mode)
         if ignore_scale:
             return orth_grad
         return orth_grad * scale_factor * self.extra_scale_factor
 
 
-    def _normalize(self, p: torch.Tensor, x: torch.Tensor, is_qkv: bool = False, is_out_proj: bool = False):
+    def _normalize(self, p: torch.Tensor, x: torch.Tensor, is_qkv: bool = False, is_out_proj: bool = False,
+                   apply_muon_scaling: bool = False):
         if self.hypersphere_mode is None:
             return
         if is_qkv and self.split_qkv:
@@ -354,17 +394,17 @@ class MasterOptimizer(torch.optim.Optimizer):
                 # original tensor, meaning the qs tensor gets modified in-place,
                 # no need to copy the updated q to qs after.
                 for q in split_heads(qs, self.qkv_dim):
-                    self._normalize(p, q)
+                    self._normalize(p, q, apply_muon_scaling=apply_muon_scaling)
                 for k in split_heads(ks, self.qkv_dim):
-                    self._normalize(p, k)
+                    self._normalize(p, k, apply_muon_scaling=apply_muon_scaling)
                 for v in split_heads(vs, self.qkv_dim):
-                    self._normalize(p, v)
+                    self._normalize(p, v, apply_muon_scaling=apply_muon_scaling)
             else:
                 # If hypersphere_mode is row, we don't need to split heads manually as before
                 # because each head are just contiguous *rows* in qs, splitting is unnecessary.
-                self._normalize(p, qs)
-                self._normalize(p, ks)
-                self._normalize(p, vs)
+                self._normalize(p, qs, apply_muon_scaling=apply_muon_scaling)
+                self._normalize(p, ks, apply_muon_scaling=apply_muon_scaling)
+                self._normalize(p, vs, apply_muon_scaling=apply_muon_scaling)
             x.copy_(merge_qkv((qs, ks, vs), x.size(), self.qkv_split_shapes))
             return
 
@@ -414,10 +454,14 @@ class MasterOptimizer(torch.optim.Optimizer):
         else:
             raise ValueError(f"Unknown hypersphere_kind {self.hypersphere_kind}")
 
+        if apply_muon_scaling:
+            muon_sf = get_muon_scale_factor(x.size(-2), x.size(-1), mode=self.scale_mode) * self.extra_scale_factor
+            x.mul_(muon_sf)
+
     def _project(self, p, g, is_qkv: bool = False, is_out_proj: bool = False):
         if self.hypersphere_mode is None or not self.hypersphere_project:
             return
-        if is_qkv and self.split_qkv and self.hypersphere_mode != "row":
+        if is_qkv and self.split_qkv and self.hypersphere_mode not in {"row", "embed"}:
             p_qs, p_ks, p_vs = split_qkv(p, self.qkv_split_shapes)
             g_qs, g_ks, g_vs = split_qkv(g.copy(), self.qkv_split_shapes)
             if self.split_qkv_heads:
@@ -557,7 +601,8 @@ def get_megatron_master_optimizer(
                 if len(opt.state[p]) == 0:
                     opt.state[p]["exp_avg"] = torch.zeros_like(p.data)
                     if not group["use_orthogonal_updates"]:  # Enables g^2 EMA as in adam & ademamix.
-                        opt.state[p]["exp_avg_sq"] = torch.zeros_like(p.data)
+                        if group["beta2"] != 0:
+                            opt.state[p]["exp_avg_sq"] = torch.zeros_like(p.data)
                         if group["alpha"] != 0:  # Enables slow momentum as in ademamix.
                             opt.state[p]["exp_avg_slow"] = torch.zeros_like(p.data)
 
@@ -627,6 +672,7 @@ def get_megatron_master_optimizer(
         "hypersphere_kind": config.hypersphere_kind,
         "hypersphere_radius": config.hypersphere_radius,
         "hypersphere_update": config.hypersphere_update,
+        "hypersphere_update_embeddings": config.hypersphere_update_embeddings,
         "hypersphere_project": config.hypersphere_project,
 
         # Muon.
