@@ -107,7 +107,9 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         self.pg_collection = pg_collection
         self.mode = mode
-        
+
+        self._param_update_hook = None  # set by InternalsLogger; called as hook(p, update, is_qkv)
+
         default_args_dict = dict(
             lr=lr,
             weight_decay=weight_decay,
@@ -270,6 +272,9 @@ class MasterOptimizer(torch.optim.Optimizer):
         if self.hypersphere_mode is not None and apply_update_norm:
             self._normalize(p, update, is_qkv=is_qkv, is_out_proj=is_out_proj)
 
+        if self._param_update_hook is not None:
+            self._param_update_hook(p, update, is_qkv)
+
         # Update parameter.
         lr = group["lr"]
         p.add_(update, alpha=-lr)
@@ -362,22 +367,10 @@ class MasterOptimizer(torch.optim.Optimizer):
             partition_dim=partition_dim,
             mode="duplicated" if self.mode == "blockwise" else self.mode,
         )
-    #     row_norm = orth_grad.norm(dim=1)
-    #     row_norm_max = row_norm.max()
-    #     row_norm_min = row_norm.min()
-    #     row_norm_mean = row_norm.mean()
-    #     row_norm_std = row_norm.std()
-    #     col_norm = orth_grad.norm(dim=0)
-    #     col_norm_max = col_norm.max()
-    #     col_norm_min = col_norm.min()
-    #     col_norm_mean = col_norm.mean()
-    #     col_norm_std = col_norm.std()
-    #     print(
-    #     f"orth_grad [Shape: {size}]\n"
-    #     f"  ├─ Row Norms : max = {row_norm_max:.4f} | min = {row_norm_min:.4f} | mean = {row_norm_mean:.4f} | std = {row_norm_std:.4f}\n"
-    #     f"  └─ Col Norms : max = {col_norm_max:.4f} | min = {col_norm_min:.4f} | mean = {col_norm_mean:.4f} | std = {col_norm_std:.4f}"
-    # )
-        scale_factor = get_muon_scale_factor(size[0], size[1], mode=self.scale_mode)
+        if self.scale_mode == "shape_up":
+            scale_factor = max(size[0] / size[1], size[1] / size[0]) ** 0.5
+        else:
+            scale_factor = get_muon_scale_factor(size[0], size[1], mode=self.scale_mode)
         if ignore_scale:
             return orth_grad
         return orth_grad * scale_factor * self.extra_scale_factor
@@ -455,7 +448,10 @@ class MasterOptimizer(torch.optim.Optimizer):
             raise ValueError(f"Unknown hypersphere_kind {self.hypersphere_kind}")
 
         if apply_muon_scaling:
-            muon_sf = get_muon_scale_factor(x.size(-2), x.size(-1), mode=self.scale_mode) * self.extra_scale_factor
+            if self.scale_mode == "shape_up":
+                muon_sf = max(x.size(-2) / x.size(-1), x.size(-1) / x.size(-2)) ** 0.5 * self.extra_scale_factor
+            else:
+                muon_sf = get_muon_scale_factor(x.size(-2), x.size(-1), mode=self.scale_mode) * self.extra_scale_factor
             x.mul_(muon_sf)
 
     def _project(self, p, g, is_qkv: bool = False, is_out_proj: bool = False):
@@ -701,8 +697,14 @@ def get_megatron_master_optimizer(
 
     config_overrides_master = {**config_overrides}
     config_overrides_master[ParamKey(name="*")] = ParamGroupOverride(max_lr=config.muon_lr_factor * config.lr)
+
+    embedding_override = {}
+    if config.embedding_lr_multiplier is not None:
+        embedding_override["max_lr"] = config.embedding_lr_multiplier * config.lr
     if config.use_orthogonal_updates and not config.use_orthogonal_embeddings:
-        config_overrides_master[ParamKey(attr="is_embedding_or_output_parameter")] = ParamGroupOverride(use_orthogonal_updates=False)
+        embedding_override["use_orthogonal_updates"] = False
+    if embedding_override:
+        config_overrides_master[ParamKey(attr="is_embedding_or_output_parameter")] = ParamGroupOverride(**embedding_override)
 
     linear_param_groups = _get_param_groups(model_chunks, config, config_overrides_master)
     # if layerwise distributed optimizer is not used, need to handle ep params separately

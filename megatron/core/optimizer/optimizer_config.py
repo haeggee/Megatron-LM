@@ -227,6 +227,10 @@ class OptimizerConfig:
     muon_lr_factor: float = 1.0
     """Muon parameters will use a learning rate of lr * muon_lr_factor instead of just lr."""
 
+    embedding_lr_multiplier: Optional[float] = None
+    """Embedding/output parameters will use lr * embedding_lr_multiplier.
+    If None, falls back to muon_lr_factor * lr."""
+
     hypersphere_mode: Optional[Literal["row", "col", "rowcol", "flat"]] = None
     """When specified, enables hypersphere constraint of the parameters, either row-wise, column-wise, row+column-wise or of the flattened vector."""
 

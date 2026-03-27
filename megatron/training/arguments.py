@@ -2136,6 +2136,8 @@ def _add_logging_args(parser):
     group.add_argument('--log-angular-metrics', action='store_true',
                        help='Log angular updates and gradient-weight alignment '
                        '(useful for spherical/normalized training analysis).')
+    group.add_argument('--log-update-step-stats', action='store_true',
+                       help='Log row/col norm stats for orthogonalized update steps from MasterOptimizer.')
     group.add_argument('--internals-log-layers', type=str, default='all',
                        help='Comma-separated layer indices to log, or "all" for all layers.')
     group.add_argument('--internals-weights-on-gpu', action='store_true',
@@ -2191,7 +2193,7 @@ def _add_regularization_args(parser):
     group.add_argument('--muon-use-nesterov', action='store_true',
                        help='Whether to use Nesterov-style momentum in the internal SGD')
     group.add_argument('--muon-scale-mode', type=str, default='spectral',
-                       choices=['spectral', 'unit_rms_norm', 'shape_scaling', 'none'],
+                       choices=['spectral', 'unit_rms_norm', 'shape_scaling', 'shape_up', 'none'],
                        help='Scale mode for Muon optimizer')
     group.add_argument('--muon-fp32-matmul-prec', type=str, default='medium',
                        choices=['low', 'medium', 'high'],
@@ -2204,6 +2206,9 @@ def _add_regularization_args(parser):
     group.add_argument('--muon-extra-scale-factor', type=float, default=1.0,
                        help='Additional scale factor for the muon update')
     group.add_argument('--muon-lr-factor', type=float, default=1.0)
+    group.add_argument('--embedding-lr-multiplier', type=float, default=None,
+                       help='LR multiplier for embedding/output parameters in the master optimizer. '
+                            'Final LR = embedding_lr_multiplier * lr. If None, uses muon-lr-factor * lr.')
     group.add_argument('--hypersphere-mode', type=_float_or_str)
     group.add_argument('--hypersphere-kind', type=_float_or_str, default="l2")
     group.add_argument('--hypersphere-radius', type=_float_or_str, default=1.0)

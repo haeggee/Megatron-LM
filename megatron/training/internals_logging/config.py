@@ -25,6 +25,7 @@ class InternalsLoggingConfig:
     log_relative_updates: bool = True
     log_angular_metrics: bool = True
     log_delta_y: bool = False
+    log_update_step_stats: bool = False
     layers_to_log: Optional[List[int]] = None
     log_interval: int = 1
     weights_on_gpu: bool = False
@@ -46,6 +47,7 @@ class InternalsLoggingConfig:
             log_relative_updates=getattr(args, 'log_relative_updates', False),
             log_angular_metrics=getattr(args, 'log_angular_metrics', False),
             log_delta_y=getattr(args, 'log_delta_y', False),
+            log_update_step_stats=getattr(args, 'log_update_step_stats', False),
             layers_to_log=layers,
             log_interval=getattr(args, 'log_interval', 1),
             weights_on_gpu=getattr(args, 'internals_weights_on_gpu', False),
