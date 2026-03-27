@@ -879,7 +879,7 @@ cat > $ROOT_PATH/submission.sbatch <<- EOM
 # Wake up.
 echo [\$(date)] Starting job
 echo [\$(date)] Using nodes: \$SLURM_JOB_NODELIST
-#srun --environment=$CONTAINER -l --mpi=pmix --network=disable_rdzv_get bash -c 'echo \$(hostname) \$(nvidia-smi | grep -o "|\\s*[0-9]*MiB")'
+srun --environment=$CONTAINER -l --mpi=pmix --network=disable_rdzv_get bash -c 'echo \$(hostname) \$(nvidia-smi | grep -o "|\\s*[0-9]*MiB")'
 
 
 # Log git status.
