@@ -14,7 +14,7 @@ from .optimizer import (
     FP32Optimizer,
     MegatronOptimizer,
 )
-from .optimizer_config import OptimizerConfig, ParamKey
+from .optimizer_config import OptimizerConfig, ParamKey, ParamPredicate
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.optimizer_param_scheduler import ParamGroupOverride
 from megatron.core.process_groups_config import ProcessGroupCollection
@@ -696,13 +696,27 @@ def get_megatron_master_optimizer(
         param.requires_grad = False
 
     config_overrides_master = {**config_overrides}
-    config_overrides_master[ParamKey(name="*")] = ParamGroupOverride(max_lr=config.muon_lr_factor * config.lr)
 
     embedding_override = {}
     if config.embedding_lr_multiplier is not None:
         embedding_override["max_lr"] = config.embedding_lr_multiplier * config.lr
     if config.use_orthogonal_updates and not config.use_orthogonal_embeddings:
         embedding_override["use_orthogonal_updates"] = False
+
+    if "max_lr" in embedding_override:
+        # Exclude embedding/output params from the wildcard to avoid conflicting max_lr overrides.
+        non_emb = ParamPredicate(
+            name="non_embedding_or_output",
+            fn=lambda p: not getattr(p, "is_embedding_or_output_parameter", False),
+        )
+        config_overrides_master[ParamKey(predicate=non_emb)] = ParamGroupOverride(
+            max_lr=config.muon_lr_factor * config.lr
+        )
+    else:
+        config_overrides_master[ParamKey(name="*")] = ParamGroupOverride(
+            max_lr=config.muon_lr_factor * config.lr
+        )
+
     if embedding_override:
         config_overrides_master[ParamKey(attr="is_embedding_or_output_parameter")] = ParamGroupOverride(**embedding_override)
 

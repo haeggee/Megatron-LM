@@ -37,6 +37,7 @@ ADAMBETA1=0.95
 ALPHA=5
 MUON_SCALE_MODE=spectral
 MUON_NUM_NS_STEPS=5
+EMBEDDING_LR_MULTIPLIER=1.0
 
 HYPERBALL=false
 HS_KIND=l2
@@ -113,6 +114,7 @@ usage () {
 	echo " --muon-nesterov: Enables muon nesterov momentum"
 	echo " --muon-num-ns-steps <int>: Number of Newton-Schulz steps for the Muon optimizer"
 	echo " --mlr: muon learning rate factor"
+	echo " --elr <float>: embedding/output LR multiplier (final LR = elr * lr)"
 	echo " --wd: weight decay"
 	echo " --wd-method (decoupled/independent): weight decay method"
 	echo " --hs <row/col/rowcol/invrowcol/flat>: Enables hypersphere training"
@@ -303,6 +305,8 @@ while [[ $# -gt 0 ]]; do
 			ADAMBETA1=$2; shift 2;;
 		--mlr)
 			MUON_LR_FACTOR=$2; shift 2;;
+		--elr)
+			EMBEDDING_LR_MULTIPLIER=$2; shift 2;;
 		--alpha)
 			ALPHA=$2; shift 2;;
 		--muon-scale)
@@ -424,6 +428,10 @@ elif [[ $OPT = dmaster ]] || [[ $OPT = master ]]; then
 		if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.99 ]] || [[ $BETA3 != 0.999 ]]; then
 			SUFFIX=${SUFFIX}_b${BETA1}_${BETA2}_$BETA3
 		fi
+		if [[ ! -z "${MUON_LR_FACTOR+xxx}" ]]; then
+			SUFFIX=${SUFFIX}_mlr$MUON_LR_FACTOR
+			OPT_ARGS+=(--muon-lr-factor $MUON_LR_FACTOR)
+		fi
 	fi
 	if [[ $ALPHA != 5 ]]; then
 		SUFFIX=${SUFFIX}_a$ALPHA
@@ -501,6 +509,13 @@ fi
 
 if [[ $CHANGED_LR = true ]]; then
 	SUFFIX=$SUFFIX-lr$LR
+fi
+if [[ ! -z "${EMBEDDING_LR_MULTIPLIER+xxx}" ]]; then
+	SUFFIX=${SUFFIX}-elr
+	if [[ $EMBEDDING_LR_MULTIPLIER != 1.0 ]]; then
+		SUFFIX=${SUFFIX}$EMBEDDING_LR_MULTIPLIER
+	fi
+	OPT_ARGS+=(--embedding-lr-multiplier $EMBEDDING_LR_MULTIPLIER)
 fi
 
 # FP8 settings.
@@ -710,6 +725,7 @@ if [[ $EXTRA_LOG = true ]]; then
 		--log-angular-metrics
 		--log-relative-updates
 		--log-delta-y
+		--log-update-step-stats
 		--internals-log-interval $LOG_FREQ
 	)
 fi
