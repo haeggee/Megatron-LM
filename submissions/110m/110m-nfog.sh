@@ -13,6 +13,6 @@ bash submissions/submit.sh 110 \
 	--layer-scale $INV_LAYERS --layer-scale-scale $INV_SQRTMODELDIM \
 	--upscale-embedding $SQRT_MODELDIM \
 	--qk-norm RMSNorm \
-	--logits-layer-scale 1 --logits-layer-scale-scale $INV_SQRTMODELDIM \
+	--logits-layer-scale 1 --logits-layer-scale-scale 1 \
 	--wd 0 --no-warmup --decay cos \
 	$*
