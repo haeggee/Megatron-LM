@@ -1,7 +1,6 @@
 #= Prelude =#
 # General settings.
-#CONTAINER=/iopsstor/scratch/cscs/ahernnde/ngc_25-12-alps1.toml
-CONTAINER=/iopsstor/scratch/cscs/ahernnde/ncg_new_v2.toml
+CONTAINER=/iopsstor/scratch/cscs/ahernnde/ncg_new_v3.toml
 
 SCRIPT_VERSION=v1
 SEQ_LEN=4096
@@ -209,7 +208,9 @@ while [[ $# -gt 0 ]]; do
 		# Misc settings.
 		--nodes) NODES=$2; shift 2;;
 		--debug)
-			SCRIPT_VERSION=$SCRIPT_VERSION-debug; shift;;
+			SCRIPT_VERSION=$SCRIPT_VERSION-debug
+			DEBUG=true
+			shift;;
 		--extra-name)
 			EXTRA_NAME="-$2"; shift 2;;
 		--time)
@@ -221,7 +222,7 @@ while [[ $# -gt 0 ]]; do
 		# FP8 settings.
 		--fp8)
 			FP8=true; shift;;
-		--fp8-dpa)
+		--fp8dpa)
 			FP8DPA=true; shift;;
 		# Training settings.
 		--tokens)
@@ -714,7 +715,11 @@ if [[ $EXTRA_LOG = true ]]; then
 fi
 
 # Final preparations.
-WANDB_ENTITY=epfl-relay
+if [ "$DEBUG" = true ]; then
+	WANDB_ENTITY=alehc
+else
+	WANDB_ENTITY=epfl-relay
+fi
 WANDB_PROJECT=megatron_opt_$SCRIPT_VERSION
 EXP_NAME=$SIZE$SCALE$SUFFIX
 ROOT_PATH=$TRAIN_ROOT/$SCRIPT_VERSION/$SIZE$SCALE$LONG_SUFFIX
@@ -858,7 +863,7 @@ cat > $ROOT_PATH/submission.sbatch <<- EOM
 # Wake up.
 echo [\$(date)] Starting job
 echo [\$(date)] Using nodes: \$SLURM_JOB_NODELIST
-srun --environment=$CONTAINER -l bash -c 'echo \$(hostname) \$(nvidia-smi | grep -o "|\\s*[0-9]*MiB")'
+#srun --environment=$CONTAINER -l --mpi=pmix --network=disable_rdzv_get bash -c 'echo \$(hostname) \$(nvidia-smi | grep -o "|\\s*[0-9]*MiB")'
 
 
 # Log git status.
@@ -894,7 +899,7 @@ pip list > \$DEBUG_DIR/pip.txt
 nvidia-smi > \$DEBUG_DIR/cuda
 printenv > \$DEBUG_DIR/env.sh
 
-srun --environment=$CONTAINER -lu --cpus-per-task \$SLURM_CPUS_PER_TASK bash -c "
+srun --environment=$CONTAINER -lu --cpus-per-task \$SLURM_CPUS_PER_TASK --mpi=pmix --network=disable_rdzv_get bash -c "
 	cd $CODE_PATH
 	export PYTHONPATH=\$PWD:$EMERGING_OPTIMIZERS_PATH
 	export RANK=\\\$SLURM_PROCID
