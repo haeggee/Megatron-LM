@@ -52,6 +52,7 @@ CLIP_GRAD=1.0
 NO_WARMUP=false
 DECAY=wsd
 COOLDOWN=0.2
+WSD=minus_sqrt
 
 # Misc. defaults.
 EXTRA_LOG=true
@@ -117,6 +118,7 @@ usage () {
 	echo " --elr <float>: embedding/output LR multiplier (final LR = elr * lr)"
 	echo " --wd: weight decay"
 	echo " --wd-method (decoupled/independent): weight decay method"
+	echo " --wsd: wsd decay method"
 	echo " --hs <row/col/rowcol/invrowcol/flat>: Enables hypersphere training"
 	echo " --hs-kind <l2/standard/spectral>: hypersphere kind"
 	echo " --hs-r <learnable/float>: hypersphere radius"
@@ -272,6 +274,8 @@ while [[ $# -gt 0 ]]; do
 			SOFT_MAX_SCALE=$2; shift 2;;
 		--qk-norm)
 			QK_NORM=$2; shift 2;;
+		--qk-frozen)
+			QK_FROZEN=true; shift;;
 		--qk-layer-scale)
 			QK_LAYER_SCALE=$2; shift 2;;
 		--qk-layer-scale-scale)
@@ -319,6 +323,8 @@ while [[ $# -gt 0 ]]; do
 			WEIGHT_DECAY=$2; shift 2;;
 		--wd-method)
 			WEIGHT_DECAY_METHOD=$2; shift 2;;
+		--wsd)
+			WSD=$2; shift 2;;
 		--hs)
 			HYPERBALL=$2; shift 2;;
 		--hs-kind)
@@ -561,6 +567,10 @@ if [[ ! -z "${QK_NORM+xxx}" ]]; then
 		fi
 		SUFFIX=$SUFFIX-qkRMS
 		ARCH_ARGS+=(--qk-layernorm)
+		if [[ $QK_FROZEN = true ]]; then
+			SUFFIX=${SUFFIX}fz
+			ARCH_ARGS+=(--qk-layernorm-frozen)
+		fi
 	elif [[ $QK_NORM = L2Norm ]]; then
 		SUFFIX=$SUFFIX-qkL2
 		ARCH_ARGS+=(--qk-l2-norm)
@@ -684,10 +694,14 @@ if [[ $DECAY = wsd ]]; then
 		SUFFIX=$SUFFIX-cd$COOLDOWN
 		LONG_SUFFIX=$LONG_SUFFIX-cd${COOLDOWN}
 	fi
+	if [[ $WSD != minus_sqrt ]]; then
+		SUFFIX=$SUFFIX-WSD$WSD
+		LONG_SUFFIX=$LONG_SUFFIX-WSD$WSD
+	fi
 	DECAY_ITERS=$(python3 -c "print(int($ITERS * $COOLDOWN))")
 	DECAY_ARGS+=(
 		--lr-decay-style WSD
-		--lr-wsd-decay-style minus_sqrt
+		--lr-wsd-decay-style $WSD
 		--lr-wsd-decay-iters $DECAY_ITERS
 	)
 elif [[ $DECAY = cos ]]; then
