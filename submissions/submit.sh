@@ -386,6 +386,8 @@ elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
 			SUFFIX=${SUFFIX}_urm
 		elif [[ $MUON_SCALE_MODE = shape_scaling ]]; then
 			SUFFIX=${SUFFIX}_shsc
+		elif [[ $MUON_SCALE_MODE = shape_up ]]; then
+			SUFFIX=${SUFFIX}_shup
 		else
 			SUFFIX=${SUFFIX}_$MUON_SCALE_MODE
 		fi
@@ -426,6 +428,8 @@ elif [[ $OPT = dmaster ]] || [[ $OPT = master ]]; then
 				SUFFIX=${SUFFIX}_urm
 			elif [[ $MUON_SCALE_MODE = shape_scaling ]]; then
 				SUFFIX=${SUFFIX}_shsc
+			elif [[ $MUON_SCALE_MODE = shape_up ]]; then
+				SUFFIX=${SUFFIX}_shup
 			else
 				SUFFIX=${SUFFIX}_$MUON_SCALE_MODE
 			fi
