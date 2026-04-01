@@ -50,6 +50,7 @@ HS_SPLIT_HEADS_UPDATE=false
 ACTIVATION=swiglu
 CLIP_GRAD=1.0
 NO_WARMUP=false
+WARMUP_ITERS=5000
 DECAY=wsd
 COOLDOWN=0.2
 WSD=minus_sqrt
@@ -77,6 +78,7 @@ usage () {
 	echo " --tokens <int>: Amount of tokens to train with (in B)."
 	echo " --lr <float>: Learning rate."
 	echo " --no-warmup: Deactivates learning rate warmup"
+	echo " --warmup-iters <int> (default=$WARMUP_ITERS): LR warmup steps (\`--lr-warmup-iters\`)"
 	echo " --decay <wsd/cos>"
 	echo " --cooldown <float>: Fraction to do cooldown"
 	echo " --clip-grad <float>: Gradient clipping"
@@ -88,6 +90,7 @@ usage () {
 	echo " --normalization <RMSNorm/L2Norm>"
 	echo " --no-learnable-norms"
 	echo " --post-norm"
+	echo " --post-norm-no-gain"
 	echo " --post-block-norm"
 	echo " --use-stream-minus-residual"
 	echo " --layer-scale <float>"
@@ -157,6 +160,132 @@ if [[ $1 -eq 110 ]]; then
 	ITERS_PER_BT=2000
 	LR=0.002
 	SIZE=110
+	SAVE_FREQ=10000
+	DEF_TOKENS=25
+	INTERMEDIATE_METRICS_INTERVAL=10
+	SCALE=M
+	UNTIE=false
+	LOG_FREQ=50
+elif [[ $1 -eq 47 ]]; then # 0.5x=256 dim from 110m
+	# batch_size: ~0.52M.
+	LAYERS=12
+	HIDDEN_SIZE=256
+	FFN_SIZE=1024
+	NUM_HEADS=2
+	NUM_QUERY_GROUPS=1
+	MBS="${MBS:-8}"
+	GBS=128
+	ITERS_PER_BT=2000
+	LR=0.002
+	SIZE=47
+	SAVE_FREQ=10000
+	DEF_TOKENS=25
+	INTERMEDIATE_METRICS_INTERVAL=10
+	SCALE=M
+	UNTIE=false
+	LOG_FREQ=50
+elif [[ $1 -eq 130 ]]; then # 1.5x layers from 110m
+	# batch_size: ~0.52M.
+	LAYERS=18
+	HIDDEN_SIZE=512
+	FFN_SIZE=2048
+	NUM_HEADS=4
+	NUM_QUERY_GROUPS=2
+	MBS="${MBS:-8}"
+	GBS=128
+	ITERS_PER_BT=2000
+	LR=0.002
+	SIZE=130
+	SAVE_FREQ=10000
+	DEF_TOKENS=25
+	INTERMEDIATE_METRICS_INTERVAL=10
+	SCALE=M
+	UNTIE=false
+	LOG_FREQ=50
+elif [[ $1 -eq 150 ]]; then # 2x layers from 110m
+	# batch_size: ~0.52M.
+	LAYERS=24
+	HIDDEN_SIZE=512
+	FFN_SIZE=2048
+	NUM_HEADS=4
+	NUM_QUERY_GROUPS=2
+	MBS="${MBS:-8}"
+	GBS=128
+	ITERS_PER_BT=2000
+	LR=0.002
+	SIZE=150
+	SAVE_FREQ=10000
+	DEF_TOKENS=25
+	INTERMEDIATE_METRICS_INTERVAL=10
+	SCALE=M
+	UNTIE=false
+	LOG_FREQ=50
+elif [[ $1 -eq 190 ]]; then # 1.5x=768 dim, but WRONG heads/query groups
+	# batch_size: ~0.52M.
+	LAYERS=12
+	HIDDEN_SIZE=768
+	FFN_SIZE=3072
+	NUM_HEADS=4
+	NUM_QUERY_GROUPS=2
+	MBS="${MBS:-8}"
+	GBS=128
+	ITERS_PER_BT=2000
+	LR=0.002
+	SIZE=190
+	SAVE_FREQ=10000
+	DEF_TOKENS=25
+	INTERMEDIATE_METRICS_INTERVAL=10
+	SCALE=M
+	UNTIE=false
+	LOG_FREQ=50
+elif [[ $1 -eq 193 ]]; then # 1.5x=768 dim, correct heads/query groups
+	# batch_size: ~0.52M.
+	LAYERS=12
+	HIDDEN_SIZE=768
+	FFN_SIZE=3072
+	NUM_HEADS=6
+	NUM_QUERY_GROUPS=3
+	MBS="${MBS:-8}"
+	GBS=128
+	ITERS_PER_BT=2000
+	LR=0.002
+	SIZE=193
+	SAVE_FREQ=10000
+	DEF_TOKENS=25
+	INTERMEDIATE_METRICS_INTERVAL=10
+	SCALE=M
+	UNTIE=false
+	LOG_FREQ=50
+elif [[ $1 -eq 290 ]]; then # 2x=1024 dim, but wrong heads/query groups
+	# batch_size: ~0.52M.
+	LAYERS=12
+	HIDDEN_SIZE=1024
+	FFN_SIZE=4096
+	NUM_HEADS=4
+	NUM_QUERY_GROUPS=2
+	MBS="${MBS:-8}"
+	GBS=128
+	ITERS_PER_BT=2000
+	LR=0.002
+	SIZE=290
+	SAVE_FREQ=10000
+	DEF_TOKENS=25
+	INTERMEDIATE_METRICS_INTERVAL=10
+	SCALE=M
+	UNTIE=false
+	LOG_FREQ=50
+elif [[ $1 -eq 292 ]]; then # 2x=1024 dim, correct heads/query groups
+	# batch_size: ~0.52M.
+	LAYERS=12
+	HIDDEN_SIZE=1024
+	FFN_SIZE=4096
+	NUM_HEADS=8
+	NUM_QUERY_GROUPS=4
+	MBS="${MBS:-8}"
+	GBS=128
+	ITERS_PER_BT=2000
+	LR=0.002
+	SIZE=292
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
 	INTERMEDIATE_METRICS_INTERVAL=10
@@ -237,6 +366,8 @@ while [[ $# -gt 0 ]]; do
 			shift 2;;
 		--no-warmup)
 			NO_WARMUP=true; shift;;
+		--warmup-iters)
+			WARMUP_ITERS=$2; shift 2;;
 		--decay)
 			DECAY=$2; shift 2;;
 		--cooldown)
@@ -258,6 +389,8 @@ while [[ $# -gt 0 ]]; do
 			NO_LEARNABLE_NORMS=true; shift;;
 		--post-norm)
 			POST_NORM=true; shift;;
+		--post-norm-no-gain)
+			POST_NORM_NO_GAIN=true; shift;;
 		--post-block-norm)
 			POST_BLOCK_NORM=true; shift;;
 		--use-stream-minus-residual)
@@ -593,6 +726,10 @@ if [[ $POST_NORM = true ]]; then
 	SUFFIX=$SUFFIX-pst
 	ARCH_ARGS+=(--post-norm)
 fi
+if [[ $POST_NORM_NO_GAIN = true ]]; then
+	SUFFIX=$SUFFIX-png
+	ARCH_ARGS+=(--post-norm-no-gain)
+fi
 if [[ $POST_BLOCK_NORM = true ]]; then
 	SUFFIX=$SUFFIX-ppst
 	ARCH_ARGS+=(--post-block-norm)
@@ -684,7 +821,11 @@ if [[ $NO_WARMUP = true ]]; then
 	LONG_SUFFIX=$LONG_SUFFIX-nw
 	WARMUP=0
 else
-	WARMUP=5000
+	WARMUP=$WARMUP_ITERS
+	if [[ $WARMUP_ITERS -ne 5000 ]]; then
+		SUFFIX=$SUFFIX-wu$WARMUP_ITERS
+		LONG_SUFFIX=$LONG_SUFFIX-wu$WARMUP_ITERS
+	fi
 fi
 if [[ $TOKENS != $DEF_TOKENS ]]; then
 	SUFFIX=$SUFFIX-${TOKENS}BT
