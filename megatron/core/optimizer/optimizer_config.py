@@ -261,6 +261,8 @@ class OptimizerConfig:
     hypersphere_soft: bool = False
     """If enabled, do R*w/max(||w||, R) instead of just R*w/||w||."""
 
+    qk_layernorm_frozen: bool = False
+
     weight_decay_method: Literal["decoupled", "independent"] = "decoupled"
 
     use_orthogonal_updates: bool = False

@@ -2643,7 +2643,7 @@ def _add_learning_rate_args(parser):
                        choices=['constant', 'linear', 'cosine', 'inverse-square-root', 'WSD'],
                        help='Learning rate decay function.')
     group.add_argument('--lr-wsd-decay-style', type=str, default='exponential',
-                       choices=['exponential', 'linear', 'cosine', 'minus_sqrt'],
+                       choices=['exponential', 'linear', 'cosine', 'minus_sqrt', 'minus_cbrt', 'minus_cbcrt', 'power2', 'power3', 'sqrt_pow2'],
                        help='Decay style for the annealing phase of WSD'),
     group.add_argument('--lr-decay-iters', type=int, default=None,
                        help='number of iterations to decay learning rate over,'
@@ -3391,6 +3391,7 @@ def _add_vision_args(parser):
     # regularization arguments
     group.add_argument('--qk-layernorm', action='store_true',
                        help='Whether to layer normalize the q and k attention embeddings.')
+    group.add_argument('--qk-layernorm-frozen', action='store_true')
     group.add_argument('--qknorm-impl', default='te', choices={'te', 'torch', 'apex'},
                         help='QK layernorm implementation')
     group.add_argument('--qk-l2-norm', action='store_true',

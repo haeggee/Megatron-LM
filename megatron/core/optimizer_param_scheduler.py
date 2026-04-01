@@ -251,6 +251,16 @@ class OptimizerParamScheduler:
                     coeff = (2.0 * math.pow(0.5, wsd_decay_ratio)) - 1.0
                 elif self.lr_wsd_decay_style == "minus_sqrt":
                     coeff = 1.0 - math.sqrt(wsd_decay_ratio)
+                elif self.lr_wsd_decay_style == "minus_cbrt":
+                    coeff = 1.0 - wsd_decay_ratio**(1/3)
+                elif self.lr_wsd_decay_style == "minus_cbcrt":
+                    coeff = 1.0 - wsd_decay_ratio**(1/4)
+                elif self.lr_wsd_decay_style == "power2":
+                    coeff = (1.0 - wsd_decay_ratio)**2
+                elif self.lr_wsd_decay_style == "power3":
+                    coeff = (1.0 - wsd_decay_ratio)**3
+                elif self.lr_wsd_decay_style == "sqrt_pow2":
+                    coeff = (1 - math.sqrt(wsd_decay_ratio))**2
 
         else:
             raise Exception(f'{self.lr_decay_style} decay style is not supported.')

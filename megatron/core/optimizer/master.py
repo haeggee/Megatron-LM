@@ -49,7 +49,7 @@ class MasterOptimizer(torch.optim.Optimizer):
         eps: float = 1e-8,
 
         # Hypersphere optimization.
-        hypersphere_mode: Optional[Literal["row", "col", "rowcol", "invrowcol", "flat", "embed"]] = None,
+        hypersphere_mode: Optional[Literal["row", "col", "rowcol", "invrowcol", "equi", "flat", "embed"]] = None,
         hypersphere_kind: Optional[Literal["l2", "standard", "spectral", "orthogonal"]] = None,
         hypersphere_radius: Literal["learnable"] | float = 1.0,
         hypersphere_eps: float = 1e-8,
@@ -382,7 +382,7 @@ class MasterOptimizer(torch.optim.Optimizer):
             return
         if is_qkv and self.split_qkv:
             qs, ks, vs = split_qkv(x, self.qkv_split_shapes)
-            if self.split_qkv_heads and self.hypersphere_mode in {"col", "rowcol", "invrowcol", "flat"}:
+            if self.split_qkv_heads and self.hypersphere_mode in {"col", "rowcol", "invrowcol", "flat", "rowcol", "equi"}:
                 # When splitting heads using torch.split, we only get views of the
                 # original tensor, meaning the qs tensor gets modified in-place,
                 # no need to copy the updated q to qs after.
@@ -409,7 +409,7 @@ class MasterOptimizer(torch.optim.Optimizer):
             dim = 0
         elif self.hypersphere_mode == "row":
             dim = 1
-        elif self.hypersphere_mode in {"flat", "rowcol", "invrowcol"}:
+        elif self.hypersphere_mode in {"flat", "rowcol", "invrowcol", "equi"}:
             dim = None
         elif self.hypersphere_mode == "embed":
             if is_out_proj:
@@ -425,6 +425,10 @@ class MasterOptimizer(torch.optim.Optimizer):
             assert self.hypersphere_kind == "l2"
             assert self.hypersphere_radius == 1.0
             sinkhorn(x, eps=eps, first_norm_col="inv" not in self.hypersphere_mode)
+        elif self.hypersphere_mode == "equi":
+            assert self.hypersphere_kind == "l2"
+            assert self.hypersphere_radius == 1.0
+            equilibration(x, eps=eps)
         elif self.hypersphere_kind == "l2":
             norm = torch.norm(x, dim=dim, keepdim=True).clamp_min(eps)
             #if torch.any(norm < eps):
@@ -481,7 +485,7 @@ class MasterOptimizer(torch.optim.Optimizer):
             dim = 1
         elif self.hypersphere_mode == "flat":
             dim = None
-        elif self.hypersphere_mode in {"rowcol", "invrowcol"}:
+        elif self.hypersphere_mode in {"rowcol", "invrowcol", "equi"}:
             raise ValueError(f"Project rowcol nyi")
         elif self.hypersphere_mode == "embed":
             if is_out_proj:
@@ -546,6 +550,13 @@ def sinkhorn(x, n_iters: int = 10, eps: float = 1e-8, first_norm_col: bool = Tru
             x.div_(norm_col).div_(norm_row)
         else:
             x.div_(norm_row).div_(norm_col)
+
+def equilibration(x, n_iters: int = 1, eps: float = 1e-8):
+    for _ in range(n_iters):
+        norm_col = torch.norm(x, dim=0, keepdim=True).clamp_min(eps)
+        x.div_(norm_col)
+        norm_row = torch.norm(x, dim=1, keepdim=True).clamp_min(eps)
+        x.div_(norm_row)
 
 
 
@@ -767,11 +778,19 @@ def get_megatron_master_optimizer(
     for param in linear_params:
         param.requires_grad = False
 
+    config_overrides_adam = {**config_overrides}
+    if config.qk_layernorm_frozen:
+        print("Freezing qknorm")
+        config_overrides_adam[ParamKey(name="*q_layernorm*")] = ParamGroupOverride(max_lr=0)
+        config_overrides_adam[ParamKey(name="*k_layernorm*")] = ParamGroupOverride(max_lr=0)
+
+
+
     # call original get. linear params will be skipped since they're freezed
     chained_adam = get_megatron_optimizer(
         config,
         model_chunks,
-        config_overrides=config_overrides,
+        config_overrides=config_overrides_adam,
         use_gloo_process_groups=use_gloo_process_groups,
     )
 

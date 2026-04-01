@@ -1062,7 +1062,7 @@ class Attention(MegatronModule, ABC):
 
                 # Clear the outputs for padding tokens when using quantization scales
                 # to avoid corrupting amax calculations
-                if is_using_quantization_scales(self.config):
+                if is_using_quantization_scales(self.config) and inference_context is not None:
                     core_attn_out[inference_context.padding_slice] = 0.0
 
         if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
