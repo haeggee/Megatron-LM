@@ -31,6 +31,7 @@ CACHE_DIR = Path(__file__).resolve().parent / ".wandb_cache"
 #   {"name": "exp", "entity": "X"}              → overrides entity
 #   {"name": "exp", "project": "Y"}             → overrides project
 #   {"name": "exp", "entity": "X", "project": "Y"} → overrides both
+
 EXPERIMENTS_TO_PLOT = [
     ## baselines
     "110M-n1",
@@ -249,6 +250,31 @@ EXPERIMENTS_TO_PLOT = [
     # {"name": "390M-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
 ]
 
+
+PRESETS = {
+    "default": EXPERIMENTS_TO_PLOT,
+    "wsdsweep": [
+        # True llama adam baseline for reference.
+        "110M-n1",
+
+        # Our main master to beat.
+        #{"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls0.083S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+        {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+
+        # WSD shapes.
+        {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+        {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+        {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    ] + [
+        {"name": f"110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr{lr}-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-WSD{wsd}-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"}
+        for wsd in ["exponential", "linear", "cosine", "minus_cbrt", "minus_cbcrt", "power2", "power3", "sqrt_pow2"]
+        for lr in [0.002, 0.003, 0.004]
+    ]
+}
+
+#EXPERIMENTS_TO_PLOT = PRESETS["default"]
+EXPERIMENTS_TO_PLOT = PRESETS["wsdsweep"]
+
 METRIC_KEY = "lm loss"
 STEP_KEY = "consumed-tokens"
 
@@ -313,6 +339,49 @@ def smooth_and_subsample(
     return steps, smoothed
 
 
+def scrape_from_logs(group: list[wandb.apis.public.runs.Run], step_key: str, keys: list[str], tail: int) -> list[dict]:
+    def extract(log_path : Path) -> dict[int, dict[str, float]]:
+        res = {}
+        with open(log_path) as f:
+            for line in f:
+                if all(key in line for key in keys + [log_step_key]):
+                    #print(line)
+                    it = int(re.match(fr".*{log_step_key} +(\d+)/ *{niters}.*", line).group(1))
+                    row = {
+                        key: float(re.match(fr".*{key}: +(\d+\.\d+E(\+|-)\d+).*", line).group(1))  # Only works for lm loss lmao.
+                        for key in keys
+                    }
+                    res[it] = row
+        return res
+
+    # Sort in reverse chronological order to scrape as few logs as needed.
+    jobids = {run: int(re.match(r".*-j?(\d{5,})$", run.name).group(1))
+              for run in group}
+    group = sorted(group, reverse=True, key=lambda run: jobids[run])
+    cfg = group[0].config
+    assert step_key == "consumed-tokens"
+    step_key_mult = cfg["global_batch_size"] * cfg["seq_length"]
+    niters = cfg["train_iters"]
+    log_step_key = "iteration"
+
+    #"/iopsstor/scratch/cscs/ahernnde/opts/logs/v1/110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.002-elr-qkRMS-nPre-nFin-pst-ls0.083S0.044-lgsls1S1-up22.62-nw-WSDpower3/checkpoints"
+    result = []
+    it = niters
+    for run in group:
+        ckpt_path = Path(cfg["save"])
+        log_path = ckpt_path.parent/"slurmlogs"/f"{jobids[run]}.out"
+        metrics = extract(log_path)
+        while it in metrics and len(result) < tail:
+            result.append({step_key: it * step_key_mult, **metrics[it]})
+            it -= 1
+    if len(result) == tail:
+        return list(reversed(result))
+    raise ValueError(f"Longs not long enough, found {len(result)} / {tail} entries")
+
+
+
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
@@ -351,6 +420,10 @@ def main():
     parser.add_argument(
         "--tail", type=int, default=100,
         help="Number of final raw iterations to average for the ranking table (default: 100)",
+    )
+    parser.add_argument(
+        "--scrape-from-logs", action="store_true",
+        help="When set, the loss of the --tail will be extracted directly from the raw log files",
     )
     args = parser.parse_args()
 
@@ -402,6 +475,7 @@ def main():
     # ── Load & plot ─────────────────────────────────────────────────────
     fig, ax = plt.subplots(figsize=(10, 5))
     ranking: list[tuple[str, float, int]] = []  # (name, tail_mean, n_points)
+    steps_found: list[tuple[str, list[int]]] = []  # (name, list[step])
 
     exp_pbar = tqdm(experiment_runs.items(), desc="Experiments", unit="exp")
     for exp_name, run_group in exp_pbar:
@@ -428,6 +502,18 @@ def main():
         all_steps = np.array(all_steps)[order]
         all_vals = np.array(all_vals)[order]
 
+        if args.scrape_from_logs:
+            assert keys[0] == args.step_key
+            try:
+                rows = scrape_from_logs(run_group, args.step_key, keys[1:], args.tail)
+                steps_tail = [row[args.step_key] for row in rows]
+                vals_tail = [row[args.metric] for row in rows]
+                assert len(steps_tail) == len(vals_tail) == args.tail, f"{steps_tail, vals_tail, args.tail}"
+                all_steps[-args.tail:] = steps_tail
+                all_vals[-args.tail:] = vals_tail
+            except PermissionError:
+                print("PermissionError:", exp_name)
+
         # Deduplicate: for repeated steps keep the value from the latest run.
         # Runs are sorted by name so later restarts come last — keep last occurrence.
         _, unique_idx = np.unique(all_steps[::-1], return_index=True)
@@ -435,6 +521,7 @@ def main():
         unique_idx.sort()
         all_steps = all_steps[unique_idx]
         all_vals = all_vals[unique_idx]
+        steps_found.append((exp_name, all_steps))
 
         tail_k = min(args.tail, len(all_vals))
         tail_mean = float(np.mean(all_vals[-tail_k:]))
@@ -444,6 +531,10 @@ def main():
             all_steps, all_vals, window=args.smooth, max_points=args.max_points
         )
         ax.plot(plot_steps, plot_vals, linewidth=1.2, label=exp_name)
+
+    tails = {name: tuple(steps)[-args.tail:] for name, steps in steps_found}
+    if len(set(tails.values())) > 1:
+        raise ValueError(f"Not all tails have same x axis:" + "\n".join(f"{name}: {tail}" for name, tail in tails.items()))
 
     ax.set_xlabel("Iteration", fontsize=12)
     ax.set_ylabel(args.metric, fontsize=12)
