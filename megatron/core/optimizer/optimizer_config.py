@@ -234,6 +234,9 @@ class OptimizerConfig:
     hypersphere_mode: Optional[Literal["row", "col", "rowcol", "flat"]] = None
     """When specified, enables hypersphere constraint of the parameters, either row-wise, column-wise, row+column-wise or of the flattened vector."""
 
+    hypersphere_gains_mode: Optional[Literal["row", "col", "rowcol", "flat", "embed"]] = None
+    """When specified, enables learnable gains for matrices :)."""
+
     hypersphere_kind: Optional[Literal["l2", "standard", "spectral"]] = "l2"
     """When hypersphere constraint is enabled, specified the normalization to perform, either l2 normalization, (x-mu)/std standardization or spectral norm."""
 

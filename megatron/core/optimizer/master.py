@@ -4,6 +4,7 @@ import logging
 from typing import Callable,Optional, Literal, override
 
 import torch
+from torch import nn
 
 from . import _get_param_groups, get_megatron_optimizer
 from .ademamix import linear_hl_warmup_scheduler, linear_warmup_scheduler
@@ -50,6 +51,7 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         # Hypersphere optimization.
         hypersphere_mode: Optional[Literal["row", "col", "rowcol", "invrowcol", "equi", "flat", "embed"]] = None,
+        hypersphere_gains_mode: Optional[Literal["flat", "embed", "row", "col", "rowcol"]] = None,
         hypersphere_kind: Optional[Literal["l2", "standard", "spectral", "orthogonal"]] = None,
         hypersphere_radius: Literal["learnable"] | float = 1.0,
         hypersphere_eps: float = 1e-8,
@@ -83,6 +85,7 @@ class MasterOptimizer(torch.optim.Optimizer):
         self.weight_decay_method = weight_decay_method
 
         self.hypersphere_mode = hypersphere_mode
+        self.hypersphere_gains_mode = hypersphere_gains_mode
         self.hypersphere_kind = hypersphere_kind
         self.hypersphere_radius = hypersphere_radius
         self.hypersphere_eps = hypersphere_eps
@@ -90,6 +93,7 @@ class MasterOptimizer(torch.optim.Optimizer):
         self.hypersphere_update_embeddings = hypersphere_update_embeddings
         self.hypersphere_project = hypersphere_project
         self.hypersphere_soft = hypersphere_soft
+        assert self.hypersphere_gains_mode is None or not split_qkv
 
         self.split_qkv = split_qkv
         self.split_qkv_heads  = split_qkv_heads
@@ -138,6 +142,7 @@ class MasterOptimizer(torch.optim.Optimizer):
                         is_qkv = self.is_qkv_fn(p)
                         is_out_proj = getattr(p, "is_out_proj", False)
                         self._normalize(p, p, is_qkv=is_qkv, is_out_proj=is_out_proj)
+        self._setup_inner_opts()
 
     @torch.no_grad()  # type: ignore[misc]
     @override
@@ -153,24 +158,40 @@ class MasterOptimizer(torch.optim.Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
-        for group in self.param_groups:
+        #for group in self.param_groups:
+        for gi, group in enumerate(self.param_groups):
             group["step"] += 1
 
             if "momentum_beta" not in group:  # To be able to use old checkpoints.
                 group["momentum_beta"] = group["beta1"]
-            for p in group["params"]:
+            #for p in group["params"]:
+            for pi, p in enumerate(group["params"]):
+                #if gi == 0 and pi == 0:
+                #    print("norm:", torch.norm(p))
+                #    print("Gains:", self.state[p]["flat_gain"])
                 if p.grad is not None:
                     self._param_step(p, group)
 
+        if len(self.inner_opts) > 0:
+            for inner_opt in self.inner_opts.values():
+                inner_opt.step()
+                inner_opt.zero_grad()
+
+            # p was already normalized inside _param_step, but we needed to wait for the
+            # inner_opt steps in order to rescale p according to its updated gains.
+            for group in self.param_groups:
+                for p in group["params"]:
+                    self._apply_gains(p)
         return loss
 
 
     def _param_step(self, p, group):
+        self._preprocess_gains(p)
         grad = p.grad
         state = self.state[p]
 
         # Initialization.
-        if len(state) == 0:
+        if "exp_avg" not in state:  # row_gain could be already in state if we are using learnable gains.
             state["exp_avg"] = torch.zeros_like(grad)
             # TODO: Make it such that we can use ademamix-like updates with muon.
             if not group["use_orthogonal_updates"]: 
@@ -283,6 +304,48 @@ class MasterOptimizer(torch.optim.Optimizer):
         if self.hypersphere_mode is not None:
             self._normalize(p, p, is_qkv=is_qkv, is_out_proj=is_out_proj)
 
+    @torch.no_grad()
+    def _preprocess_gains(self, p: torch.nn.Parameter):
+        state = self.state[p]
+        eps = 1e-8
+        if len(self.inner_opts) == 0:
+            return
+
+        # It is important to first update p, then gain.grad and in the end p.grad
+        # because interdependence of each other (e.g. scalar.grad requires the \hat{p} gradient,
+        # so updating p.grad before scalar.grad would be incorrect).
+        flat = state.get("flat_gain")
+        row = state.get("row_gain")
+        col = state.get("col_gain")
+        # p update.
+        if flat is not None:
+            p.div_(flat.clamp_min(eps))
+        if row is not None:
+            p.div_(row[:, None].clamp_min(eps))
+        if col is not None:
+            p.div_(col[None, :].clamp_min(eps))
+        # gain.grad update.
+        p_times_pgrad = p * p.grad
+        if flat is not None:
+            assert row is None and col is None
+            flat.grad = torch.sum(p_times_pgrad)
+        elif row is not None and col is not None:
+            row.grad = torch.sum(p_times_pgrad * col[None, :], dim=1)
+            col.grad = torch.sum(p_times_pgrad * row[:, None], dim=0)
+        elif row is not None:
+            row.grad = torch.sum(p_times_pgrad, dim=1)
+        else:
+            assert col is not None
+            col.grad = torch.sum(p_times_pgrad, dim=0)
+        # p.grad update.
+        if flat is not None:
+            p.grad.mul_(flat)
+        if row is not None:
+            p.grad.mul_(row[:, None])
+        if col is not None:
+            p.grad.mul_(col[None, :])
+        #print(f"Gains preprocessed {flat is not None or row is not None or col is not None}")
+
     def _apply_weight_decay_inplace(self, p, update, group):
         weight_decay = group["weight_decay"]
         lr = group["lr"]
@@ -295,6 +358,18 @@ class MasterOptimizer(torch.optim.Optimizer):
             else:
                 raise ValueError(f"Unknown weight decode method {weight_decay_method}")
 
+    @torch.no_grad()
+    def _apply_gains(self, p):
+        state = self.state[p]
+        flat = state.get("flat_gain")
+        row = state.get("row_gain")
+        col = state.get("col_gain")
+        if flat is not None:
+            p.mul_(flat)
+        if row is not None:
+            p.mul_(row[:, None])
+        if col is not None:
+            p.mul_(col[None, :])
 
     def orthogonalize(self, p: torch.Tensor, grad: torch.Tensor, ignore_scale: bool = False,
                       is_qkv: bool = False, **kwargs) -> torch.Tensor:
@@ -501,6 +576,99 @@ class MasterOptimizer(torch.optim.Optimizer):
         dots = torch.sum(p * g, dim=dim, keepdim=True)
         return g - (dots / self.hypersphere_radius**2) * p
 
+    def _setup_inner_opts(self):
+        row_groups = []
+        col_groups = []
+        flat_groups = []
+        for group in self.param_groups:
+            row_gains = []
+            col_gains = []
+            flat_gains = []
+            for p in group["params"]:
+                # In the following we do self.state[p].get instead of always initializating with a new gain
+                # because there is a chance this function is called inside a load_optim_states(), where the
+                # states are already loaded and we only want to link the loaded _gain parameters to their
+                # respective inner_opts.
+                is_out_proj = getattr(p, "is_out_proj", False)
+                if self.hypersphere_gains_mode and ("row" in self.hypersphere_gains_mode or self.hypersphere_gains_mode == "embed" and not is_out_proj):
+                    gain = self.state[p].get(
+                        "row_gain",
+                        nn.Parameter(torch.ones(p.size(0), dtype=torch.float32, device=p.device)),
+                    )
+                    self.state[p]["row_gain"] = gain
+                    row_gains.append(gain)
+
+                if self.hypersphere_gains_mode and ("col" in self.hypersphere_gains_mode or self.hypersphere_gains_mode == "embed" and is_out_proj):
+                    gain = self.state[p].get(
+                        "col_gain",
+                        nn.Parameter(torch.ones(p.size(1), dtype=torch.float32, device=p.device)),
+                    )
+                    self.state[p]["col_gain"] = gain
+                    col_gains.append(gain)
+
+                if self.hypersphere_gains_mode and "flat" == self.hypersphere_gains_mode:
+                    gain = self.state[p].get(
+                        "flat_gain",
+                        #nn.Parameter(torch.ones((), dtype=torch.float32, device=p.device)),
+                        torch.ones((), dtype=torch.float32, device=p.device),
+                    )
+                    self.state[p]["flat_gain"] = gain
+                    flat_gains.append(gain)
+
+            if len(row_gains) > 0:
+                row_group = {k: v for k, v in group.items() if k != "params"}
+                row_group["params"] = row_gains
+                row_groups.append(row_group)
+            if len(col_gains) > 0:
+                col_group = {k: v for k, v in group.items() if k != "params"}
+                col_group["params"] = col_gains
+                col_groups.append(col_group)
+            if len(flat_gains) > 0:
+                flat_group = {k: v for k, v in group.items() if k != "params"}
+                print("flat group pre params", flat_group)
+                flat_group["params"] = flat_gains
+                flat_groups.append(flat_group)
+
+        self.inner_opts = {}
+        if len(row_groups) > 0:
+            self.inner_opts["row"] = torch.optim.AdamW(row_groups)
+        if len(col_groups) > 0:
+            self.inner_opts["col"] = torch.optim.AdamW(col_groups)
+        if len(flat_groups) > 0:
+            self.inner_opts["flat"] = torch.optim.AdamW(flat_groups)
+
+    def state_dict(self):
+        sd = super().state_dict()
+        # When using learnable gains the state_dict of the actual inner adamW optimizers
+        # is not saved by default, so we append that to the original state dict.
+        if len(self.inner_opts) > 0:
+            sd["inner"] = {
+                name: inner.state_dict()
+                for name, inner in self.inner_opts.items()
+            }
+        return sd
+
+    def load_state_dict(self, state_dict):
+        sd = state_dict
+        if "inner" in sd:
+            inner_sds = sd.pop("inner")
+            super().load_state_dict(sd)
+            # After loading the self.state[p][*_gain] parameters we actually lose the
+            # object link between such parameter and the inner_opt parameter, so we call
+            # the setup again to refresh the link and only then load the inner opt states.
+            self._setup_inner_opts()
+            for name, inner_sd in inner_sds.items():
+                self.inner_opts[name].load_state_dict(inner_sd)
+            # We apply the gains again because when the MasterOptimizer was initialized
+            # we ran _normalize(p) of all parameters **after** loading the actual
+            # scaled values from the checkpoint (via model.load_state_dict), so we need
+            # to manually reapply all scales again.
+            for group in self.param_groups:
+                for p in group['params']:
+                    self._apply_gains(p)
+        else:
+            super().load_state_dict(sd)
+
 
 def split_qkv(x, shapes: tuple[int, int, int]) -> list[torch.Tensor]:
     # split grouped attention parameters (e.g., QKV, GQA, etc.)
@@ -605,7 +773,7 @@ def get_megatron_master_optimizer(
     def master_init_state_fn(opt, config=None):
         for group in opt.param_groups:
             for p in group['params']:
-                if len(opt.state[p]) == 0:
+                if "exp_avg" not in opt.state[p]:
                     opt.state[p]["exp_avg"] = torch.zeros_like(p.data)
                     if not group["use_orthogonal_updates"]:  # Enables g^2 EMA as in adam & ademamix.
                         if group["beta2"] != 0:
@@ -616,7 +784,7 @@ def get_megatron_master_optimizer(
     def adam_init_state_fn(opt, config=None):
         for group in opt.param_groups:
             for p in group['params']:
-                if len(opt.state[p]) == 0:
+                if "exp_avg" not in opt.state[p]:
                     if config is None or not config.use_precision_aware_optimizer:
                         opt.state[p]['exp_avg'] = torch.zeros_like(p.data)
                         opt.state[p]['exp_avg_sq'] = torch.zeros_like(p.data)
@@ -676,6 +844,7 @@ def get_megatron_master_optimizer(
 
         # Hypersphere optimization.
         "hypersphere_mode": config.hypersphere_mode,
+        "hypersphere_gains_mode": config.hypersphere_gains_mode,
         "hypersphere_kind": config.hypersphere_kind,
         "hypersphere_radius": config.hypersphere_radius,
         "hypersphere_update": config.hypersphere_update,
