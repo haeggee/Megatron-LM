@@ -436,6 +436,9 @@ class MasterOptimizer(torch.optim.Optimizer):
             #else:
             #    print("avg norm:", norm.mean())
             x.mul_(self.hypersphere_radius / norm)
+            if self.hypersphere_mode == "flat":
+                shape_max = max(x.size(-2), x.size(-1))
+                x.mul_(shape_max ** 0.5)
         elif self.hypersphere_kind == "spectral":
             assert self.hypersphere_mode == "flat"
             norm = spectral_norm(x).clamp_min(eps)
