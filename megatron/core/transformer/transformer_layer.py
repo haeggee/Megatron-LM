@@ -427,6 +427,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             submodules.mlp_layerscale,
             hidden_size=self.config.hidden_size,
             initial_value=self.config.layer_scale,
+            scale=self.config.layer_scale_scale,
             sequence_parallel=self.config.sequence_parallel,
         )
 
