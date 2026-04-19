@@ -117,6 +117,23 @@ class L2Norm(torch.nn.Module):
         """
         return self._norm(x)
 
+class RMSNormNoGain(torch.nn.Module):
+    """RMSNorm without learnable gain: x / sqrt(mean(x^2) + eps)."""
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6, **kwargs):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.eps = eps
+
+    @jit_fuser
+    def _norm(self, x):
+        x_float = x.float()
+        return (x_float * torch.rsqrt(x_float.pow(2).mean(-1, keepdim=True) + self.eps)).type_as(x)
+
+    def forward(self, x):
+        return self._norm(x)
+
+
 class SeeDNorm(torch.nn.Module):
     """SeeDNorm implementation following the SeeDNorm pseudocode."""
 

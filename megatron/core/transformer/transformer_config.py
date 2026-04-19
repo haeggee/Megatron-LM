@@ -150,6 +150,9 @@ class TransformerConfig(ModelParallelConfig):
     post_norm: bool = False
     """If set, post-attn and post-mlp layernorm will be used."""
 
+    post_norm_no_gain: bool = False
+    """If set with post_norm=True, post-attn and post-mlp norms use RMSNorm without learnable gain."""
+
     post_block_norm: bool = False
     """If set, post-attn block and post-mlp block layernorm will be used (applied after the residual connection)."""
 

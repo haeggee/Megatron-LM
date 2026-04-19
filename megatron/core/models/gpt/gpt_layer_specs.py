@@ -26,7 +26,7 @@ from megatron.core.transformer.multi_token_prediction import (
 )
 from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
 from megatron.core.transformer.spec_utils import ModuleSpec
-from megatron.core.transformer.torch_norm import L2Norm, LayerScale
+from megatron.core.transformer.torch_norm import L2Norm, LayerScale, RMSNormNoGain
 from megatron.core.transformer.transformer_block import (
     TransformerBlockSubmodules,
     get_num_layers_to_build,
@@ -303,8 +303,12 @@ def get_gpt_layer_with_transformer_engine_spec(
 
         # Postnorm logic: easier because there's no fusion.
         if config.post_norm:
-            post_attention_layer_norm = main_norm_cls
-            post_mlp_layernorm = main_norm_cls
+            if config.post_norm_no_gain:
+                post_attention_layer_norm = RMSNormNoGain
+                post_mlp_layernorm = RMSNormNoGain
+            else:
+                post_attention_layer_norm = main_norm_cls
+                post_mlp_layernorm = main_norm_cls
         else:
             post_attention_layer_norm = IdentityOp
             post_mlp_layernorm = IdentityOp
