@@ -124,10 +124,12 @@ class InternalsLogger:
         self._dp_group = None
         self._split_info = None
         self._linear_entries = None
-        self._master_optimizer = None
-        self._megatron_optimizer_wrapper = None
+        # List of (megatron_wrapper, inner_optimizer, type_str) for update-step logging.
+        # type_str is 'master', 'muon', or 'generic'.
+        self._optimizer_bindings: List[Tuple[Any, Any, str]] = []
         self._update_hook_registered = False
         self._update_step_stats: Dict[str, dict] = {}
+        self._param_to_name: Dict[int, str] = {}
 
     def snapshot_weights(self, model: nn.Module) -> None:
         """Snapshot current weights before the training step.
@@ -150,6 +152,10 @@ class InternalsLogger:
         Always stores the DP group (needed for activation stat reduction even
         without distributed optimizer).
 
+        Also classifies each sub-optimizer for update-step norm logging:
+        'master' (MasterOptimizer), 'muon' (TensorParallelMuon), or 'generic'
+        (Adam / FusedAdam — uses snapshot-delta recovery in the wrapper).
+
         Args:
             optimizer: The training optimizer (ChainedOptimizer or similar).
         """
@@ -157,27 +163,36 @@ class InternalsLogger:
         from megatron.core.parallel_state import get_data_parallel_group
         from megatron.core.optimizer.master import MasterOptimizer
 
+        try:
+            from megatron.core.optimizer.muon import TensorParallelMuon
+        except ImportError:
+            TensorParallelMuon = None
+
         def _inner(megatron_opt):
             """Return the underlying torch optimizer from a MegatronOptimizer wrapper."""
             return getattr(megatron_opt, 'optimizer', None)
 
+        def _classify(megatron_opt):
+            inner = _inner(megatron_opt)
+            if isinstance(inner, MasterOptimizer):
+                return (megatron_opt, inner, 'master')
+            elif TensorParallelMuon is not None and isinstance(inner, TensorParallelMuon):
+                return (megatron_opt, inner, 'muon')
+            else:
+                return (megatron_opt, inner, 'generic')
+
+        self._optimizer_bindings = []
         if hasattr(optimizer, 'chained_optimizers'):
             for opt in optimizer.chained_optimizers:
                 if isinstance(opt, DistributedOptimizer):
                     self._dist_optimizer = opt
                     self._dp_group = opt.data_parallel_group
-                    break
-            for opt in optimizer.chained_optimizers:
-                if isinstance(_inner(opt), MasterOptimizer):
-                    self._master_optimizer = _inner(opt)
-                    self._megatron_optimizer_wrapper = opt
-                    break
+                self._optimizer_bindings.append(_classify(opt))
         elif isinstance(optimizer, DistributedOptimizer):
             self._dist_optimizer = optimizer
             self._dp_group = optimizer.data_parallel_group
-        elif isinstance(_inner(optimizer), MasterOptimizer):
-            self._master_optimizer = _inner(optimizer)
-            self._megatron_optimizer_wrapper = optimizer
+        else:
+            self._optimizer_bindings.append(_classify(optimizer))
 
         # Always store the DP group for activation stat reduction
         if self._dp_group is None:
@@ -255,10 +270,15 @@ class InternalsLogger:
             delta_y_metrics = self._compute_delta_y_metrics(model)
             metrics.update(delta_y_metrics)
 
-        # 6. Update step statistics (MasterOptimizer orthogonalized update row/col norms)
-        if self.config.log_update_step_stats and self._master_optimizer is not None and self.is_logging_rank:
+        # 6. Update step statistics (row/col norms of parameter updates)
+        if self.config.log_update_step_stats and self._optimizer_bindings and self.is_logging_rank:
             update_metrics = self._compute_update_step_metrics()
             metrics.update(update_metrics)
+
+        # 7. Gain norms (GainsMasterOptimizer only)
+        if self._optimizer_bindings and self.is_logging_rank:
+            gain_metrics = self._compute_gain_metrics()
+            metrics.update(gain_metrics)
 
         # Log all metrics to W&B (logging rank only)
         if self.is_logging_rank and metrics and wandb_writer is not None:
@@ -270,15 +290,15 @@ class InternalsLogger:
         self.state_manager.clear()
 
     def _register_update_hook_if_needed(self, model: nn.Module) -> None:
-        """Register a param-update hook on MasterOptimizer to collect row/col norm stats.
+        """Register param-update hooks on all bound optimizers to collect row/col norm stats.
 
-        Called before each optimizer step. The hook runs inside MasterOptimizer._param_step
-        and accumulates stats into self._update_step_stats on this logger.
+        Called before each optimizer step. For MasterOptimizer and TensorParallelMuon
+        the hook runs inside the per-param step; for generic optimizers (Adam) the
+        wrapper computes the update from weight deltas and calls the hook after step.
 
-        MasterOptimizer operates on fp32 copies, not the original model params, so we
-        build the id→name map via the wrapper's float16_groups/fp32_from_float16_groups.
+        Hooks accumulate stats into ``self._update_step_stats`` on this logger.
         """
-        if self._master_optimizer is None or self._update_hook_registered:
+        if not self._optimizer_bindings or self._update_hook_registered:
             return
 
         from megatron.core.optimizer.master import split_qkv as _split_qkv
@@ -286,8 +306,7 @@ class InternalsLogger:
         # Build fp32-copy id → name, starting from model param ids (covers FP32Optimizer)
         fp16_to_name = {id(p): name for name, p in model.named_parameters()}
         param_to_name = dict(fp16_to_name)
-        wrapper = self._megatron_optimizer_wrapper
-        if wrapper is not None:
+        for wrapper, inner_opt, opt_type in self._optimizer_bindings:
             for g16, g32 in zip(
                 getattr(wrapper, 'float16_groups', []),
                 getattr(wrapper, 'fp32_from_float16_groups', []),
@@ -296,8 +315,8 @@ class InternalsLogger:
                     name = fp16_to_name.get(id(p16))
                     if name is not None:
                         param_to_name[id(p32)] = name
+        self._param_to_name = param_to_name
 
-        master_opt = self._master_optimizer
         logger_self = self
 
         def _store(key: str, tensor: torch.Tensor) -> None:
@@ -312,18 +331,39 @@ class InternalsLogger:
                 'col_norm_std':  col_norm.std().item(),
             }
 
-        def _hook(p: torch.Tensor, update: torch.Tensor, is_qkv: bool) -> None:
-            name = param_to_name.get(id(p))
-            if name is None:
-                return
-            if is_qkv and master_opt.split_qkv and master_opt.qkv_split_shapes is not None:
-                qs, ks, vs = _split_qkv(update, master_opt.qkv_split_shapes)
-                for comp_name, comp in [('Q', qs), ('K', ks), ('V', vs)]:
-                    _store(f'{name}/{comp_name}', comp)
-            else:
-                _store(name, update)
+        def _make_hook(opt):
+            """Build a hook closure that reads split_qkv / qkv_split_shapes from *opt*."""
+            split_qkv = getattr(opt, 'split_qkv', False)
+            qkv_split_shapes = getattr(opt, 'qkv_split_shapes', None)
 
-        master_opt._param_update_hook = _hook
+            def _hook(p: torch.Tensor, update: torch.Tensor, is_qkv: bool) -> None:
+                name = param_to_name.get(id(p))
+                if name is None:
+                    return
+                if is_qkv and split_qkv and qkv_split_shapes is not None:
+                    qs, ks, vs = _split_qkv(update, qkv_split_shapes)
+                    for comp_name, comp in [('Q', qs), ('K', ks), ('V', vs)]:
+                        _store(f'{name}/{comp_name}', comp)
+                else:
+                    _store(name, update)
+            return _hook
+
+        for wrapper, inner_opt, opt_type in self._optimizer_bindings:
+            if opt_type in ('master', 'muon'):
+                # MasterOptimizer and TensorParallelMuon both have _param_update_hook
+                inner_opt._param_update_hook = _make_hook(inner_opt)
+            elif opt_type == 'generic':
+                # Generic optimizer: hook set on the wrapper; the wrapper's
+                # step_with_ready_grads() recovers the update from weight deltas.
+                # For QKV splitting, try to find shapes from a sibling optimizer.
+                hook_opt = inner_opt
+                if not getattr(inner_opt, 'qkv_split_shapes', None):
+                    for _, other_inner, _ in self._optimizer_bindings:
+                        if getattr(other_inner, 'qkv_split_shapes', None):
+                            hook_opt = other_inner
+                            break
+                wrapper._param_update_hook = _make_hook(hook_opt)
+
         self._update_hook_registered = True
 
     def _compute_update_step_metrics(self) -> Dict[str, float]:
@@ -336,6 +376,27 @@ class InternalsLogger:
             metrics[f'update_steps/col_norm_mean/{clean}'] = stats['col_norm_mean']
             metrics[f'update_steps/col_norm_std/{clean}']  = stats['col_norm_std']
         self._update_step_stats.clear()
+        return metrics
+
+    def _compute_gain_metrics(self) -> Dict[str, float]:
+        """Log gain norms for GainsMasterOptimizer parameters."""
+        from megatron.core.optimizer.master import GainsMasterOptimizer
+
+        metrics: Dict[str, float] = {}
+        for _wrapper, inner_opt, opt_type in self._optimizer_bindings:
+            if opt_type != 'master' or not isinstance(inner_opt, GainsMasterOptimizer):
+                continue
+            for group in inner_opt.param_groups:
+                for p in group['params']:
+                    name = self._param_to_name.get(id(p))
+                    if name is None:
+                        continue
+                    state = inner_opt.state.get(p, {})
+                    clean = name.replace('.', '/')
+                    for gain_key in ('row_gain', 'col_gain', 'flat_gain'):
+                        gain = state.get(gain_key)
+                        if gain is not None:
+                            metrics[f'gains/{gain_key}_norm/{clean}'] = gain.norm().item()
         return metrics
 
     def _compute_activation_metrics(self) -> Dict[str, float]:

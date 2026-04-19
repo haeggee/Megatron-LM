@@ -2210,7 +2210,7 @@ def _add_regularization_args(parser):
                        help='LR multiplier for embedding/output parameters in the master optimizer. '
                             'Final LR = embedding_lr_multiplier * lr. If None, uses muon-lr-factor * lr.')
     group.add_argument('--hypersphere-mode', type=_float_or_str)
-    group.add_argument('--hypersphere-gains-mode')
+    group.add_argument('--hypersphere-gains-mode', choices=["flat", "embed", "row", "col", "rowcol"])
     group.add_argument('--hypersphere-kind', type=_float_or_str, default="l2")
     group.add_argument('--hypersphere-radius', type=_float_or_str, default=1.0)
     group.add_argument('--hypersphere-no-update', action="store_false", dest="hypersphere_update")
