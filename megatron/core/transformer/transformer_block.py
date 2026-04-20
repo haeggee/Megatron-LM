@@ -373,12 +373,20 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         # In pipeline parallelism, we want to add this LN only to the last stage of the pipeline
         # self.post_process guide this behavior
         if self.submodules.layer_norm and self.post_process and self.config.final_layernorm:
-            self.final_layernorm = build_module(
-                self.submodules.layer_norm,
-                config=self.config,
-                hidden_size=self.config.hidden_size,
-                eps=self.config.layernorm_epsilon,
-            )
+            if self.config.final_layernorm_no_gain:
+                from megatron.core.transformer.torch_norm import RMSNormNoGain
+
+                self.final_layernorm = RMSNormNoGain(
+                    hidden_size=self.config.hidden_size,
+                    eps=self.config.layernorm_epsilon,
+                )
+            else:
+                self.final_layernorm = build_module(
+                    self.submodules.layer_norm,
+                    config=self.config,
+                    hidden_size=self.config.hidden_size,
+                    eps=self.config.layernorm_epsilon,
+                )
         else:
             self.final_layernorm = None  # Either this or nn.Identity
 
