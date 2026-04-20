@@ -18,7 +18,7 @@ PYTHON_CACHE_DIR=/tmp/.python_cache
 
 # Hardware defaults.
 NODES=1
-TIME=10:00:00
+TIME=12:00:00
 
 # Arch defaults.
 NORMALIZATION=RMSNorm
@@ -128,8 +128,8 @@ usage () {
 	echo " --hs-u: hypersphere normalize update"
 	echo " --hs-embed: hypersphere normalize embeddings"
 	echo " --hs-emb-no-orthogonal: Don't use muon update on embeddings, but keep fixed to the sphere (if --hs-embed is also set, otherwise no effect)"
-	echo " --hs-no-split-qkv"
 	echo " --hs-split-heads: hypersphere normalize q,k,v heads separately"
+	echo " --hs-g <flat/embed/row/col/rowcol>: hypersphere gains mode"
 	echo " --hs-p: project gradient to tangent space"
 	echo " --hs-s: soft hyperball norm clipping."
 	# Logs.
@@ -161,7 +161,7 @@ if [[ $1 -eq 110 ]]; then
 	ITERS_PER_BT=2000
 	LR=0.002
 	SIZE=110
-	SAVE_FREQ=100
+	SAVE_FREQ=10000
 	DEF_TOKENS=25
 	INTERMEDIATE_METRICS_INTERVAL=10
 	SCALE=M
@@ -461,8 +461,6 @@ while [[ $# -gt 0 ]]; do
 			WSD=$2; shift 2;;
 		--hs)
 			HYPERBALL=$2; shift 2;;
-		--hs-g)
-			HS_GAINS=$2; shift 2;;
 		--hs-kind)
 			HS_KIND=$2; shift 2;;
 		--hs-r)
@@ -473,12 +471,12 @@ while [[ $# -gt 0 ]]; do
 			HS_EMBED=true; shift;;
 		--hs-embed-no-orthogonal)
 			HS_EMBED_NO_ORTHOGONAL=true; shift;;
-		--hs-no-split-qkv)
-			HS_SPLIT_QKV=false; shift;;
 		--hs-split-heads)
 			HS_SPLIT_HEADS=true; shift;;
 		--hs-split-heads-update)
 			HS_SPLIT_HEADS_UPDATE=true; shift;;
+		--hs-g)
+			HS_GAINS_MODE=$2; shift 2;;
 		--hs-p)
 			HS_PROJECT=true; shift;;
 		--hs-s)
@@ -624,11 +622,6 @@ if [[ $HYPERBALL != false ]]; then
 	fi
 	SUFFIX=$SUFFIX-HS${HYPERBALL}${HS_R}_${HS_KIND}_it0
 	OPT_ARGS+=(--hypersphere-mode $HYPERBALL --hypersphere-kind $HS_KIND --hypersphere-radius $HS_R)
-	if [[ ! -z "${HS_GAINS}" ]]; then
-		SUFFIX=${SUFFIX}_G$HS_GAINS
-		DISABLE_ASYNC=true
-		OPT_ARGS+=(--hypersphere-gains-mode $HS_GAINS --ckpt-format torch)
-	fi
 	if [[ $HS_UPDATE = true ]]; then
 		SUFFIX=${SUFFIX}_u
 	else
@@ -642,16 +635,13 @@ if [[ $HYPERBALL != false ]]; then
 			OPT_ARGS+=(--no-use-orthogonal-embeddings)
 		fi
 	fi
-	if [[ $HS_SPLIT_QKV = false ]]; then
-		SUFFIX=${SUFFIX}_noQKV
-		OPT_ARGS+=(--muon-no-split-qkv)
-	elif [[ $HS_SPLIT_HEADS = true ]]; then
+	if [[ $HS_SPLIT_HEADS = true ]]; then
 		SUFFIX=${SUFFIX}_sh
 		OPT_ARGS+=(--hypersphere-split-heads)
-		if [[ $HS_SPLIT_HEADS_UPDATE = true ]]; then
-			SUFFIX=${SUFFIX}_shu
-			OPT_ARGS+=(--hypersphere-split-heads-update)
-		fi
+	fi
+	if [[ $HS_SPLIT_HEADS_UPDATE = true ]]; then
+		SUFFIX=${SUFFIX}_shu
+		OPT_ARGS+=(--hypersphere-split-heads-update)
 	fi
 	if [[ $HS_PROJECT = true ]]; then
 		SUFFIX=${SUFFIX}_p
@@ -660,6 +650,10 @@ if [[ $HYPERBALL != false ]]; then
 	if [[ $HS_SOFT = true ]]; then
 		SUFFIX=${SUFFIX}_s
 		OPT_ARGS+=(--hypersphere-soft)
+	fi
+	if [[ ! -z "${HS_GAINS_MODE+xxx}" ]]; then
+		SUFFIX=${SUFFIX}_g${HS_GAINS_MODE}
+		OPT_ARGS+=(--hypersphere-gains-mode $HS_GAINS_MODE)
 	fi
 fi
 
@@ -1020,11 +1014,9 @@ SCHEDULER_ARGS=(
 	--lr-warmup-iters $WARMUP
 )
 
-if [ "$DISABLE_ASYNC" != true ]; then
-	EXTRA_ARGS+=(
-		--async-save
-	)
-fi
+EXTRA_ARGS+=(
+	--async-save
+)
 
 ARGS="${LLAMA_ARGS[@]} ${TRAINING_ARGS[@]} ${SCHEDULER_ARGS[@]} ${DATA_ARGS[@]} ${LOGGING[@]} ${EXTRA_ARGS[@]} ${FP8_ARGS[@]} ${ARCH_ARGS[@]} ${OPT_ARGS[@]} ${DECAY_ARGS[@]}"
 
