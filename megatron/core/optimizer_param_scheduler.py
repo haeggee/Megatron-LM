@@ -137,7 +137,7 @@ class OptimizerParamScheduler:
         assert self.lr_warmup_steps < self.lr_decay_steps
 
         self.lr_decay_style = lr_decay_style
-        if self.lr_decay_style == "WSD":
+        if self.lr_decay_style in ("WSD", "inverse-square-root-WSD"):
             assert self.wsd_decay_steps is not None
 
         self.start_wd = start_wd
@@ -261,6 +261,39 @@ class OptimizerParamScheduler:
                     coeff = (1.0 - wsd_decay_ratio)**3
                 elif self.lr_wsd_decay_style == "sqrt_pow2":
                     coeff = (1 - math.sqrt(wsd_decay_ratio))**2
+
+        elif self.lr_decay_style == 'inverse-square-root-WSD':
+            warmup_steps = max(self.lr_warmup_steps, 1)
+            wsd_anneal_start_ = self.lr_decay_steps - self.wsd_decay_steps
+            if self.num_steps <= wsd_anneal_start_:
+                isr_lr = max_lr * warmup_steps**0.5 / (max(self.num_steps, 1) ** 0.5)
+                return max(min_lr, isr_lr)
+            else:
+                isr_lr_at_anneal = max_lr * warmup_steps**0.5 / (wsd_anneal_start_ ** 0.5)
+                isr_lr_at_anneal = max(min_lr, isr_lr_at_anneal)
+                wsd_steps = self.num_steps - wsd_anneal_start_
+                wsd_decay_ratio = float(wsd_steps) / float(self.wsd_decay_steps)
+                if self.lr_wsd_decay_style == "linear":
+                    decay_coeff = 1.0 - wsd_decay_ratio
+                elif self.lr_wsd_decay_style == "cosine":
+                    decay_coeff = 0.5 * (math.cos(math.pi * wsd_decay_ratio) + 1.0)
+                elif self.lr_wsd_decay_style == "exponential":
+                    decay_coeff = (2.0 * math.pow(0.5, wsd_decay_ratio)) - 1.0
+                elif self.lr_wsd_decay_style == "minus_sqrt":
+                    decay_coeff = 1.0 - math.sqrt(wsd_decay_ratio)
+                elif self.lr_wsd_decay_style == "minus_cbrt":
+                    decay_coeff = 1.0 - wsd_decay_ratio**(1/3)
+                elif self.lr_wsd_decay_style == "minus_cbcrt":
+                    decay_coeff = 1.0 - wsd_decay_ratio**(1/4)
+                elif self.lr_wsd_decay_style == "power2":
+                    decay_coeff = (1.0 - wsd_decay_ratio)**2
+                elif self.lr_wsd_decay_style == "power3":
+                    decay_coeff = (1.0 - wsd_decay_ratio)**3
+                elif self.lr_wsd_decay_style == "sqrt_pow2":
+                    decay_coeff = (1 - math.sqrt(wsd_decay_ratio))**2
+                else:
+                    raise Exception(f'{self.lr_wsd_decay_style} wsd decay style is not supported.')
+                return min_lr + decay_coeff * (isr_lr_at_anneal - min_lr)
 
         else:
             raise Exception(f'{self.lr_decay_style} decay style is not supported.')

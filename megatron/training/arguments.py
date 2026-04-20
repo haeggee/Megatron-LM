@@ -1843,6 +1843,7 @@ def _add_network_size_args(parser):
     group.add_argument('--post-block-norm', action='store_true')
     group.add_argument('--no-learnable-norms', action='store_false', dest='learnable_norms')
     group.add_argument('--post-norm-no-gain', action='store_true')
+    group.add_argument('--final-layernorm-no-gain', action='store_true')
     group.add_argument('--qk-layer-scale', type=float)
     group.add_argument('--qk-layer-scale-scale', type=float)
     group.add_argument('--layer-scale', type=float)
@@ -2642,7 +2643,7 @@ def _add_learning_rate_args(parser):
                        'and initial warmup, the learning rate at each '
                        'iteration would be different.')
     group.add_argument('--lr-decay-style', type=str, default='linear',
-                       choices=['constant', 'linear', 'cosine', 'inverse-square-root', 'WSD'],
+                       choices=['constant', 'linear', 'cosine', 'inverse-square-root', 'WSD', 'inverse-square-root-WSD'],
                        help='Learning rate decay function.')
     group.add_argument('--lr-wsd-decay-style', type=str, default='exponential',
                        choices=['exponential', 'linear', 'cosine', 'minus_sqrt', 'minus_cbrt', 'minus_cbcrt', 'power2', 'power3', 'sqrt_pow2'],

@@ -188,6 +188,9 @@ class TransformerConfig(ModelParallelConfig):
     final_layernorm: bool = True
     """If set, a layernorm will be applied to the output of the very last transformer layer (just before the output projection)."""
 
+    final_layernorm_no_gain: bool = False
+    """If set with final_layernorm=True, the final layernorm uses RMSNorm without learnable gain."""
+
     add_bias_linear: bool = True
     """Include a bias term in all linear layers (QKV projections, after core attention, and two in
     MLP layer)."""
