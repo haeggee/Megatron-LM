@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Plot tail-loss vs. a hyperparameter for groups of W&B runs.
 
-Each 'plot' in PLOTS produces one matplotlib figure.  A plot contains one or
-more 'subplots' (panels); each subplot sweeps one parameter and shows multiple
-'series' (lines) for different configurations.
+Plot configurations are loaded from YAML files in scripts/sweep_configs/.
+Each YAML file defines one figure with one or more subplot panels.  Pass
+specific files via --configs, or omit to load all *.yaml files in that
+directory (sorted by filename).
 
 X-axis values are auto-extracted from run names using regex patterns defined in
 X_PARAM_PATTERNS.  When a pattern is not found in a run name, the series-level
@@ -20,15 +21,17 @@ from collections import defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from plotting_utils import set_plot_style
 import numpy as np
+import yaml
 from tqdm import tqdm
 import wandb
 
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
-WANDB_ENTITY = "alehc"
-WANDB_PROJECT = "opt_v1"
+WANDB_ENTITY = "epfl-relay"
+WANDB_PROJECT = "megatron_opt_v1"
 
 CACHE_DIR = Path(__file__).resolve().parent / ".wandb_sweep_cache"
 
@@ -45,472 +48,60 @@ X_PARAM_PATTERNS: dict[str, str] = {
     "b":   r"(?<![a-z])b(\d+\.\d+)",                   # b0.9
 }
 
-# ── Plot configuration ────────────────────────────────────────────────────────
-#
-# PLOTS is a list of figures.  Each entry:
-#   title      – figure suptitle
-#   subplots   – list of subplot panels (arranged side by side)
-#
-# Each subplot:
-#   title        – panel title
-#   x_label      – x-axis label
-#   x_param      – key in X_PARAM_PATTERNS to extract from run names
-#   series       – list of lines to draw
-#
-# Each series:
-#   label            – legend label
-#   default_x_value  – fallback x when x_param is absent from run name
-#   runs             – list of experiment specs:
-#                      • plain string  → uses WANDB_ENTITY / WANDB_PROJECT
-#                      • dict with "name" (required), "entity", "project" (optional overrides)
-#
-# Edit PLOTS to define your comparisons. Examples are filled in below.
+DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent / "sweep_configs"
 
-PLOTS = [
-    # ── Figure 1: LR sweep ────────────────────────────────────────────────────
-    {
-        "title": "Baseline vs ngpt vs Spherical Adam",
-        "subplots": [
-            {
-                "title": "Baseline vs Master A0 (with / without embed)",
-                "x_label": "Learning Rate",
-                "x_param": "lr",
-                "series": [
-                    {
-                        "label": "Baseline (Llama + WSD + AdamW)",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            "110M-n1",
-                            "110M-lr0.004-n1",
-                            "110M-lr0.001-n1",
-                        ],
-                    },
-                    {
-                        "label": "OUR MAIN Master A0 + emb + no hs u + lg layerscale 1",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-qkRMS-nPre-nFin-pst-ls1S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.001-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "OUR MAIN Master A0 + emb + no hs u + lg layerscale 0.044",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls0.083S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Baseline w/ cos",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            "110M-lr0.004-cos-n1",
-                            "110M-lr0.003-cos-n1",
-                        ],
-                    },
-                    {
-                        "label": "Master A0 + ngpt (hs emb, no hs u, logit layerscale)",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            # run incoming
-                            # {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-lr0.003-std0.044-ngpt-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-lr0.004-std0.044-ngpt-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-lr0.001-std0.044-ngpt-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-std0.044-ngpt-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Baseline Llama with HyperAdam",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-std0.044-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Muon mlr4, m0.95, urm",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-muon_h_m0.95_mlr4_urm-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    }
-                ],
-            },
-            {
-                "title": "Norm Axis Sweep",
-                "x_label": "Learning Rate",
-                "x_param": "lr",
-                "series": [
-                    {
-                        "label": "Baseline (Llama)",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            "110M-n1",
-                            "110M-lr0.004-n1",
-                            "110M-lr0.001-n1",
-                        ],
-                    },
-                    {
-                        "label": "OUR MAIN Master A0 + emb + no hs u + lg layerscale 1",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-qkRMS-nPre-nFin-pst-ls1S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.001-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "MAIN Master A0 + emb + no hs u + lg ls 0.044",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls0.083S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Frob R=22.62 (sqrt(d)) + no hs embed + no hs u + lg ls 1",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSflat22.62_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSflat22.62_l2_it0-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Frob R=22.62 (sqrt(d)) + no hs-embed + hs u + lgls 1",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSflat22.62_l2_it0_u-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSflat22.62_l2_it0_u-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Row + no hs-embed + no hs u + lg ls 1",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSrow1_l2_it0-lr0.001-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSrow1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSrow1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Row + hs-embed + no hs u + lg ls 1",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSrow1_l2_it0_emb-lr0.001-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSrow1_l2_it0_emb-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            # run incoming
-                            # {"name": "110M-master_h_a0-wd0-HSrow1_l2_it0_emb-lr0.003-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSrow1_l2_it0_emb-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Col  + no hs-embed + no hs u + lg ls 1",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HScol1_l2_it0-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "RowCol + no hs-embed + no hs u + lg ls 1",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSrowcol1_l2_it0-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSrowcol1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "RowCol + no hs-embed + hs u + lg ls 1",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSrowcol1_l2_it0_u-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSrowcol1_l2_it0_u-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                ],
-            },
-        ],
-    },
-    {
-        "title": "With / Without Embeddings, Sphere Updates, Poor Man's Ortho",
-        "subplots": [
-            {
-                "title": "Baseline vs Master A0 (with / without embed)",
-                "x_label": "Learning Rate",
-                "x_param": "lr",
-                "series": [
-                    {
-                        "label": "Baseline (Llama + WSD + AdamW)",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            "110M-n1",
-                            "110M-lr0.004-n1",
-                            "110M-lr0.001-n1",
-                        ],
-                    },
-                    {
-                        "label": "OUR MAIN Master A0 + emb + no hs u + lg layerscale 1",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-qkRMS-nPre-nFin-pst-ls1S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.001-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "OUR MAIN Master A0 + emb + no hs u + lg layerscale 0.044",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls0.083S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Master A0 + emb + hs u + old logit layerscale",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            # lr0.004
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_u_emb-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            # lr0.008
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_u_emb-lr0.008-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            # lr0.012
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_u_emb-lr0.012-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            # lr0.016
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_u_emb-lr0.016-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Master A0 + no emb + no hs u + logit layerscale 1",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            # no explicit lr → default_x_value used
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Master A0 + no emb + hs u + logit layerscale 1",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_u-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_u-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_u-lr0.008-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_u-lr0.012-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                ],
-            },
-            {
-                "title": "Poor Mans Ortho",
-                "x_label": "Learning Rate",
-                "x_param": "lr",
-                "series": [
-                    {
-                        "label": "Baseline (Llama + WSD + AdamW)",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            "110M-n1",
-                            "110M-lr0.004-n1",
-                            "110M-lr0.001-n1",
-                        ],
-                    },
-                    {
-                        "label": "OUR MAIN Master A0 + emb + no hs u + lg layerscale 1",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-qkRMS-nPre-nFin-pst-ls1S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.001-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "OUR MAIN Master A0 + emb + no hs u + lg layerscale 0.044",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls0.083S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Poor Mans Ortho, mlr 4, no hs u,no emb",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_o_b0.9_mlr4_pmo1_none_a0-wd0-HSembed1_l2_it0-lr0.001-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            # no explicit lr → default_x_value used
-                            {"name": "110M-master_h_o_b0.9_mlr4_pmo1_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr4_pmo1_none_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Poor Mans Ortho, mlr 4, hs u, emb",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            {"name": "110M-master_h_o_b0.9_mlr4_pmo1_none_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.001-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr4_pmo1_none_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr4_pmo1_none_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Poor Mans Ortho, mlr 2, no hs u, no emb",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            # no explicit lr → default_x_value used
-                            {"name": "110M-master_h_o_b0.9_mlr2_pmo1_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr2_pmo1_none_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr2_pmo1_none_a0-wd0-HSembed1_l2_it0-lr0.006-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Poor Mans Ortho, mlr 2, hs u, emb",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            # no explicit lr → default_x_value used
-                            {"name": "110M-master_h_o_b0.9_mlr2_pmo1_none_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr2_pmo1_none_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr2_pmo1_none_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.006-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Poor Mans Ortho, mlr 2, no hs u, emb",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            # no explicit lr → default_x_value used
-                            {"name": "110M-master_h_o_b0.9_mlr2_pmo1_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            # run incoming
-                            # {"name": "110M-master_h_o_b0.9_mlr2_pmo1_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr2_pmo1_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.006-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Poor Mans Ortho, mlr 4, no hs u, emb",
-                        "default_x_value": 2e-3,
-                        "runs": [
-                            # no explicit lr → default_x_value used
-                            {"name": "110M-master_h_o_b0.9_mlr4_pmo1_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.001-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr4_pmo1_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr4_pmo1_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                ],
-            }
-        ],
-    },
-    # ── Figure 2: MLR sweep ───────────────────────────────────────────────────
-    {
-        "title": "MLR Sweep",
-        "subplots": [
-            {
-                "title": "Muon vs HMuon (nFOG)",
-                "x_label": "Matrix LR Multiplier (mlr)",
-                "x_param": "mlr",
-                "series": [
-                    {
-                        "label": "Baseline (Llama + WSD + AdamW)",
-                        "default_x_value": 1,
-                        "runs": [
-                            "110M-n1",
-                        ],
-                    },
-                    {
-                        "label": "OUR MAIN Master A0 + emb + no hs u + lg layerscale 1",
-                        "default_x_value": 1,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "OUR MAIN Master A0 + emb + no hs u + lg layerscale 0.044",
-                        "default_x_value": 1,
-                        "runs": [
-                            {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls0.083S-lgslsS-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "Muon urm (lr 0.002)" ,
-                        "default_x_value": None,
-                        "runs": [
-                            {"name": "110M-muon_h_m0.95_mlr2_urm-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-muon_h_m0.95_mlr4_urm-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-muon_h_m0.95_mlr8_urm-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "HMuon urm, w/o hs u, no hs-embed, (lr=0.004)",
-                        "default_x_value": None,
-                        "runs": [
-                            {"name": "110M-master_h_o_b0.9_mlr2_urm_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "HMuon urm, w/ hs u, no hs-embed, (lr=0.002)",
-                        "default_x_value": None,
-                        "runs": [
-                            {"name": "110M-master_h_o_b0.9_mlr2_urm_a0-wd0-HSembed1_l2_it0_u-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0_u-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "HMuon shsc, w/o hs u, no hs-embed, (lr=0.002)",
-                        "default_x_value": None,
-                        "runs": [
-                            {"name": "110M-master_h_o_b0.9_mlr2_shsc_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr4_shsc_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr8_shsc_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "HMuon shsc, w/o hs u, no hs-embed, (lr=0.004)",
-                        "default_x_value": None,
-                        "runs": [
-                            {"name": "110M-master_h_o_b0.9_mlr2_shsc_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr4_shsc_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr8_shsc_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {  
-                        "label": "HMuon urm, w/ hs u, embNO, (lr=0.004)",
-                        "default_x_value": None,
-                        "runs": [
-                            {"name": "110M-master_h_o_b0.9_mlr2_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr8_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {  
-                        "label": "HMuon urm, w/ hs u, embNO, (lr=0.002)",
-                        "default_x_value": None,
-                        "runs": [
-                            {"name": "110M-master_h_o_b0.9_mlr2_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr8_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "HMuon none, no hs u, no hs-embed, (lr=0.002)",
-                        "default_x_value": None,
-                        "runs": [
-                            {"name": "110M-master_h_o_b0.9_mlr2_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr4_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr8_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                    {
-                        "label": "HMuon none, no hs u, no hs-embed, (lr=0.004)",
-                        "default_x_value": None,
-                        "runs": [
-                            {"name": "110M-master_h_o_b0.9_mlr2_none_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr4_none_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                            {"name": "110M-master_h_o_b0.9_mlr8_none_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
-                        ],
-                    },
-                ],
-            },
-        ],
-    },
-]
+
+
+def load_plots(config_paths: list[str] | None) -> list[dict]:
+    """Load plot configs from YAML files.
+
+    If config_paths is None or empty, all *.yaml files in DEFAULT_CONFIG_DIR are
+    loaded (sorted by filename so the numbering prefix controls order).
+    """
+    if not config_paths:
+        if not DEFAULT_CONFIG_DIR.is_dir():
+            raise SystemExit(
+                f"No config files given and default directory {DEFAULT_CONFIG_DIR} "
+                "does not exist.  Pass --configs explicitly."
+            )
+        yaml_files = sorted(DEFAULT_CONFIG_DIR.glob("*.yaml"))
+        if not yaml_files:
+            raise SystemExit(f"No *.yaml files found in {DEFAULT_CONFIG_DIR}")
+    else:
+        yaml_files = [Path(p) for p in config_paths]
+
+    plots = []
+    for yf in yaml_files:
+        with open(yf) as f:
+            data = yaml.safe_load(f)
+        if data is None:
+            continue
+        data["_source_stem"] = yf.stem
+        print(f"Loaded config: {yf.name}")
+        plots.append(data)
+    return plots
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def slugify(text: str, max_len: int = 80) -> str:
+    """Turn an arbitrary title into a filesystem-friendly slug."""
+    s = text.lower()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    s = s.strip("_")
+    return s[:max_len].rstrip("_")
+
+
+def make_plot_filename(plot: dict, plot_idx: int) -> str:
+    """Build a descriptive filename from the config's source stem and title."""
+    stem = plot.get("_source_stem", "")
+    title = plot.get("title", "")
+    if stem:
+        return f"sweep_{stem}.png"
+    if title:
+        return f"sweep_{slugify(title)}.png"
+    return f"sweep_plot_{plot_idx}.png"
 
 
 def parse_experiment(exp, default_entity: str, default_project: str) -> tuple[str, str, str]:
@@ -690,7 +281,7 @@ def plot_all(plots: list[dict], run_data: dict, args) -> list:
             if tail_end_steps:
                 unique_ends = np.array(list(tail_end_steps.values()))
                 rel_spread = (unique_ends.max() - unique_ends.min()) / unique_ends.max()
-                assert rel_spread < 0.001, (
+                assert rel_spread < 0.0001, (
                     f"Subplot '{sp['title']}': runs end at different consumed-tokens "
                     f"(spread {rel_spread:.1%}). Per-run final steps:\n"
                     + "\n".join(
@@ -736,12 +327,37 @@ def plot_all(plots: list[dict], run_data: dict, args) -> list:
                 stds = np.array(stds)[order]
 
                 if args.no_errbar:
-                    ax.plot(xs, means, marker="o", linewidth=1.5, label=label)
+                    line = ax.plot(xs, means, marker="x", linewidth=1.5, label=label)
+                    color = line[0].get_color()
                 else:
-                    ax.errorbar(
+                    ebar = ax.errorbar(
                         xs, means, yerr=stds,
-                        marker="o", linewidth=1.5, capsize=4, label=label,
+                        marker="x", linewidth=1.5, capsize=4, label=label,
                     )
+                    color = ebar[0].get_color()
+
+                if args.plot_min_estimate and len(xs) >= 3:
+                    fit_xs = np.log(xs) if args.xscale == "log" else xs
+                    coeffs = np.polyfit(fit_xs, means, 2)
+                    a, b, _c = coeffs
+                    if a > 0:
+                        x_min_fit = -b / (2 * a)
+                        y_min_fit = np.polyval(coeffs, x_min_fit)
+                        x_min_plot = np.exp(x_min_fit) if args.xscale == "log" else x_min_fit
+                        ax.plot(
+                            x_min_plot, y_min_fit,
+                            marker="*", markersize=8, color=color,
+                            markeredgecolor="black", markeredgewidth=0.8,
+                            zorder=5,
+                        )
+
+                obs_min_idx = int(np.argmin(means))
+                ax.plot(
+                    xs[obs_min_idx], means[obs_min_idx],
+                    marker="s", markersize=8, color=color,
+                    markeredgecolor="black", markeredgewidth=0.8,
+                    zorder=4,
+                )
 
             ax.set_xscale(args.xscale)
             ax.set_xlabel(sp["x_label"], fontsize=11)
@@ -750,11 +366,11 @@ def plot_all(plots: list[dict], run_data: dict, args) -> list:
             ax.set_title(sp["title"], fontsize=12)
             ax.legend(fontsize=7)
             ax.grid(True, alpha=0.3)
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
+            for spine in ax.spines.values():
+                spine.set_visible(True)
 
         fig.tight_layout()
-        figures.append((plot_idx, fig))
+        figures.append((plot_idx, plot, fig))
 
     return figures
 
@@ -764,6 +380,10 @@ def plot_all(plots: list[dict], run_data: dict, args) -> list:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--configs", nargs="*", default=None, metavar="YAML",
+        help="YAML config files to plot (default: all *.yaml in scripts/sweep_configs/)",
+    )
     parser.add_argument("--entity", default=WANDB_ENTITY, help="Default W&B entity")
     parser.add_argument("--project", default=WANDB_PROJECT, help="Default W&B project")
     parser.add_argument(
@@ -787,12 +407,16 @@ def main():
         help="Suppress ±std error bars (default: show them)",
     )
     parser.add_argument(
+        "--plot-min-estimate", action="store_true",
+        help="Fit a quadratic to each series curve and mark its minimum with a star",
+    )
+    parser.add_argument(
         "--clear-cache", action="store_true",
         help="Delete .wandb_sweep_cache/ and re-download everything",
     )
     parser.add_argument(
         "--save", default=None, metavar="DIR",
-        help="Save figures to DIR/sweep_plot_0.png, sweep_plot_1.png, ... instead of showing",
+        help="Save figures to DIR/ with names derived from config filenames (e.g. sweep_03_preln_finln_flat.png)",
     )
     args = parser.parse_args()
 
@@ -800,16 +424,22 @@ def main():
         shutil.rmtree(CACHE_DIR)
         print(f"Cleared cache at {CACHE_DIR}")
 
-    run_data = collect_all_runs(PLOTS, args)
 
-    figures = plot_all(PLOTS, run_data, args)
+    rcParams = plt.rcParams
+    set_plot_style(rcParams)
+
+    plots = load_plots(args.configs)
+
+    run_data = collect_all_runs(plots, args)
+
+    figures = plot_all(plots, run_data, args)
 
     if args.save:
         save_dir = Path(args.save)
         save_dir.mkdir(parents=True, exist_ok=True)
-        for plot_idx, fig in figures:
-            out = save_dir / f"sweep_plot_{plot_idx}.png"
-            fig.savefig(out, dpi=200, bbox_inches="tight")
+        for plot_idx, plot, fig in figures:
+            out = save_dir / make_plot_filename(plot, plot_idx)
+            fig.savefig(out, dpi=400, bbox_inches="tight")
             print(f"Saved {out}")
     else:
         plt.show()

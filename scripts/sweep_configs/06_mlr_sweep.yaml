@@ -1,0 +1,62 @@
+title: "MLR sweep: Orth flat vs embed (preln + final)"
+subplots:
+  - title: "Master Orth flat vs embed, shape up, preln + final, mlr 1-8"
+    x_label: "Muon LR Multiplier (mlr)"
+    x_param: mlr
+    series:
+      - label: "Master Orth FLAT with shape up, preln + final"
+        default_x_value: 4
+        runs:
+          - "110M1-master_h_o_b0.9_mlr1_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_o_b0.9_mlr2_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_o_b0.9_mlr4_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_o_b0.9_mlr6_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_o_b0.9_mlr8_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+      - label: "Master Orth EMBED with shape up, preln + final"
+        default_x_value: 4
+        runs:
+          - "110M1-master_h_o_b0.9_mlr1_shup_a0-wd0-HSembed1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_o_b0.9_mlr2_shup_a0-wd0-HSembed1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_o_b0.9_mlr4_shup_a0-wd0-HSembed1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_o_b0.9_mlr6_shup_a0-wd0-HSembed1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_o_b0.9_mlr8_shup_a0-wd0-HSembed1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+      - label: "Master Orth flat with URM, preln + final"
+        default_x_value: 4
+        runs:
+          - "110M1-master_h_o_b0.9_mlr1_urm_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_o_b0.9_mlr2_urm_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_o_b0.9_mlr4_urm_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_o_b0.9_mlr6_urm_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_o_b0.9_mlr8_urm_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+      - label: "Master Orth embed with shape up, WU + LINEAR, preln + final"
+        default_x_value: 4
+        runs:
+          - "110M1-master_h_o_b0.9_mlr1_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-lin-n2"
+          - "110M1-master_h_o_b0.9_mlr2_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-lin-n2"
+          - "110M1-master_h_o_b0.9_mlr4_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-lin-n2"
+          - "110M1-master_h_o_b0.9_mlr6_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-lin-n2"
+          - "110M1-master_h_o_b0.9_mlr8_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-lin-n2"
+      - label: "Master Orth embed with shape up, wu, lin, preln + final NO GAIN"
+        default_x_value: 4
+        runs:
+          # - "110M1-master_h_o_b0.9_mlr1_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-fng-ls1S0.044-lgsls1-ue-lin-n2"
+          - "110M1-master_h_o_b0.9_mlr2_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-fng-ls1S0.044-lgsls1-ue-lin-n2"
+          - "110M1-master_h_o_b0.9_mlr4_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-fng-ls1S0.044-lgsls1-ue-lin-n2"
+          - "110M1-master_h_o_b0.9_mlr6_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-fng-ls1S0.044-lgsls1-ue-lin-n2"
+          - "110M1-master_h_o_b0.9_mlr8_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-fng-ls1S0.044-lgsls1-ue-lin-n2"
+      - label: "Master Orth flat with shape up, wu, lin, preln + NO FINAL"
+        default_x_value: 4
+        runs:
+          - "110M1-master_h_o_b0.9_mlr1_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-nFin-pst-png-ls1S0.044-lgsls1-ue-lin-n2"
+          - "110M1-master_h_o_b0.9_mlr2_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-nFin-pst-png-ls1S0.044-lgsls1-ue-lin-n2"
+          - "110M1-master_h_o_b0.9_mlr4_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-nFin-pst-png-ls1S0.044-lgsls1-ue-lin-n2"
+          # - "110M1-master_h_o_b0.9_mlr6_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-nFin-pst-png-ls1S0.044-lgsls1-ue-lin-n2"
+          - "110M1-master_h_o_b0.9_mlr8_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-nFin-pst-png-ls1S0.044-lgsls1-ue-lin-n2"
+      - label: "Master Orth embed with shape up, wu, INV SQRT WSD, preln + final"
+        default_x_value: 4
+        runs:
+          - "110M1-master_h_o_b0.9_mlr1_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-isrwsd-n2"
+          - "110M1-master_h_o_b0.9_mlr2_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-isrwsd-n2"
+          - "110M1-master_h_o_b0.9_mlr4_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-isrwsd-n2"
+          - "110M1-master_h_o_b0.9_mlr6_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-isrwsd-n2"
+          - "110M1-master_h_o_b0.9_mlr8_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-isrwsd-n2"

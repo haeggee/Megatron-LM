@@ -130,6 +130,7 @@ usage () {
 	echo " --hs-embed: hypersphere normalize embeddings"
 	echo " --hs-emb-no-orthogonal: Don't use muon update on embeddings, but keep fixed to the sphere (if --hs-embed is also set, otherwise no effect)"
 	echo " --hs-split-heads: hypersphere normalize q,k,v heads separately"
+	echo " --hs-g <flat/embed/row/col/rowcol>: hypersphere gains mode"
 	echo " --hs-p: project gradient to tangent space"
 	echo " --hs-s: soft hyperball norm clipping."
 	# Logs.
@@ -477,6 +478,8 @@ while [[ $# -gt 0 ]]; do
 			HS_SPLIT_HEADS=true; shift;;
 		--hs-split-heads-update)
 			HS_SPLIT_HEADS_UPDATE=true; shift;;
+		--hs-g)
+			HS_GAINS_MODE=$2; shift 2;;
 		--hs-p)
 			HS_PROJECT=true; shift;;
 		--hs-s)
@@ -650,6 +653,10 @@ if [[ $HYPERBALL != false ]]; then
 	if [[ $HS_SOFT = true ]]; then
 		SUFFIX=${SUFFIX}_s
 		OPT_ARGS+=(--hypersphere-soft)
+	fi
+	if [[ ! -z "${HS_GAINS_MODE+xxx}" ]]; then
+		SUFFIX=${SUFFIX}_g${HS_GAINS_MODE}
+		OPT_ARGS+=(--hypersphere-gains-mode $HS_GAINS_MODE)
 	fi
 fi
 

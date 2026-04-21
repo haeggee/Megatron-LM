@@ -1,0 +1,109 @@
+title: "Baseline vs ngpt vs Spherical Adam"
+subplots:
+  - title: "Baseline vs Master A0 vs. nPre vs. nFin vs flat"
+    x_label: "Learning Rate"
+    x_param: lr
+    series:
+      - label: "Baseline (Llama + WSD + AdamW)"
+        default_x_value: 0.002
+        runs:
+          - "110M-n1"
+          - "110M-lr0.004-n1"
+          - "110M-lr0.001-n1"
+
+      - label: "baseline with spherical Adam"
+        default_x_value: 0.002
+        runs:
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.004-elr-std0.044-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.002-elr-std0.044-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-elr-std0.044-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.004-elr-std0.044-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.005-elr-std0.044-nw-cos-n2"
+
+      - label: "Master A0"
+        default_x_value: 0.002
+        runs:
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.001-elr-qkRMS-nPre-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.002-elr-qkRMS-nPre-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-elr-qkRMS-nPre-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.004-elr-qkRMS-nPre-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.005-elr-qkRMS-nPre-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+
+      - label: "Master A0 flat"
+        default_x_value: 0.002
+        runs:
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.001-elr-qkRMS-nPre-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.002-elr-qkRMS-nPre-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.003-elr-qkRMS-nPre-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.004-elr-qkRMS-nPre-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.005-elr-qkRMS-nPre-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+
+      - label: "Master A0 row"
+        default_x_value: 0.002
+        runs:
+          - "110M1-master_h_a0-wd0-HSrow1_l2_it0_emb-lr0.001-elr-qkRMS-nPre-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSrow1_l2_it0_emb-lr0.002-elr-qkRMS-nPre-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSrow1_l2_it0_emb-lr0.003-elr-qkRMS-nPre-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSrow1_l2_it0_emb-lr0.004-elr-qkRMS-nPre-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSrow1_l2_it0_emb-lr0.005-elr-qkRMS-nPre-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+
+      - label: "Master A0 with preLN"
+        default_x_value: 0.002
+        runs:
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.001-elr-qkRMS-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.002-elr-qkRMS-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-elr-qkRMS-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.004-elr-qkRMS-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.005-elr-qkRMS-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+
+      - label: "Master A0 with final LN"
+        default_x_value: 0.002
+        runs:
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.001-elr-qkRMS-nPre-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.002-elr-qkRMS-nPre-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-elr-qkRMS-nPre-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.004-elr-qkRMS-nPre-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.005-elr-qkRMS-nPre-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+
+      - label: "Master A0 with preLN and final LN"
+        default_x_value: 0.002
+        runs:
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.001-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.002-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.004-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.005-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+
+      - label: "Master A0 flat with preLN and final LN"
+        default_x_value: 0.002
+        runs:
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.001-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.002-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.004-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          # - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.005-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+      - label: "Master A0 flat with preLN and final LN, layerscale 1"
+        default_x_value: 0.002
+        runs:
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.002-elr-qkRMS-pst-png-ls-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.003-elr-qkRMS-pst-png-ls-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.004-elr-qkRMS-pst-png-ls-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.005-elr-qkRMS-pst-png-ls-lgsls1S-ue-nw-cos-n2"
+      - label: "AdamW with preln, final, qk norm, layerscales" 
+        default_x_value: 0.002
+        runs:
+          - "110M1-lr0.002-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-cos-n2"
+          - "110M1-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-cos-n2"
+          - "110M1-lr0.004-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-cos-n2"
+          - "110M1-lr0.005-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-cos-n2"
+          - "110M1-lr0.006-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-cos-n2"
+          - "110M1-lr0.007-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-cos-n2"
+          - "110M1-lr0.008-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-cos-n2"
+      - label: "Master Orth flat with shape up and mlr 4, preln + final"
+        default_x_value: 0.002
+        runs:
+          - "110M1-master_h_o_b0.9_mlr4_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+      - label: "Master Orth embed with shape up and mlr 4, preln + final"
+        default_x_value: 0.002
+        runs:
+          - "110M1-master_h_o_b0.9_mlr4_shup_a0-wd0-HSembed1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
