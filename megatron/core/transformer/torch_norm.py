@@ -241,6 +241,19 @@ class LayerScale(MegatronModule):
         return y
 
 
+class FixedLayerScale(MegatronModule):
+    """LayerScale with a fixed (non-trainable) scalar multiplier."""
+
+    def __init__(self, hidden_size: int, config=None, value: float = 1.0,
+                 sequence_parallel: bool = False, **kwargs):
+        super().__init__(config=config)
+        assert not sequence_parallel, "NYI"
+        self.register_buffer('scale', torch.tensor(value))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * self.scale
+
+
 @torch.compile
 def layer_scale(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     return (x * weight)

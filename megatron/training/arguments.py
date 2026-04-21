@@ -1858,6 +1858,8 @@ def _add_network_size_args(parser):
     group.add_argument('--mlp-layer-scale-gate-scale', type=float)
     group.add_argument('--upscale-embedding', type=float)
     group.add_argument('--mlp-out-scale', type=float)
+    group.add_argument('--fixed-layer-scale', type=float,
+                       help='Fixed (non-trainable) scalar multiplier applied after post_norm / before residual.')
     group.add_argument('--softmax-scale', type=float)
     group.add_argument('--seednorm-init', type=float, default=1.0,
                           help='Initial value for the seednorm scaling parameter.')

@@ -18,7 +18,7 @@ PYTHON_CACHE_DIR=/tmp/.python_cache
 
 # Hardware defaults.
 NODES=1
-TIME=10:00:00
+TIME=12:00:00
 
 # Arch defaults.
 NORMALIZATION=RMSNorm
@@ -79,7 +79,7 @@ usage () {
 	echo " --lr <float>: Learning rate."
 	echo " --no-warmup: Deactivates learning rate warmup"
 	echo " --warmup-iters <int> (default=$WARMUP_ITERS): LR warmup steps (\`--lr-warmup-iters\`)"
-	echo " --decay <wsd/cos>"
+	echo " --decay <wsd/cos/linear/inverse-square-root/isrwsd>"
 	echo " --cooldown <float>: Fraction to do cooldown"
 	echo " --clip-grad <float>: Gradient clipping"
 	# Architecture settings.
@@ -91,6 +91,7 @@ usage () {
 	echo " --no-learnable-norms"
 	echo " --post-norm"
 	echo " --post-norm-no-gain"
+	echo " --final-layernorm-no-gain"
 	echo " --post-block-norm"
 	echo " --use-stream-minus-residual"
 	echo " --layer-scale <float>"
@@ -102,6 +103,7 @@ usage () {
 	echo " --mlp-layer-scale <float>"
 	echo " --mlp-layer-scale-gate-scale <float>"
 	echo " --mlp-out-scale <float>"
+	echo " --fixed-layer-scale <float>"
 	echo " --logits-layer-scale <float>"
 	echo " --logits-layer-scale-scale <float>"
 	echo " --upscale-embedding <float>"
@@ -391,6 +393,8 @@ while [[ $# -gt 0 ]]; do
 			POST_NORM=true; shift;;
 		--post-norm-no-gain)
 			POST_NORM_NO_GAIN=true; shift;;
+		--final-layernorm-no-gain)
+			FINAL_LAYERNORM_NO_GAIN=true; shift;;
 		--post-block-norm)
 			POST_BLOCK_NORM=true; shift;;
 		--use-stream-minus-residual)
@@ -419,6 +423,8 @@ while [[ $# -gt 0 ]]; do
 			MLP_LAYER_SCALE_GATE_SCALE=$2; shift 2;;
 		--mlp-out-scale)
 			MLP_OUT_SCALE=$2; shift 2;;
+		--fixed-layer-scale)
+			FIXED_LAYER_SCALE=$2; shift 2;;
 		--logits-layer-scale)
 			LOGITS_LAYER_SCALE=$2; shift 2;;
 		--logits-layer-scale-scale)
@@ -730,6 +736,10 @@ if [[ $POST_NORM_NO_GAIN = true ]]; then
 	SUFFIX=$SUFFIX-png
 	ARCH_ARGS+=(--post-norm-no-gain)
 fi
+if [[ $FINAL_LAYERNORM_NO_GAIN = true ]]; then
+	SUFFIX=$SUFFIX-fng
+	ARCH_ARGS+=(--final-layernorm-no-gain)
+fi
 if [[ $POST_BLOCK_NORM = true ]]; then
 	SUFFIX=$SUFFIX-ppst
 	ARCH_ARGS+=(--post-block-norm)
@@ -746,7 +756,7 @@ if [[ ! -z "${SOFT_MAX_SCALE+xxx}" ]]; then
 fi
 
 if [[ ! -z "${LAYER_SCALE+xxx}" ]]; then
-	SUFFIX=$SUFFIX-ls
+	SUFFIX=$SUFFIX-ls${LAYER_SCALE}
 	LONG_SUFFIX=$LONG_SUFFIX-ls$LAYER_SCALE
 	ARCH_ARGS+=(--layer-scale $LAYER_SCALE)
 	if [[ ! -z "${LAYER_SCALE_SCALE+xxx}" ]]; then
@@ -797,6 +807,11 @@ if [[ ! -z "${MLP_OUT_SCALE+xxx}" ]]; then
 	SUFFIX=$SUFFIX-mlpO
 	LONG_SUFFIX=$LONG_SUFFIX-mlpO$MLP_OUT_SCALE
 	ARCH_ARGS+=(--mlp-out-scale $MLP_OUT_SCALE)
+fi
+if [[ ! -z "${FIXED_LAYER_SCALE+xxx}" ]]; then
+	SUFFIX=$SUFFIX-fls${FIXED_LAYER_SCALE}
+	LONG_SUFFIX=$LONG_SUFFIX-fls$FIXED_LAYER_SCALE
+	ARCH_ARGS+=(--fixed-layer-scale $FIXED_LAYER_SCALE)
 fi
 if [[ ! -z "${LOGITS_LAYER_SCALE+xxx}" ]]; then
 	SUFFIX=$SUFFIX-lgsls$LOGITS_LAYER_SCALE
@@ -852,10 +867,40 @@ if [[ $DECAY = wsd ]]; then
 elif [[ $DECAY = cos ]]; then
 	SUFFIX=$SUFFIX-cos
 	LONG_SUFFIX=$LONG_SUFFIX-cos
-	DECAY_ITERS=$((ITERS - WARMUP))
 	DECAY_ARGS+=(
 		--lr-decay-style cosine
-		--lr-decay-iters $DECAY_ITERS
+		--lr-decay-iters $ITERS
+	)
+elif [[ $DECAY = linear ]]; then
+	SUFFIX=$SUFFIX-lin
+	LONG_SUFFIX=$LONG_SUFFIX-lin
+	DECAY_ARGS+=(
+		--lr-decay-style linear
+		--lr-decay-iters $ITERS
+	)
+elif [[ $DECAY = inverse-square-root ]]; then
+	SUFFIX=$SUFFIX-invsq
+	LONG_SUFFIX=$LONG_SUFFIX-invsq
+	DECAY_ARGS+=(
+		--lr-decay-style inverse-square-root
+		--lr-decay-iters $ITERS
+	)
+elif [[ $DECAY = isrwsd ]]; then
+	SUFFIX=$SUFFIX-isrwsd
+	LONG_SUFFIX=$LONG_SUFFIX-isrwsd
+	if [[ $COOLDOWN != 0.2 ]]; then
+		SUFFIX=$SUFFIX-cd$COOLDOWN
+		LONG_SUFFIX=$LONG_SUFFIX-cd${COOLDOWN}
+	fi
+	if [[ $WSD != minus_sqrt ]]; then
+		SUFFIX=$SUFFIX-$WSD
+		LONG_SUFFIX=$LONG_SUFFIX-$WSD
+	fi
+	DECAY_ITERS=$(python3 -c "print(int($ITERS * $COOLDOWN))")
+	DECAY_ARGS+=(
+		--lr-decay-style inverse-square-root-WSD
+		--lr-wsd-decay-style $WSD
+		--lr-wsd-decay-iters $DECAY_ITERS
 	)
 else
 	echo "Unknown decay method $DECAY"

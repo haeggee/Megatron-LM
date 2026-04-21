@@ -26,7 +26,7 @@ from megatron.core.transformer.multi_token_prediction import (
 )
 from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
 from megatron.core.transformer.spec_utils import ModuleSpec
-from megatron.core.transformer.torch_norm import L2Norm, LayerScale, RMSNormNoGain
+from megatron.core.transformer.torch_norm import FixedLayerScale, L2Norm, LayerScale, RMSNormNoGain
 from megatron.core.transformer.transformer_block import (
     TransformerBlockSubmodules,
     get_num_layers_to_build,
@@ -348,12 +348,14 @@ def get_gpt_layer_with_transformer_engine_spec(
                 post_attention_layernorm=post_attention_layer_norm,
                 post_attention_block_layernorm=post_attention_block_layer_norm,
                 attention_layerscale=IdentityOp if config.layer_scale is None else LayerScale,
+                fixed_attention_layerscale=IdentityOp if config.fixed_layer_scale is None else FixedLayerScale,
                 residual_attention_layerscale=IdentityOp if config.residual_layer_scale is None else LayerScale,
                 self_attn_bda=get_bias_dropout_add,
                 pre_mlp_layernorm=pre_mlp_layernorm,
                 post_mlp_layernorm=post_mlp_layernorm,
                 post_mlp_block_layernorm=post_mlp_block_layernorm,
                 mlp_layerscale=IdentityOp if config.layer_scale is None else LayerScale,
+                fixed_mlp_layerscale=IdentityOp if config.fixed_layer_scale is None else FixedLayerScale,
                 residual_mlp_layerscale=IdentityOp if config.residual_layer_scale is None else LayerScale,
                 mlp=mlp,
                 mlp_bda=get_bias_dropout_add,
