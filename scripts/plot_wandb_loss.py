@@ -240,7 +240,9 @@ EXPERIMENTS_TO_PLOT = [
 
 
     {"name": "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1", "entity": "epfl-relay", "project": "megatron_opt_v1"},
+    {"name": "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2", "entity": "epfl-relay", "project": "megatron_opt_v1"},
 
+    {"name": "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-elr-qkRMS-nPre-nFin-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2", "entity": "epfl-relay", "project": "megatron_opt_v1"},
 
 
     ### 390m
@@ -272,8 +274,8 @@ PRESETS = {
     ]
 }
 
-#EXPERIMENTS_TO_PLOT = PRESETS["default"]
-EXPERIMENTS_TO_PLOT = PRESETS["wsdsweep"]
+EXPERIMENTS_TO_PLOT = PRESETS["default"]
+# EXPERIMENTS_TO_PLOT = PRESETS["wsdsweep"]
 
 METRIC_KEY = "lm loss"
 STEP_KEY = "consumed-tokens"
@@ -545,8 +547,8 @@ def main():
     ax.set_title(args.metric, fontsize=14)
     ax.legend(fontsize=9, loc="upper right")
     ax.grid(True, alpha=0.3)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+    for spine in ax.spines.values():
+        spine.set_visible(True)
     fig.tight_layout()
 
     # ── Ranking table ─────────────────────────────────────────────────
