@@ -33,6 +33,42 @@ def test_resize_preserves_source_rows_and_is_deterministic():
     assert plan_a.padding_added_rows == 1
 
 
+@pytest.mark.parametrize("seed", [123, 124])
+def test_tp_shards_preserve_all_source_rows_when_source_crosses_shard_boundary(seed):
+    source_vocab_size = 10
+    target_vocab_size = 19
+    padded_vocab_size = 24
+    tensor_parallel_size = 4
+    weight = torch.arange(source_vocab_size * 3, dtype=torch.float32).view(
+        source_vocab_size, 3
+    )
+
+    resized, _ = resize_vocab_table(
+        weight,
+        source_vocab_size=source_vocab_size,
+        target_vocab_size=target_vocab_size,
+        padded_vocab_size=padded_vocab_size,
+        seed=seed,
+    )
+
+    shard_size = padded_vocab_size // tensor_parallel_size
+    shards = torch.chunk(resized, tensor_parallel_size, dim=0)
+
+    for tp_rank, shard in enumerate(shards):
+        global_start = tp_rank * shard_size
+        global_end = global_start + shard.shape[0]
+        text_start = min(global_start, source_vocab_size)
+        text_end = min(global_end, source_vocab_size)
+        text_rows = text_end - text_start
+
+        if text_rows == 0:
+            continue
+
+        local_start = text_start - global_start
+        local_end = local_start + text_rows
+        assert torch.equal(shard[local_start:local_end], weight[text_start:text_end])
+
+
 def test_different_seed_changes_added_rows_but_not_source_rows():
     weight = torch.arange(18, dtype=torch.float32).view(6, 3)
 
