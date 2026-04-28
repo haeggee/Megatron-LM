@@ -1714,27 +1714,63 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
     else:
         print_rank_0('could not find arguments in the checkpoint ...')
 
-    def load_model_state_dict(module, state_dict, strict: bool):
+    def _report_load_mismatches(model_name, load_return):
+        if load_return is None:
+            return
+        missing_keys = getattr(load_return, "missing_keys", ())
+        unexpected_keys = getattr(load_return, "unexpected_keys", ())
+        if not missing_keys and not unexpected_keys:
+            return
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        logger.warning(
+            "Checkpoint load mismatch on rank %s %s: missing_keys=%d %s; "
+            "unexpected_keys=%d %s. Missing keys remain initialized.",
+            rank,
+            model_name,
+            len(missing_keys),
+            list(missing_keys)[:20],
+            len(unexpected_keys),
+            list(unexpected_keys)[:20],
+        )
+
+    def load_model_state_dict(module, state_dict, strict: bool, model_name: str):
         """Helper function to load state dict with fallback for missing extra states."""
         try:
-            module.load_state_dict(state_dict, strict=strict)
+            load_return = module.load_state_dict(state_dict, strict=strict)
+            _report_load_mismatches(model_name, load_return)
         except Exception as e:
             if strict:
                 # Fallback support for backward compatibility breaking changes in TransformerEngine
                 load_return = module.load_state_dict(state_dict, strict=False)
                 print(f"load_return: {load_return}")
+                _report_load_mismatches(model_name, load_return)
     # Model.
     strict = False if args.retro_add_retriever else strict
     if not skip_load_to_model_and_opt:
         if len(ddp_model) == 1:
-            load_model_state_dict(ddp_model[0], state_dict['model'], strict)
+            load_model_state_dict(ddp_model[0], state_dict['model'], strict, 'model')
         else:
+            has_vpp_model_keys = any('model%d' % i in state_dict for i in range(len(ddp_model)))
+            if 'model' in state_dict and not has_vpp_model_keys:
+                raise RuntimeError(
+                    "Checkpoint contains a single non-VPP 'model' state, but this run built "
+                    f"{len(ddp_model)} virtual pipeline model chunks. Convert or resave the "
+                    "checkpoint with the same --num-layers-per-virtual-pipeline-stage setting "
+                    "instead of loading it into a VPP run."
+                )
             for i in range(len(ddp_model)):
                 # If there is no corresponding model in the state_dict, it will be ignored.
                 # It means that this is an empty stage.
                 if 'model%d' % i not in state_dict:
+                    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+                    logger.warning(
+                        "Checkpoint load mismatch on rank %s model%d: checkpoint key missing; "
+                        "this model chunk remains initialized.",
+                        rank,
+                        i,
+                    )
                     continue
-                load_model_state_dict(ddp_model[i], state_dict['model%d' % i], strict)
+                load_model_state_dict(ddp_model[i], state_dict['model%d' % i], strict, f'model{i}')
 
     # Fix up query/key/value matrix ordering if needed.
     checkpoint_version = get_checkpoint_version()
