@@ -39,6 +39,15 @@ def parse_args():
     parser.add_argument("--target-tensor-parallel-size", type=int, default=None)
     parser.add_argument("--target-pipeline-parallel-size", type=int, default=None)
     parser.add_argument("--target-expert-parallel-size", type=int, default=1)
+    parser.add_argument(
+        "--target-num-layers-per-virtual-pipeline-stage",
+        type=int,
+        default=None,
+        help="If set, dispatch to the VPP-aware saver so the output checkpoint "
+             "matches a training run with --num-layers-per-virtual-pipeline-stage. "
+             "Source must be non-VPP. Topology is validated by the saver against "
+             "num_layers from the source checkpoint metadata.",
+    )
     parser.add_argument("--make-vocab-size-divisible-by", type=int, default=128)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument(
@@ -115,6 +124,23 @@ def main():
         raise SystemExit("--make-vocab-size-divisible-by must be positive.")
     if args.target_tensor_parallel_size is not None and args.target_tensor_parallel_size <= 0:
         raise SystemExit("--target-tensor-parallel-size must be positive when provided.")
+    if (
+        args.target_pipeline_parallel_size is not None
+        and args.target_pipeline_parallel_size <= 0
+    ):
+        raise SystemExit("--target-pipeline-parallel-size must be positive when provided.")
+
+    # This script lives in tools/vocab_extension/; vocab_extension.py /
+    # topology.py / convert.py / saver_*.py live in tools/checkpoint/.
+    checkpoint_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), os.pardir, "checkpoint")
+    )
+    sys.path.insert(0, checkpoint_dir)
+    from vocab_extension import vpp_saver_dispatch
+
+    saver_name, vpp_argv = vpp_saver_dispatch(
+        args.target_num_layers_per_virtual_pipeline_stage
+    )
 
     padded_vocab_size = None
     if args.target_tensor_parallel_size is not None:
@@ -123,14 +149,11 @@ def main():
         if args.target_tensor_parallel_size > 1:
             os.environ.setdefault("CUDA_DEVICE_MAX_CONNECTIONS", "1")
 
-    checkpoint_dir = os.path.dirname(os.path.abspath(__file__))
-    sys.path.insert(0, checkpoint_dir)
-
     convert_argv = [
         "convert.py",
         "--model-type", args.model_type,
         "--loader", "core",
-        "--saver", "core",
+        "--saver", saver_name,
         "--load-dir", args.load_dir,
         "--save-dir", args.save_dir,
         "--true-vocab-size", str(args.source_vocab_size),
@@ -156,6 +179,7 @@ def main():
             "--target-pipeline-parallel-size",
             str(args.target_pipeline_parallel_size),
         ])
+    convert_argv.extend(vpp_argv)
     if args.megatron_path is not None:
         convert_argv.extend(["--megatron-path", args.megatron_path])
 
@@ -166,6 +190,11 @@ def main():
         print(f"target_tokenizer_size={tokenizer_size}")
     print(f"target_vocab_size={target_vocab_size}")
     print(f"make_vocab_size_divisible_by={args.make_vocab_size_divisible_by}")
+    if args.target_num_layers_per_virtual_pipeline_stage is not None:
+        print(
+            "target_num_layers_per_virtual_pipeline_stage="
+            f"{args.target_num_layers_per_virtual_pipeline_stage}"
+        )
     print(f"init_method={args.init_method}")
     if padded_vocab_size is not None:
         print(f"padded_vocab_size={padded_vocab_size}")
