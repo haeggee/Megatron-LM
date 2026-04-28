@@ -10,6 +10,7 @@ from utils import (
     chunk_bias,
     chunk_weight,
     init_converter_fake_groups,
+    pop_xielu_params,
     set_converter_fake_group_ranks,
 )
 from vocab_extension import VocabExtensionConfig, resize_vocab_table
@@ -552,10 +553,17 @@ class MegatronCheckpointSaverBase:
                     q_layernorm_weight = msg.pop("q norm weight")
                     k_layernorm_weight = msg.pop("k norm weight")
 
-                # XIELU activation parameters (Apertus-specific)
+                # XIELU activation parameters (Apertus-specific). Both loader_base
+                # and loader_apertus key forms accepted; see pop_xielu_params docstring.
+                # beta is intentionally drained but not propagated: megatron.core.activations.XIELU
+                # stores ``self.beta`` as a Python float (see activations.py), and
+                # schema.set_layer asserts the destination is a torch.Tensor. We rely on
+                # the destination's default XIELU configuration matching the source's.
+                xielu_eps = None
                 if getattr(self.md, 'xielu', False):
-                    xielu_alpha_p = msg.pop("mlp alpha_p")
-                    xielu_alpha_n = msg.pop("mlp alpha_n")
+                    xielu_alpha_p, xielu_alpha_n, _xielu_beta, xielu_eps = (
+                        pop_xielu_params(msg)
+                    )
 
                 # Save them to the model
                 for ep_rank in range(self.args.target_expert_parallel_size):
@@ -614,6 +622,8 @@ class MegatronCheckpointSaverBase:
                                 "mlp_xielu_alpha_p": xielu_alpha_p,
                                 "mlp_xielu_alpha_n": xielu_alpha_n,
                             })
+                            if xielu_eps is not None:
+                                params_dict["mlp_xielu_eps"] = xielu_eps
                         model = self.get_local_model(pp_rank, ep_rank, tp_rank)
                         schema.set_layer(model, layer_id, params_dict)
 

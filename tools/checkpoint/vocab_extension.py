@@ -1,15 +1,55 @@
 # Copyright (c) 2026, Swiss AI. All rights reserved.
 
-"""Utilities for deterministic vocab-table extension during checkpoint conversion."""
+"""Utilities for deterministic vocab-table extension during checkpoint conversion.
+
+Vocab-extension converter family — split across two directories:
+
+  tools/vocab_extension/                (CLI entry points)
+    extend_megatron_vocab.py    Megatron ckpt -> Megatron with extended vocab
+    extend_apertus_hf_vocab.py  Apertus HF ckpt -> Megatron with extended vocab
+
+  tools/checkpoint/                     (shared converter machinery)
+    vocab_extension.py    this file: deterministic row append + padding,
+                          ``vpp_saver_dispatch``, ``pop_xielu_params``
+    topology.py           layer routing + uniform-layout guard
+    saver_vpp.py          saver plugin loaded as ``--saver vpp`` when the
+                          target topology has virtual pipeline parallelism
+
+The CLI scripts dispatch through ``convert.py`` with ``--saver core`` (no VPP)
+or ``--saver vpp`` (when ``--target-num-layers-per-virtual-pipeline-stage`` is
+set). VPP routing lives in ``saver_vpp.py`` as a sibling subclass of
+``MegatronCheckpointSaverLLM``; shared saver code in ``saver_base.py`` /
+``saver_core.py`` only owns format/protocol behavior that applies to both.
+"""
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import torch
 
 
 DEFAULT_PADDING_SEED_OFFSET = 1_000_000
 VALID_INIT_METHODS = ("mean-std", "megatron-original")
+
+
+def vpp_saver_dispatch(
+    target_num_layers_per_virtual_pipeline_stage: Optional[int],
+) -> Tuple[str, List[str]]:
+    """Validate the VPP knob and return (saver_name, extra_argv) for convert.py.
+
+    Single source of truth for both ``extend_megatron_vocab.py`` and
+    ``extend_apertus_hf_vocab.py``. ``extra_argv`` is empty when VPP is disabled.
+    """
+    if target_num_layers_per_virtual_pipeline_stage is None:
+        return "core", []
+    if target_num_layers_per_virtual_pipeline_stage <= 0:
+        raise SystemExit(
+            "--target-num-layers-per-virtual-pipeline-stage must be positive."
+        )
+    return "vpp", [
+        "--target-num-layers-per-virtual-pipeline-stage",
+        str(target_num_layers_per_virtual_pipeline_stage),
+    ]
 
 
 @dataclass(frozen=True)

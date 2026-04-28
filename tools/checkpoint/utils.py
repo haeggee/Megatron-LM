@@ -1,4 +1,6 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+from typing import Optional, Tuple
+
 import psutil
 import torch
 
@@ -38,6 +40,29 @@ def chunk_weight(weight, parallel_mode, tp_size=1, ep_size=1):
         else:
             weight = weight.reshape(out_features, tp_size, in_features // tp_size).permute(1, 0, 2)
         return weight # (tp_size, output_features, in_features)
+
+
+def pop_xielu_params(msg: dict) -> Tuple[
+    torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]
+]:
+    """Decode XIELU params from a loader queue message; tolerate both key schemes.
+
+    ``loader_base``    emits ``"mlp xielu alpha p"`` / ``"mlp xielu alpha n"`` and
+    optionally ``"mlp xielu beta"`` / ``"mlp xielu eps"``.
+    ``loader_apertus`` emits ``"mlp alpha_p"`` / ``"mlp alpha_n"``.
+
+    Centralizes the cross-loader key disagreement so savers don't fork on it.
+    Returns ``(alpha_p, alpha_n, beta, eps)`` where ``beta`` and ``eps`` are
+    ``None`` if absent.
+    """
+    if "mlp xielu alpha p" in msg:
+        return (
+            msg.pop("mlp xielu alpha p"),
+            msg.pop("mlp xielu alpha n"),
+            msg.pop("mlp xielu beta", None),
+            msg.pop("mlp xielu eps", None),
+        )
+    return msg.pop("mlp alpha_p"), msg.pop("mlp alpha_n"), None, None
 
 
 def print_memory_usage(key, rank, num_ranks):
