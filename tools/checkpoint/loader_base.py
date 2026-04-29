@@ -239,8 +239,13 @@ class MegatronCheckpointLoaderBase:
                     mpu.set_virtual_pipeline_model_parallel_rank(i)
                     pre_process = mpu.is_pipeline_first_stage()
                     post_process = mpu.is_pipeline_last_stage()
-                    this_model = model_provider(pre_process=pre_process,
-                                                post_process=post_process).to(dtype)
+                    model_kwargs = {
+                        "pre_process": pre_process,
+                        "post_process": post_process,
+                    }
+                    if vp_size > 1:
+                        model_kwargs["vp_stage"] = i
+                    this_model = model_provider(**model_kwargs).to(dtype)
                     model_list.append(this_model)
 
                 # Each time we load, we set counters to 0, pass None for optimizer/ LR
