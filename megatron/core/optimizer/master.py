@@ -51,6 +51,7 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         # Hypersphere optimization.
         hypersphere_mode: Optional[Literal["row", "col", "rowcol", "invrowcol", "equi", "flat", "embed"]] = None,
+        hypersphere_embedding_mode: Optional[Literal["row", "col", "rowcol", "invrowcol", "equi", "flat"]] = None,
         hypersphere_kind: Optional[Literal["l2", "standard", "spectral", "orthogonal"]] = None,
         hypersphere_radius: Literal["learnable"] | float = 1.0,
         hypersphere_eps: float = 1e-8,
@@ -84,6 +85,7 @@ class MasterOptimizer(torch.optim.Optimizer):
         self.weight_decay_method = weight_decay_method
 
         self.hypersphere_mode = hypersphere_mode
+        self.hypersphere_embedding_mode = hypersphere_embedding_mode
         self.hypersphere_kind = hypersphere_kind
         self.hypersphere_radius = hypersphere_radius
         self.hypersphere_eps = hypersphere_eps
@@ -138,7 +140,8 @@ class MasterOptimizer(torch.optim.Optimizer):
                     for p in group["params"]:
                         is_qkv = self.is_qkv_fn(p)
                         is_out_proj = getattr(p, "is_out_proj", False)
-                        self._normalize(p, p, is_qkv=is_qkv, is_out_proj=is_out_proj)
+                        is_embedding = getattr(p, "is_embedding_or_output_parameter", False)
+                        self._normalize(p, p, is_qkv=is_qkv, is_out_proj=is_out_proj, is_embedding=is_embedding)
 
     @torch.no_grad()  # type: ignore[misc]
     @override
@@ -185,10 +188,11 @@ class MasterOptimizer(torch.optim.Optimizer):
         momentum_beta = group["momentum_beta"]
         is_qkv = self.is_qkv_fn(p)
         is_out_proj = getattr(p, "is_out_proj", False)
+        is_embedding = getattr(p, "is_embedding_or_output_parameter", False)
 
         # TODO: potentially project gradient to tangent space here.
         if self.hypersphere_project:
-            grad = self._project(p, grad, is_qkv=is_qkv, is_out_proj=is_out_proj)
+            grad = self._project(p, grad, is_qkv=is_qkv, is_out_proj=is_out_proj, is_embedding=is_embedding)
 
         # Get update direction.
         if group["use_orthogonal_updates"]:  # Muon branch.
@@ -268,10 +272,9 @@ class MasterOptimizer(torch.optim.Optimizer):
             self._apply_weight_decay_inplace(p, group)
 
         # Optionally, normalize update.
-        is_embedding = getattr(p, "is_embedding_or_output_parameter", False)
         apply_update_norm = self.hypersphere_update and (self.hypersphere_update_embeddings or not is_embedding)
         if self.hypersphere_mode is not None and apply_update_norm:
-            self._normalize(p, update, is_qkv=is_qkv, is_out_proj=is_out_proj)
+            self._normalize(p, update, is_qkv=is_qkv, is_out_proj=is_out_proj, is_embedding=is_embedding)
 
         if self._param_update_hook is not None:
             self._param_update_hook(p, update, is_qkv)
@@ -282,7 +285,7 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         # Optionally, normalize parameter.
         if self.hypersphere_mode is not None:
-            self._normalize(p, p, is_qkv=is_qkv, is_out_proj=is_out_proj)
+            self._normalize(p, p, is_qkv=is_qkv, is_out_proj=is_out_proj, is_embedding=is_embedding)
 
     def _apply_weight_decay_inplace(self, p, group):
         weight_decay = group["weight_decay"]
@@ -376,13 +379,20 @@ class MasterOptimizer(torch.optim.Optimizer):
         return orth_grad * scale_factor * self.extra_scale_factor
 
 
+    def _resolve_mode(self, is_embedding: bool):
+        """Return the effective hypersphere mode for this parameter."""
+        if is_embedding and self.hypersphere_embedding_mode is not None:
+            return self.hypersphere_embedding_mode
+        return self.hypersphere_mode
+
     def _normalize(self, p: torch.Tensor, x: torch.Tensor, is_qkv: bool = False, is_out_proj: bool = False,
-                   apply_muon_scaling: bool = False):
-        if self.hypersphere_mode is None:
+                   apply_muon_scaling: bool = False, is_embedding: bool = False):
+        mode = self._resolve_mode(is_embedding)
+        if mode is None:
             return
         if is_qkv and self.split_qkv:
             qs, ks, vs = split_qkv(x, self.qkv_split_shapes)
-            if self.split_qkv_heads and self.hypersphere_mode in {"col", "rowcol", "invrowcol", "flat", "equi"}:
+            if self.split_qkv_heads and mode in {"col", "rowcol", "invrowcol", "flat", "equi"}:
                 # When splitting heads using torch.split, we only get views of the
                 # original tensor, meaning the qs tensor gets modified in-place,
                 # no need to copy the updated q to qs after.
@@ -405,48 +415,46 @@ class MasterOptimizer(torch.optim.Optimizer):
         if self.hypersphere_radius == "learnable":
             raise NotImplementedError(f"Learnable hypersphere NYI")
 
-        if self.hypersphere_mode == "col":
+        if mode == "col":
             dim = 0
-        elif self.hypersphere_mode == "row":
+        elif mode == "row":
             dim = 1
-        elif self.hypersphere_mode in {"flat", "rowcol", "invrowcol", "equi"}:
+        elif mode in {"flat", "rowcol", "invrowcol", "equi"}:
             dim = None
-        elif self.hypersphere_mode == "embed":
+        elif mode == "embed":
             if is_out_proj:
                 dim = 0
             else:
                 dim = 1
         else:
-            raise ValueError(f"Unknown normalization {self.hypersphere_mode}")
+            raise ValueError(f"Unknown normalization {mode}")
 
         eps = self.hypersphere_radius if self.hypersphere_soft else self.hypersphere_eps
 
-        if self.hypersphere_mode in {"rowcol", "invrowcol"}:
+        if mode in {"rowcol", "invrowcol"}:
             assert self.hypersphere_kind == "l2"
             assert self.hypersphere_radius == 1.0
-            sinkhorn(x, eps=eps, first_norm_col="inv" not in self.hypersphere_mode)
-        elif self.hypersphere_mode == "equi":
+            sinkhorn(x, eps=eps, first_norm_col="inv" not in mode)
+        elif mode == "equi":
             assert self.hypersphere_kind == "l2"
             assert self.hypersphere_radius == 1.0
             equilibration(x, eps=eps)
         elif self.hypersphere_kind == "l2":
             norm = torch.norm(x, dim=dim, keepdim=True).clamp_min(eps)
-            #if torch.any(norm < eps):
-            #    print("Letsgoo")
-            #else:
-            #    print("avg norm:", norm.mean())
             x.mul_(self.hypersphere_radius / norm)
-            if self.hypersphere_mode == "flat":
-                max_in_out = max(x.size(-2), x.size(-1))
-                x.mul_(max_in_out**0.5)
+            if mode == "flat":
+                shape_max = max(x.size(-2), x.size(-1))
+                x.mul_(shape_max ** 0.5)
         elif self.hypersphere_kind == "spectral":
-            assert self.hypersphere_mode == "flat"
+            assert mode == "flat" or is_embedding, f"Spectral norm only supported for flat mode, got {mode}, is_embedding={is_embedding}"
             norm = spectral_norm(x).clamp_min(eps)
             x.mul_(self.hypersphere_radius / norm)
-        elif self.hypersphere_kind == "orthogonal":  # TODO verify lol.
-            assert self.hypersphere_mode == "flat"
-            x_normalized = self.hypersphere_radius * self.orthogonalize(p, x, ignore_scale=True, is_qkv=is_qkv)
-            x.copy_(x_normalized)
+        elif self.hypersphere_kind == "orthogonal":
+            assert mode == "flat" or is_embedding, f"Orthogonal norm only supported for flat mode, got {mode}, is_embedding={is_embedding}"
+            original_dtype = x.dtype
+            x_f32 = x.float() if original_dtype != torch.float32 else x
+            x_normalized = self.hypersphere_radius * self.orthogonalize(p, x_f32, ignore_scale=True, is_qkv=is_qkv)
+            x.copy_(x_normalized.to(original_dtype))
         elif self.hypersphere_kind == "standard":
             mu = x.mean(dim=dim, keepdim=True)
             std = x.std(dim=dim, keepdim=True).clamp_min(eps)
@@ -461,10 +469,11 @@ class MasterOptimizer(torch.optim.Optimizer):
                 muon_sf = get_muon_scale_factor(x.size(-2), x.size(-1), mode=self.scale_mode) * self.extra_scale_factor
             x.mul_(muon_sf)
 
-    def _project(self, p, g, is_qkv: bool = False, is_out_proj: bool = False):
-        if self.hypersphere_mode is None or not self.hypersphere_project:
+    def _project(self, p, g, is_qkv: bool = False, is_out_proj: bool = False, is_embedding: bool = False):
+        mode = self._resolve_mode(is_embedding)
+        if mode is None or not self.hypersphere_project:
             return
-        if is_qkv and self.split_qkv and self.hypersphere_mode not in {"row", "embed"}:
+        if is_qkv and self.split_qkv and mode not in {"row", "embed"}:
             p_qs, p_ks, p_vs = split_qkv(p, self.qkv_split_shapes)
             g_qs, g_ks, g_vs = split_qkv(g.clone(), self.qkv_split_shapes)
             if self.split_qkv_heads:
@@ -482,21 +491,21 @@ class MasterOptimizer(torch.optim.Optimizer):
                 g_vs = self._project(p_vs, g_vs)
             return merge_qkv((g_qs, g_ks, g_vs), p.size(), self.qkv_split_shapes)
 
-        if self.hypersphere_mode == "col":
+        if mode == "col":
             dim = 0
-        elif self.hypersphere_mode == "row":
+        elif mode == "row":
             dim = 1
-        elif self.hypersphere_mode == "flat":
+        elif mode == "flat":
             dim = None
-        elif self.hypersphere_mode in {"rowcol", "invrowcol", "equi"}:
+        elif mode in {"rowcol", "invrowcol", "equi"}:
             raise ValueError(f"Project rowcol nyi")
-        elif self.hypersphere_mode == "embed":
+        elif mode == "embed":
             if is_out_proj:
                 dim = 0
             else:
                 dim = 1
         else:
-            raise ValueError(f"Unknown normalization {self.hypersphere_mode}")
+            raise ValueError(f"Unknown normalization {mode}")
 
         if self.hypersphere_kind != "l2":
             raise ValueError(f"Project {self.hypersphere_kind} nyi")
@@ -777,17 +786,15 @@ def merge_heads(xs) -> torch.Tensor:
     return torch.cat(xs, dim=0)
 
 
+@torch.no_grad()
 def spectral_norm(x, n_iters: int = 10):
-    if x.size(-2) < x.size(-1):
-        x = x @ x.T
-    else:
-        x = x.T @ x
-
-    u = torch.randn(x.size(-1), device=x.device, dtype=x.dtype)
+    v = torch.randn(x.size(-1), device=x.device, dtype=x.dtype)
     for _ in range(n_iters):
-        u = u / torch.norm(u)
-        u = x @ u
-    return torch.norm(u)**0.5
+        u = x @ v
+        u = u / torch.linalg.vector_norm(u)
+        v = x.T @ u
+        v = v / torch.linalg.vector_norm(v)
+    return (u @ x @ v).abs()
 
 
 def sinkhorn(x, n_iters: int = 10, eps: float = 1e-8, first_norm_col: bool = True):
@@ -900,9 +907,9 @@ def get_megatron_master_optimizer(
                 param.is_qkv = True
             if ("linear_fc2" in name or "linear_proj" in name) and len(param.shape) == 2:
                 param.is_out_proj = True
-            # TODO(deyuf): currently only allow 2D non-embedding weight to avoid breaking
+            include_embeddings = config.hypersphere_embeddings or config.hypersphere_embedding_mode is not None
             if (
-                (config.hypersphere_embeddings or not getattr(param, 'is_embedding_or_output_parameter', False))
+                (include_embeddings or not getattr(param, 'is_embedding_or_output_parameter', False))
                 and len(param.shape) == 2
             ):
                 linear_params.append(param)
@@ -924,6 +931,7 @@ def get_megatron_master_optimizer(
 
         # Hypersphere optimization.
         "hypersphere_mode": config.hypersphere_mode,
+        "hypersphere_embedding_mode": config.hypersphere_embedding_mode,
         "hypersphere_kind": config.hypersphere_kind,
         "hypersphere_radius": config.hypersphere_radius,
         "hypersphere_update": config.hypersphere_update,

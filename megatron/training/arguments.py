@@ -1858,6 +1858,8 @@ def _add_network_size_args(parser):
     group.add_argument('--mlp-layer-scale-gate-scale', type=float)
     group.add_argument('--upscale-embedding', type=float)
     group.add_argument('--mlp-out-scale', type=float)
+    group.add_argument('--fixed-layer-scale', type=float,
+                       help='Fixed (non-trainable) scalar multiplier applied after post_norm / before residual.')
     group.add_argument('--softmax-scale', type=float)
     group.add_argument('--seednorm-init', type=float, default=1.0,
                           help='Initial value for the seednorm scaling parameter.')
@@ -2218,6 +2220,9 @@ def _add_regularization_args(parser):
     group.add_argument('--hypersphere-no-update', action="store_false", dest="hypersphere_update")
     group.add_argument('--hypersphere-no-update-embeddings', action="store_false", dest="hypersphere_update_embeddings")
     group.add_argument('--hypersphere-embeddings', action="store_true")
+    group.add_argument('--hypersphere-embedding-mode', type=_float_or_str, default=None,
+                       help='Hypersphere mode to use specifically for embedding/output parameters. '
+                            'If set, overrides --hypersphere-mode for embeddings. Also implies --hypersphere-embeddings.')
     group.add_argument('--hypersphere-split-heads', action="store_true")
     group.add_argument('--hypersphere-split-heads-update', action="store_true")
     group.add_argument('--hypersphere-project', action="store_true")

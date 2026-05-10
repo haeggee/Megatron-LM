@@ -179,6 +179,9 @@ class TransformerConfig(ModelParallelConfig):
     mlp_layer_scale_scale: Optional[float] = None
     mlp_out_scale: Optional[float] = None
 
+    fixed_layer_scale: Optional[float] = None
+    """If not none, a fixed (non-trainable) scalar multiplier is applied after post_norm / before residual."""
+
     upscale_embedding: Optional[float] = None
 
     use_stream_minus_residual: bool = False

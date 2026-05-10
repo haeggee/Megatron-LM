@@ -103,6 +103,7 @@ usage () {
 	echo " --mlp-layer-scale <float>"
 	echo " --mlp-layer-scale-gate-scale <float>"
 	echo " --mlp-out-scale <float>"
+	echo " --fixed-layer-scale <float>"
 	echo " --logits-layer-scale <float>"
 	echo " --logits-layer-scale-scale <float>"
 	echo " --upscale-embedding <float>"
@@ -423,6 +424,8 @@ while [[ $# -gt 0 ]]; do
 			MLP_LAYER_SCALE_GATE_SCALE=$2; shift 2;;
 		--mlp-out-scale)
 			MLP_OUT_SCALE=$2; shift 2;;
+		--fixed-layer-scale)
+			FIXED_LAYER_SCALE=$2; shift 2;;
 		--logits-layer-scale)
 			LOGITS_LAYER_SCALE=$2; shift 2;;
 		--logits-layer-scale-scale)
@@ -760,7 +763,7 @@ if [[ ! -z "${SOFT_MAX_SCALE+xxx}" ]]; then
 fi
 
 if [[ ! -z "${LAYER_SCALE+xxx}" ]]; then
-	SUFFIX=$SUFFIX-ls
+	SUFFIX=$SUFFIX-ls${LAYER_SCALE}
 	LONG_SUFFIX=$LONG_SUFFIX-ls$LAYER_SCALE
 	ARCH_ARGS+=(--layer-scale $LAYER_SCALE)
 	if [[ ! -z "${LAYER_SCALE_SCALE+xxx}" ]]; then
@@ -811,6 +814,11 @@ if [[ ! -z "${MLP_OUT_SCALE+xxx}" ]]; then
 	SUFFIX=$SUFFIX-mlpO
 	LONG_SUFFIX=$LONG_SUFFIX-mlpO$MLP_OUT_SCALE
 	ARCH_ARGS+=(--mlp-out-scale $MLP_OUT_SCALE)
+fi
+if [[ ! -z "${FIXED_LAYER_SCALE+xxx}" ]]; then
+	SUFFIX=$SUFFIX-fls${FIXED_LAYER_SCALE}
+	LONG_SUFFIX=$LONG_SUFFIX-fls$FIXED_LAYER_SCALE
+	ARCH_ARGS+=(--fixed-layer-scale $FIXED_LAYER_SCALE)
 fi
 if [[ ! -z "${LOGITS_LAYER_SCALE+xxx}" ]]; then
 	SUFFIX=$SUFFIX-lgsls$LOGITS_LAYER_SCALE

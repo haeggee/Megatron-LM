@@ -719,6 +719,50 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
         else:
             self.is_stub_optimizer = True
 
+        self._param_update_hook = None  # set by InternalsLogger; called as hook(p, update, is_qkv)
+
+    @torch.no_grad()
+    def step_with_ready_grads(self) -> bool:
+        """Step the optimizer with ready gradients, return successful.
+
+        When ``_param_update_hook`` is set, snapshots fp32 master params before
+        the inner optimizer step and recovers the pure update (without weight
+        decay) afterward so that the hook receives the same tensor semantics as
+        :class:`MasterOptimizer._param_update_hook`.
+        """
+        hook = self._param_update_hook
+        snapshots = None
+        if hook is not None and not self.is_stub_optimizer:
+            snapshots = {}
+            for group in self.optimizer.param_groups:
+                for p in group['params']:
+                    if p.ndim == 2:
+                        snapshots[id(p)] = p.data.clone()
+
+        success = super().step_with_ready_grads()
+
+        if snapshots is not None:
+            decoupled_wd = self.config.decoupled_weight_decay
+            for group in self.optimizer.param_groups:
+                lr = group['lr']
+                wd = group.get('weight_decay', 0.0)
+                if lr == 0.0:
+                    continue
+                for p in group['params']:
+                    old = snapshots.get(id(p))
+                    if old is None:
+                        continue
+                    # Recover pure optimizer update (excluding weight decay).
+                    # AdamW: p_new = p_old*(1 - lr*wd) - lr*step  =>  step = -(delta + lr*wd*p_old)/lr
+                    # Adam:  p_new = p_old - lr*step(grad+wd*p)   =>  step = -delta/lr  (wd in grad)
+                    update = -(p.data - old) / lr
+                    if decoupled_wd and wd != 0.0:
+                        update.sub_(old, alpha=wd)
+                    is_qkv = getattr(p, 'is_qkv', False)
+                    hook(p, update, is_qkv)
+
+        return success
+
     def zero_grad(self, set_to_none=True):
         """We only need to zero the model related parameters, i.e.,
         float16_groups & fp32_from_fp32_groups. We additionally zero
@@ -918,6 +962,7 @@ class FP32Optimizer(MegatronOptimizer):
 
         self._scale = torch.tensor([1.0], dtype=torch.float, device='cuda')
         self.is_stub_optimizer = True if optimizer is None else False
+        self._param_update_hook = None  # set by InternalsLogger; called as hook(p, update, is_qkv)
 
     def zero_grad(self, set_to_none=True):
         """Copied from torch.optim.optimizer"""
@@ -958,6 +1003,15 @@ class FP32Optimizer(MegatronOptimizer):
             return True
         timers = self.config.timers
 
+        hook = self._param_update_hook
+        snapshots = None
+        if hook is not None:
+            snapshots = {}
+            for group in self.optimizer.param_groups:
+                for p in group['params']:
+                    if p.ndim == 2:
+                        snapshots[id(p)] = p.data.clone()
+
         # Update parameters.
         if timers is not None:
             timers('optimizer-inner-step', log_level=1).start(
@@ -966,6 +1020,23 @@ class FP32Optimizer(MegatronOptimizer):
         self.optimizer.step()
         if timers is not None:
             timers('optimizer-inner-step').stop()
+
+        if snapshots is not None:
+            decoupled_wd = self.config.decoupled_weight_decay
+            for group in self.optimizer.param_groups:
+                lr = group['lr']
+                wd = group.get('weight_decay', 0.0)
+                if lr == 0.0:
+                    continue
+                for p in group['params']:
+                    old = snapshots.get(id(p))
+                    if old is None:
+                        continue
+                    update = -(p.data - old) / lr
+                    if decoupled_wd and wd != 0.0:
+                        update.sub_(old, alpha=wd)
+                    is_qkv = getattr(p, 'is_qkv', False)
+                    hook(p, update, is_qkv)
 
         return True
 

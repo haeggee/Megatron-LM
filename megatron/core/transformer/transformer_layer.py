@@ -224,6 +224,7 @@ class TransformerLayerSubmodules:
     self_attention: Union[ModuleSpec, type] = IdentityOp
     self_attn_bda: Union[ModuleSpec, type] = IdentityFuncOp
     attention_layerscale: Union[ModuleSpec, type] = IdentityOp
+    fixed_attention_layerscale: Union[ModuleSpec, type] = IdentityOp
     residual_attention_layerscale: Union[ModuleSpec, type] = IdentityOp
     post_attention_layernorm: Union[ModuleSpec, type] = IdentityOp
     post_attention_block_layernorm: Union[ModuleSpec, type] = IdentityOp
@@ -236,6 +237,7 @@ class TransformerLayerSubmodules:
     mlp: Union[ModuleSpec, type] = IdentityOp
     mlp_bda: Union[ModuleSpec, type] = IdentityFuncOp
     mlp_layerscale: Union[ModuleSpec, type] = IdentityOp
+    fixed_mlp_layerscale: Union[ModuleSpec, type] = IdentityOp
     residual_mlp_layerscale: Union[ModuleSpec, type] = IdentityOp
     post_mlp_layernorm: Union[ModuleSpec, type] = IdentityOp
     post_mlp_block_layernorm: Union[ModuleSpec, type] = IdentityOp
@@ -333,6 +335,14 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             sequence_parallel=self.config.sequence_parallel,
         )
 
+        # [Module 2.2f: Fixed PostAttention LayerScale]
+        self.fixed_attention_layerscale = build_module(
+            submodules.fixed_attention_layerscale,
+            hidden_size=self.config.hidden_size,
+            value=self.config.fixed_layer_scale,
+            sequence_parallel=self.config.sequence_parallel,
+        )
+
         # [Module 2.3: PostSelfAttention Layernorm (and post residual)]
         self.post_attention_block_layernorm = build_module(
             submodules.post_attention_block_layernorm,
@@ -350,6 +360,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             scale=self.config.residual_layer_scale_scale,
             sequence_parallel=self.config.sequence_parallel,
         )
+
         
         # [Module 3: BiasDropoutFusion]
         self.self_attn_bda = build_module(submodules.self_attn_bda)
@@ -428,6 +439,14 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             hidden_size=self.config.hidden_size,
             initial_value=self.config.layer_scale,
             scale=self.config.layer_scale_scale,
+            sequence_parallel=self.config.sequence_parallel,
+        )
+
+        # [Module 8.2f: Fixed PostMLP LayerScale]
+        self.fixed_mlp_layerscale = build_module(
+            submodules.fixed_mlp_layerscale,
+            hidden_size=self.config.hidden_size,
+            value=self.config.fixed_layer_scale,
             sequence_parallel=self.config.sequence_parallel,
         )
 
@@ -654,6 +673,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         if self.config.use_stream_minus_residual:
             attention_output = attention_output - residual
         attention_output = self.attention_layerscale(attention_output)
+        attention_output = self.fixed_attention_layerscale(attention_output)
         attention_output = self.log_after_attention(attention_output)
         attention_output_with_bias = (attention_output, bias)
 
@@ -787,6 +807,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         if self.config.use_stream_minus_residual:
             mlp_output = mlp_output - residual
         mlp_output = self.mlp_layerscale(mlp_output)
+        mlp_output = self.fixed_mlp_layerscale(mlp_output)
         mlp_output_with_bias = (mlp_output, bias)
 
         if self.recompute_pre_mlp_layernorm:

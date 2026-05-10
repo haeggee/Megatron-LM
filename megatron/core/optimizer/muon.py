@@ -93,6 +93,8 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
         self.is_qkv_fn = is_qkv_fn
         self.qkv_split_shapes = qkv_split_shapes
 
+        self._param_update_hook = None  # set by InternalsLogger; called as hook(p, update, is_qkv)
+
         weight_decay_method = "decoupled" if use_decoupled_weight_decay else "l2"
         super().__init__(
             params,
@@ -105,6 +107,12 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
             scaled_orthogonalize_fn=scaled_orthogonalize_fn,
         )
 
+
+    def pre_weight_update_fn_inplace(self, p: torch.Tensor, update: torch.Tensor) -> None:
+        """Called by OrthogonalizedOptimizer.step() right before p.add_(update, alpha=-lr)."""
+        if self._param_update_hook is not None:
+            is_qkv = self.is_qkv_fn(p) if self.is_qkv_fn else False
+            self._param_update_hook(p, update, is_qkv)
 
     def orthogonalize(self, p: torch.Tensor, grad: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         """Orthogonalize the momentum.
