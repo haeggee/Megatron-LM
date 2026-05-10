@@ -151,7 +151,7 @@ MEGATRON_ARGS=(
     --save $CKPT_DIR
     --load $CKPT_DIR
     --save-interval 5722
-    --ckpt-format torch_dist
+    --ckpt-format torch
     --log-throughput
     --log-progress
     --log-memory-to-tensorboard

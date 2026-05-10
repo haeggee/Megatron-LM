@@ -1,14 +1,14 @@
 #!/bin/bash
 #
-# Cooldown sbatch paired with transformer-pp-350m-wsdmc-normuon-lr2e-4-moe-16e-tk2.sbatch.
-# Architecture and optimizer block must match the main run exactly so the
-# checkpoint loads. Schedule, save, load, exit-duration, and warmup are
-# overridden via --override-opt_param-scheduler.
+# WSDMC smoke for NorMuon + 16e-tk2 + --ckpt-format torch. Validates that
+# NorMuon's per-row second-moment state survives save/load when using
+# legacy torch ckpt format (torch_dist hits an assert because NorMuon's
+# moment2 has shape (1, cols) while the param is (rows, cols)).
 #
-# Parameters via env (set by submit-wsdmc.sh):
-#   WSDMC_CKPT_DIR / WSDMC_CKPT_ITER / WSDMC_COOLDOWN_ITERS / WSDMC_EXP_NAME
+# 30 iters, ckpts at 10/20/30. Pair with wsdmc-smoke-normuon-cooldown.sbatch.
 #
-#SBATCH --job-name=wsdmc-cooldown-normuon-lr2e-4-moe-16e-tk2
+#SBATCH --job-name=wsdmc-smoke-normuon-main
+#SBATCH --time=00:30:00
 #SBATCH --output=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline-wsdmc/_research/results/runs/%x-%j.log
 #SBATCH --error=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline-wsdmc/_research/results/runs/%x-%j.log
 #SBATCH --nodes=1
@@ -20,11 +20,6 @@
 
 set -euo pipefail
 : "${MEGATRON_DATA_PATH:?please set MEGATRON_DATA_PATH}"
-: "${WSDMC_CKPT_DIR:?missing WSDMC_CKPT_DIR}"
-: "${WSDMC_CKPT_ITER:?missing WSDMC_CKPT_ITER}"
-: "${WSDMC_COOLDOWN_ITERS:?missing WSDMC_COOLDOWN_ITERS}"
-: "${WSDMC_EXP_NAME:?missing WSDMC_EXP_NAME}"
-
 echo "START TIME: $(date)"
 export APERTUS_PHASE_SBATCH_START=$(date +%s.%N)
 
@@ -52,29 +47,17 @@ MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)
 MASTER_PORT=25678
 
 PROJECT=${WANDB_PROJECT:-megatron-lm-research-baseline}
-
-ENDPOINT_TOKENS=$(( (WSDMC_CKPT_ITER + WSDMC_COOLDOWN_ITERS) * 524288 ))
-ENDPOINT_GB=$(awk "BEGIN {printf \"%.1f\", $ENDPOINT_TOKENS / 1e9}")
-COOLDOWN_NAME="$WSDMC_EXP_NAME-cd-${ENDPOINT_GB}B"
-COOLDOWN_CKPT_DIR=$WORKDIR/_research/results/ckpts/$COOLDOWN_NAME
-mkdir -p $COOLDOWN_CKPT_DIR
-
-TRAIN_ITERS_TOTAL=$(( WSDMC_CKPT_ITER + WSDMC_COOLDOWN_ITERS ))
-TRAIN_SAMPLES=$(( TRAIN_ITERS_TOTAL * 128 ))
-LR_DECAY_SAMPLES=$TRAIN_SAMPLES
-LR_WSD_DECAY_SAMPLES=$(( WSDMC_COOLDOWN_ITERS * 128 ))
+EXP_NAME=wsdmc-smoke-normuon
+CKPT_DIR=$WORKDIR/_research/results/ckpts/$EXP_NAME
+mkdir -p $CKPT_DIR
+rm -rf $CKPT_DIR/iter_* $CKPT_DIR/latest_checkpointed_iteration.txt 2>/dev/null || true
 
 export APERTUS_LOG_DIR=$WORKDIR/_research/results/performance
-export APERTUS_FEATURE=transformer-pp-normuon-moe-16e-tk2-wsdmc
-export APERTUS_TRACK=350m-wsdmc-cooldowns
-export APERTUS_RUN_NAME=$COOLDOWN_NAME-$SLURM_JOB_ID
+export APERTUS_FEATURE=wsdmc-smoke-normuon-main
+export APERTUS_TRACK=wsdmc-smoke
+export APERTUS_RUN_NAME=$EXP_NAME-$SLURM_JOB_ID
 export APERTUS_LOG_ACT_STATS=1
-export APERTUS_LOG_TOP1_ACC=1
 export APERTUS_LOG_ROW_CV=1
-export APERTUS_LOG_NEURON_STATS=1
-export APERTUS_LOG_NEURON_INTERVAL=50
-export APERTUS_LOG_PER_LAYER_GRADS=1
-export APERTUS_LOG_LOSS_SPIKES=1
 
 MEGATRON_ARGS=(
     --transformer-impl transformer_engine
@@ -107,9 +90,10 @@ MEGATRON_ARGS=(
     --moe-per-layer-logging
     --micro-batch-size 8
     --global-batch-size 128
-    --train-samples $TRAIN_SAMPLES
+    --train-samples 3840
+    --exit-duration-in-mins 25
     --log-interval 1
-    --eval-interval $TRAIN_SAMPLES
+    --eval-interval 3840
     --eval-iters 0
     --optimizer adaptive_muon
     --dataloader-type single
@@ -133,11 +117,10 @@ MEGATRON_ARGS=(
     --lr 2e-4
     --min-lr 2e-5
     --lr-decay-style WSD
-    --lr-warmup-samples 0
+    --lr-warmup-samples 1280
     --lr-wsd-decay-style minus_sqrt
-    --lr-decay-samples $LR_DECAY_SAMPLES
-    --lr-wsd-decay-samples $LR_WSD_DECAY_SAMPLES
-    --override-opt_param-scheduler
+    --lr-decay-samples 7680
+    --lr-wsd-decay-samples 1024
     --seed 42
     --init-method-std 0.02
     --bf16
@@ -148,18 +131,13 @@ MEGATRON_ARGS=(
     --sequence-parallel
     --use-distributed-optimizer
     --overlap-grad-reduce
-    --load $WSDMC_CKPT_DIR
-    --ckpt-step $WSDMC_CKPT_ITER
-    --save $COOLDOWN_CKPT_DIR
-    --save-interval $WSDMC_COOLDOWN_ITERS
+    --save $CKPT_DIR
+    --load $CKPT_DIR
+    --save-interval 10
     --ckpt-format torch
     --log-throughput
     --log-progress
-    --log-memory-to-tensorboard
     --log-params-norm
-    --tensorboard-dir $WORKDIR/_research/results/runs/tb-$SLURM_JOB_ID
-    --tensorboard-log-interval 1
-    --log-timers-to-tensorboard
     --tokenizer-type GPT2BPETokenizer
     --vocab-file $WORKDIR/_research/data/gpt2-vocab.json
     --merge-file $WORKDIR/_research/data/gpt2-merges.txt
@@ -172,8 +150,8 @@ MEGATRON_ARGS=(
 MEGATRON_ARGS_STR="${MEGATRON_ARGS[@]}"
 if [ -n "${WANDB_API_KEY:-}" ]; then
     export WANDB_PROJECT=$PROJECT
-    export WANDB_NAME=$COOLDOWN_NAME-$SLURM_JOB_ID
-    MEGATRON_ARGS_STR="$MEGATRON_ARGS_STR --wandb-project $PROJECT --wandb-exp-name $COOLDOWN_NAME-$SLURM_JOB_ID --wandb-save-dir $WORKDIR/_research/results/runs"
+    export WANDB_NAME=$EXP_NAME-$SLURM_JOB_ID
+    MEGATRON_ARGS_STR="$MEGATRON_ARGS_STR --wandb-project $PROJECT --wandb-exp-name $EXP_NAME-$SLURM_JOB_ID --wandb-save-dir $WORKDIR/_research/results/runs"
 else
     export WANDB_MODE=disabled
 fi
@@ -190,14 +168,7 @@ ENV_SETUP="export MASTER_ADDR=$MASTER_ADDR; \
 TRAINING_CMD="bash $WORKDIR/_research/launch/install_python_deps.sh $PACKAGE_DIR && python3 $WORKDIR/pretrain_gpt.py $MEGATRON_ARGS_STR"
 
 echo "CMD: $TRAINING_CMD"
-echo "COOLDOWN_NAME: $COOLDOWN_NAME"
-echo "  load:                 $WSDMC_CKPT_DIR (iter $WSDMC_CKPT_ITER)"
-echo "  cooldown_iters:       $WSDMC_COOLDOWN_ITERS"
-echo "  endpoint_tokens:      $ENDPOINT_TOKENS (~${ENDPOINT_GB}B)"
-echo "  train_samples:        $TRAIN_SAMPLES"
-echo "  lr_wsd_decay_samples: $LR_WSD_DECAY_SAMPLES"
-echo "  save:                 $COOLDOWN_CKPT_DIR"
-
+echo "CKPT_DIR: $CKPT_DIR"
 export APERTUS_PHASE_PRE_SRUN=$(date +%s.%N)
 srun -lu --mpi=pmix --network=disable_rdzv_get --environment=$WORKDIR/_research/launch/alps3.toml \
     --cpus-per-task $SLURM_CPUS_PER_TASK --wait 120 \
