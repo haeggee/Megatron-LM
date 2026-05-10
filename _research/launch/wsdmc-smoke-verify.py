@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""Verify a WSDMC smoke run.
-
-Run after `wsdmc-smoke-main.sbatch` and `wsdmc-smoke-cooldown.sbatch` both
-complete. Checks:
-
-  1. Main produced 3 checkpoints (iters 10, 20, 30) under torch_dist format.
-  2. Each checkpoint has the same shard layout (same set of *.distcp files).
-  3. MoE expert weight shards are present (grouped-GEMM 3D tensors).
-  4. Cooldown produced its own iter_15 checkpoint with the same shard layout
-     as the main's iter_10 (proves model survived save/load round-trip).
-  5. Cooldown log shows: load succeeded, LR decayed monotonically over 5
-     cooldown iters, no NaN loss.
-
-Usage:
-  cd <repo root>
-  python3 _research/launch/wsdmc-smoke-verify.py
-"""
+# Verify a WSDMC smoke run.
+#
+# Run after wsdmc-smoke-main.sbatch and wsdmc-smoke-cooldown.sbatch both
+# complete. Checks:
+#   1. Main produced 3 checkpoints (iters 10, 20, 30) under torch_dist format.
+#   2. Each checkpoint has the same shard layout (same set of *.distcp files).
+#   3. MoE expert weight shards are present (grouped-GEMM 3D tensors).
+#   4. Cooldown produced its own iter_15 checkpoint with the same shard layout
+#      as the main's iter_10 (proves model survived save/load round-trip).
+#   5. Cooldown log shows: load succeeded, LR decayed monotonically over 5
+#      cooldown iters, no NaN loss.
+#
+# Usage:
+#   cd <repo root>
+#   python3 _research/launch/wsdmc-smoke-verify.py
+#
+# Compatible with Python 3.6+ (login node default).
 
 import os
 import re
@@ -48,18 +48,18 @@ def warn(name: str, detail: str = "") -> None:
     print(f"{WARN} {name}{(': ' + detail) if detail else ''}")
 
 
-def list_iter_dirs(d: Path) -> list[Path]:
+def list_iter_dirs(d):
     if not d.is_dir():
         return []
     return sorted(p for p in d.iterdir() if p.is_dir() and re.match(r"iter_\d+$", p.name))
 
 
-def shard_set(iter_dir: Path) -> set[str]:
+def shard_set(iter_dir):
     """Set of shard filenames inside an iter_NNN dir (torch_dist .distcp)."""
     return {p.name for p in iter_dir.rglob("*.distcp")}
 
 
-def has_expert_shards(iter_dir: Path) -> bool:
+def has_expert_shards(iter_dir):
     """Look for any tensor key containing 'expert' or 'mlp.experts' in
     the metadata file (torch_dist saves a .metadata file with key index)."""
     meta = iter_dir / ".metadata"
@@ -74,14 +74,14 @@ def has_expert_shards(iter_dir: Path) -> bool:
         return False
 
 
-def find_latest_log(prefix: str) -> Path | None:
+def find_latest_log(prefix):
     if not RUNS_ROOT.is_dir():
         return None
     cands = sorted(RUNS_ROOT.glob(f"{prefix}-*.log"))
     return cands[-1] if cands else None
 
 
-def parse_lr_seq(log_path: Path) -> list[float]:
+def parse_lr_seq(log_path):
     """Pull the lr value from each per-iteration line. Megatron logs a
     line like 'lr: 1.000E-02' or 'learning rate: 1.000000E-02'."""
     if not log_path.is_file():
@@ -98,7 +98,7 @@ def parse_lr_seq(log_path: Path) -> list[float]:
     return out
 
 
-def parse_loss_seq(log_path: Path) -> list[float]:
+def parse_loss_seq(log_path):
     if not log_path.is_file():
         return []
     out = []
@@ -113,7 +113,7 @@ def parse_loss_seq(log_path: Path) -> list[float]:
     return out
 
 
-def log_says(log_path: Path, needle: str) -> bool:
+def log_says(log_path, needle):
     if not log_path.is_file():
         return False
     return needle in log_path.read_text(errors="ignore")
