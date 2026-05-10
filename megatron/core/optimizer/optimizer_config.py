@@ -249,6 +249,9 @@ class OptimizerConfig:
     hypersphere_embeddings: bool = False
     """If enabled, then embeddings will also be normalized."""
 
+    hypersphere_embedding_mode: Optional[Literal["row", "col", "rowcol", "flat"]] = None
+    """When set, overrides hypersphere_mode for embedding/output parameters. Also implies hypersphere_embeddings."""
+
     hypersphere_split_heads: bool = False
     """If enabled, then each q,k,v head matrix will be normalized separately."""
 

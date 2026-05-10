@@ -2219,6 +2219,9 @@ def _add_regularization_args(parser):
     group.add_argument('--hypersphere-no-update', action="store_false", dest="hypersphere_update")
     group.add_argument('--hypersphere-no-update-embeddings', action="store_false", dest="hypersphere_update_embeddings")
     group.add_argument('--hypersphere-embeddings', action="store_true")
+    group.add_argument('--hypersphere-embedding-mode', type=_float_or_str, default=None,
+                       help='Hypersphere mode to use specifically for embedding/output parameters. '
+                            'If set, overrides --hypersphere-mode for embeddings. Also implies --hypersphere-embeddings.')
     group.add_argument('--hypersphere-split-heads', action="store_true")
     group.add_argument('--hypersphere-split-heads-update', action="store_true")
     group.add_argument('--hypersphere-project', action="store_true")
