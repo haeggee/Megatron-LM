@@ -21,7 +21,7 @@
 #   ckpt is decayed in a paired cooldown sbatch via submit-wsdmc.sh.
 #
 #SBATCH --job-name=350m-wsdmc-normuon-lr2e-4-moe-16e-tk2
-#SBATCH --time=07:00:00
+#SBATCH --time=11:00:00
 #SBATCH --output=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline-wsdmc/_research/results/runs/%x-%j.log
 #SBATCH --error=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline-wsdmc/_research/results/runs/%x-%j.log
 #SBATCH --nodes=1
@@ -108,7 +108,7 @@ MEGATRON_ARGS=(
     --micro-batch-size 8
     --global-batch-size 128
     --train-samples 3662080
-    --exit-duration-in-mins 380
+    --exit-duration-in-mins 600
     --log-interval 1
     --eval-interval 3662080
     --eval-iters 0
@@ -149,6 +149,7 @@ MEGATRON_ARGS=(
     --use-distributed-optimizer
     --overlap-grad-reduce
     --save $CKPT_DIR
+    --load $CKPT_DIR
     --save-interval 5722
     --ckpt-format torch_dist
     --log-throughput

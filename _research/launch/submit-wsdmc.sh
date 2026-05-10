@@ -31,6 +31,11 @@ COOLDOWN_SBATCH="${2:-$(dirname "$MAIN_SBATCH")/wsdmc-cooldown-${DEFAULT_COOLDOW
 N_CKPTS="${WSDMC_N_CKPTS:-5}"
 COOLDOWN_FRAC="${WSDMC_COOLDOWN_FRAC:-0.2}"
 GBS="${WSDMC_GBS:-128}"
+# Number of chained main-job submissions. Each main job runs until its
+# --exit-duration-in-mins triggers a save+exit; the next link in the chain
+# auto-resumes via --load=--save. Use >1 when full training exceeds the
+# partition's MaxTime. Cooldowns depend on the LAST main-link's afterok.
+N_MAIN_JOBS="${WSDMC_N_MAIN_JOBS:-1}"
 
 # Parse main sbatch for --train-samples and --save-interval (as iters).
 # These appear inside the MEGATRON_ARGS=( ... ) array in the sbatch body.
@@ -72,12 +77,26 @@ echo "  train iters:     $TRAIN_ITERS"
 echo "  save interval:   $SAVE_INTERVAL"
 echo "  N checkpoints:   $N_CKPTS"
 echo "  cooldown frac:   $COOLDOWN_FRAC"
+echo "  N main jobs:     $N_MAIN_JOBS"
 echo
 
-# Submit main
-MAIN_OUT=$(sbatch --parsable --export=ALL,WSDMC_EXP_NAME="$WSDMC_EXP_NAME",WSDMC_CKPT_DIR="$WSDMC_CKPT_DIR" "$MAIN_SBATCH")
-MAIN_JID=$(echo "$MAIN_OUT" | tr -d '\n' | awk '{print $NF}')
-echo "Submitted MAIN: jobid=$MAIN_JID"
+# Submit chain of main jobs. Each link auto-resumes from the previous via
+# --load=--save (set to the same dir in the main sbatch). The cooldowns
+# depend on the LAST link's afterok; intermediate links' afterok keeps the
+# chain alive only if the previous link exits cleanly (which Megatron does
+# at exit-duration-in-mins).
+LAST_MAIN_JID=""
+for j in $(seq 1 "$N_MAIN_JOBS"); do
+    DEP_ARG=()
+    if [ -n "$LAST_MAIN_JID" ]; then
+        DEP_ARG=(--dependency=afterok:"$LAST_MAIN_JID")
+    fi
+    MAIN_OUT=$(sbatch --parsable "${DEP_ARG[@]}" --export=ALL,WSDMC_EXP_NAME="$WSDMC_EXP_NAME",WSDMC_CKPT_DIR="$WSDMC_CKPT_DIR" "$MAIN_SBATCH")
+    MAIN_JID=$(echo "$MAIN_OUT" | tr -d '\n' | awk '{print $NF}')
+    echo "Submitted MAIN $j/$N_MAIN_JOBS: jobid=$MAIN_JID${LAST_MAIN_JID:+ (afterok:$LAST_MAIN_JID)}"
+    LAST_MAIN_JID="$MAIN_JID"
+done
+MAIN_JID="$LAST_MAIN_JID"
 
 # Submit one cooldown per checkpoint
 for i in $(seq 1 "$N_CKPTS"); do
