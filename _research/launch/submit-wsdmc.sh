@@ -29,6 +29,13 @@ COOLDOWN_SBATCH="${2:-$(dirname "$MAIN_SBATCH")/wsdmc-cooldown-${DEFAULT_COOLDOW
 [ -f "$COOLDOWN_SBATCH" ] || { echo "ERROR: cooldown sbatch not found: $COOLDOWN_SBATCH" >&2; exit 1; }
 
 N_CKPTS="${WSDMC_N_CKPTS:-5}"
+# Fraction of the WSD endpoint's total length that the cooldown spans:
+#   l / (t + l) = p, so l = t * p / (1 - p)
+# Each cooldown is then a real WSD run of total length (t + l) where the
+# last p fraction is decay. With p=0.2 the endpoints land at 1.25 * t.
+# Design the main run so the saved iters t_i = (i/N) * train_iters give
+# round-number endpoints; e.g. p=0.2 and train_iters = 5 * save_interval
+# = 22890 give endpoints {3,6,9,12,15}B at GBS=128 / seq=4096.
 COOLDOWN_FRAC="${WSDMC_COOLDOWN_FRAC:-0.2}"
 GBS="${WSDMC_GBS:-128}"
 # Number of chained main-job submissions. Each main job runs until its
@@ -102,8 +109,9 @@ MAIN_JID="$LAST_MAIN_JID"
 for i in $(seq 1 "$N_CKPTS"); do
     CKPT_ITER=$(( SAVE_INTERVAL * i ))
     CKPT_TOKENS=$(( CKPT_ITER * GBS * 4096 ))                          # GBS * seq=4096
-    # COOLDOWN_ITERS = round(CKPT_ITER * COOLDOWN_FRAC), at least 1
-    COOLDOWN_ITERS=$(awk -v ci="$CKPT_ITER" -v f="$COOLDOWN_FRAC" 'BEGIN{ v=ci*f; printf "%d", (v<1?1:v+0.5) }')
+    # COOLDOWN_ITERS = round(CKPT_ITER * p / (1 - p)), at least 1.
+    # See COOLDOWN_FRAC comment above for derivation.
+    COOLDOWN_ITERS=$(awk -v ci="$CKPT_ITER" -v p="$COOLDOWN_FRAC" 'BEGIN{ v=ci*p/(1-p); printf "%d", (v<1?1:v+0.5) }')
     ENDPOINT_TOKENS=$(( (CKPT_ITER + COOLDOWN_ITERS) * GBS * 4096 ))
     ENDPOINT_GB=$(awk -v t="$ENDPOINT_TOKENS" 'BEGIN{ printf "%.1f", t/1e9 }')
 
