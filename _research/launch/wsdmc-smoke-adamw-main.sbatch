@@ -1,22 +1,24 @@
 #!/bin/bash
 #
-# WSDMC smoke test - cooldown side. Loads iter 10 from wsdmc-smoke-main and
-# runs a 5-iter cooldown on the 350M MoE leader config.
+# WSDMC smoke - AdamW + 16e-tk1-sh1. Tiny version of the production main
+# sbatch: 30 iters, save-interval=10, train-iters = 5 * save-interval = 50
+# scaled down... wait we use 30 so ckpts at iters {10, 20, 30}.
 #
-# Validates:
-#   1. torch_dist checkpoint with MoE/grouped-GEMM expert weights round-trips
-#      (load doesn't hit the historical "TP > EP * ETP" bug or 3D-shard issues)
-#   2. --override-opt_param-scheduler imposes a fresh WSD decay schedule on
-#      the loaded scheduler state
-#   3. Optimizer state (Aurora momentum + AdamW for experts/scalars) loads
-#      cleanly; first cooldown iter produces a non-NaN loss and reasonable LR
-#   4. Cooldown writes its own ckpt at iter 15 to a separate dir
+# Validates the AdamW + torch_dist save path on the production MoE
+# architecture before launching the 12B main.
 #
-# Run after wsdmc-smoke-main finishes:
-#   sbatch _research/launch/wsdmc-smoke-cooldown.sbatch
+# After this completes, smoke-test the cooldown by invoking the production
+# cooldown sbatch with env-var overrides:
 #
-#SBATCH --job-name=wsdmc-smoke-cooldown
-#SBATCH --time=00:20:00
+#   WORKDIR=$(pwd)
+#   sbatch --time=00:20:00 --job-name=wsdmc-smoke-adamw-cd \
+#       --export=ALL,WSDMC_CKPT_DIR=$WORKDIR/_research/results/ckpts/wsdmc-smoke-adamw,\
+#               WSDMC_CKPT_ITER=10,WSDMC_COOLDOWN_ITERS=3,\
+#               WSDMC_EXP_NAME=wsdmc-smoke-adamw-cd \
+#       _research/launch/wsdmc-cooldown-adamw-lr5e-4-moe-16e-tk1-sh1.sbatch
+#
+#SBATCH --job-name=wsdmc-smoke-adamw-main
+#SBATCH --time=00:30:00
 #SBATCH --output=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline-wsdmc/_research/results/runs/%x-%j.log
 #SBATCH --error=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline-wsdmc/_research/results/runs/%x-%j.log
 #SBATCH --nodes=1
@@ -55,27 +57,16 @@ MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)
 MASTER_PORT=25678
 
 PROJECT=${WANDB_PROJECT:-megatron-lm-research-baseline}
-
-CKPT_DIR=${WSDMC_CKPT_DIR:-$WORKDIR/_research/results/ckpts/wsdmc-smoke}
-CKPT_ITER=${WSDMC_CKPT_ITER:-10}
-COOLDOWN_ITERS=${WSDMC_COOLDOWN_ITERS:-5}
-
-EXP_NAME=wsdmc-smoke-cd
-COOLDOWN_CKPT_DIR=$WORKDIR/_research/results/ckpts/$EXP_NAME
-mkdir -p $COOLDOWN_CKPT_DIR
-rm -rf $COOLDOWN_CKPT_DIR/iter_* $COOLDOWN_CKPT_DIR/latest_checkpointed_iteration.txt 2>/dev/null || true
-
-TRAIN_ITERS_TOTAL=$(( CKPT_ITER + COOLDOWN_ITERS ))
-TRAIN_SAMPLES=$(( TRAIN_ITERS_TOTAL * 128 ))
-LR_DECAY_SAMPLES=$TRAIN_SAMPLES
-LR_WSD_DECAY_SAMPLES=$(( COOLDOWN_ITERS * 128 ))
+EXP_NAME=wsdmc-smoke-adamw
+CKPT_DIR=$WORKDIR/_research/results/ckpts/$EXP_NAME
+mkdir -p $CKPT_DIR
+rm -rf $CKPT_DIR/iter_* $CKPT_DIR/latest_checkpointed_iteration.txt 2>/dev/null || true
 
 export APERTUS_LOG_DIR=$WORKDIR/_research/results/performance
-export APERTUS_FEATURE=wsdmc-smoke-cooldown
+export APERTUS_FEATURE=wsdmc-smoke-adamw-main
 export APERTUS_TRACK=wsdmc-smoke
 export APERTUS_RUN_NAME=$EXP_NAME-$SLURM_JOB_ID
 export APERTUS_LOG_ACT_STATS=1
-export APERTUS_LOG_TOP1_ACC=1
 export APERTUS_LOG_ROW_CV=1
 
 MEGATRON_ARGS=(
@@ -97,10 +88,11 @@ MEGATRON_ARGS=(
     --untie-embeddings-and-output-weights
     --attention-backend auto
     --seq-length 4096
-    --num-experts 32
-    --moe-router-topk 3
-    --moe-ffn-hidden-size 640
-    --moe-shared-expert-intermediate-size 640
+    --num-experts 16
+    --moe-router-topk 1
+    --moe-router-pre-softmax
+    --moe-ffn-hidden-size 1280
+    --moe-shared-expert-intermediate-size 1280
     --moe-router-load-balancing-type aux_loss
     --moe-aux-loss-coeff 1e-2
     --moe-z-loss-coeff 1e-3
@@ -110,11 +102,12 @@ MEGATRON_ARGS=(
     --moe-per-layer-logging
     --micro-batch-size 8
     --global-batch-size 128
-    --train-samples $TRAIN_SAMPLES
+    --train-samples 3840
+    --exit-duration-in-mins 25
     --log-interval 1
-    --eval-interval $TRAIN_SAMPLES
+    --eval-interval 3840
     --eval-iters 0
-    --optimizer aurora
+    --optimizer adam
     --dataloader-type single
     --manual-gc
     --manual-gc-interval 50
@@ -127,23 +120,13 @@ MEGATRON_ARGS=(
     --clip-grad 1.0
     --adam-beta1 0.9
     --adam-beta2 0.95
-    --muon-scale-mode spectral
-    --muon-nesterov
-    --muon-momentum 0.95
-    --muon-scalar-lr 1.5e-3
-    --muon-scalar-weight-decay 0.0
-    --polar-precision bf16
-    --aurora-pp-iterations 2
-    --aurora-pp-beta 0.5
-    --aurora-num-ns-steps 12
-    --lr 1e-2
-    --min-lr 1e-3
+    --lr 5e-4
+    --min-lr 5e-5
     --lr-decay-style WSD
-    --lr-warmup-samples 0
+    --lr-warmup-samples 1280
     --lr-wsd-decay-style minus_sqrt
-    --lr-decay-samples $LR_DECAY_SAMPLES
-    --lr-wsd-decay-samples $LR_WSD_DECAY_SAMPLES
-    --override-opt_param-scheduler
+    --lr-decay-samples 7680
+    --lr-wsd-decay-samples 1024
     --seed 42
     --init-method-std 0.02
     --bf16
@@ -154,10 +137,9 @@ MEGATRON_ARGS=(
     --sequence-parallel
     --use-distributed-optimizer
     --overlap-grad-reduce
+    --save $CKPT_DIR
     --load $CKPT_DIR
-    --ckpt-step $CKPT_ITER
-    --save $COOLDOWN_CKPT_DIR
-    --save-interval $COOLDOWN_ITERS
+    --save-interval 10
     --ckpt-format torch_dist
     --log-throughput
     --log-progress
@@ -192,12 +174,14 @@ ENV_SETUP="export MASTER_ADDR=$MASTER_ADDR; \
 TRAINING_CMD="bash $WORKDIR/_research/launch/install_python_deps.sh $PACKAGE_DIR && python3 $WORKDIR/pretrain_gpt.py $MEGATRON_ARGS_STR"
 
 echo "CMD: $TRAINING_CMD"
-echo "Loading from: $CKPT_DIR (iter $CKPT_ITER), running $COOLDOWN_ITERS cooldown iters"
-echo "Cooldown ckpt save: $COOLDOWN_CKPT_DIR"
+echo "CKPT_DIR: $CKPT_DIR"
 export APERTUS_PHASE_PRE_SRUN=$(date +%s.%N)
 srun -lu --mpi=pmix --network=disable_rdzv_get --environment=$WORKDIR/_research/launch/alps3.toml \
     --cpus-per-task $SLURM_CPUS_PER_TASK --wait 120 \
     bash -c "export APERTUS_PHASE_CONTAINER_STARTED=\$(date +%s.%N); $ENV_SETUP; $TRAINING_CMD"
 
 echo "END TIME: $(date)"
-echo "Smoke cooldown done. Run wsdmc-smoke-verify.py to compare loaded vs saved expert weights."
+echo "Smoke main done. Now sbatch the cooldown smoke via:"
+echo "  WORKDIR=$WORKDIR; sbatch --time=00:20:00 --job-name=wsdmc-smoke-adamw-cd \\"
+echo "      --export=ALL,WSDMC_CKPT_DIR=\$WORKDIR/_research/results/ckpts/wsdmc-smoke-adamw,WSDMC_CKPT_ITER=10,WSDMC_COOLDOWN_ITERS=3,WSDMC_EXP_NAME=wsdmc-smoke-adamw-cd \\"
+echo "      _research/launch/wsdmc-cooldown-adamw-lr5e-4-moe-16e-tk1-sh1.sbatch"

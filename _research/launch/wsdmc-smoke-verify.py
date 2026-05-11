@@ -26,8 +26,8 @@ REPO = Path(__file__).resolve().parents[2]
 CKPTS_ROOT = REPO / "_research" / "results" / "ckpts"
 RUNS_ROOT = REPO / "_research" / "results" / "runs"
 
-MAIN_CKPT_DIR = CKPTS_ROOT / "wsdmc-smoke"
-COOLDOWN_CKPT_DIR = CKPTS_ROOT / "wsdmc-smoke-cd"
+MAIN_CKPT_DIR = CKPTS_ROOT / "wsdmc-smoke-adamw"
+COOLDOWN_CKPT_DIR = CKPTS_ROOT / "wsdmc-smoke-adamw-cd-cd-0.0B"  # endpoint < 1B rounds to 0.0B
 
 PASS = "[PASS]"
 FAIL = "[FAIL]"
@@ -144,7 +144,7 @@ if main_iters:
 # ---- 4. cooldown checkpoint ---------------------------------------------------
 cd_iters = list_iter_dirs(COOLDOWN_CKPT_DIR)
 cd_iter_names = [p.name for p in cd_iters]
-check("cooldown: 1 checkpoint at iter_15", cd_iter_names == ["iter_0000015"], f"got {cd_iter_names}")
+check("cooldown: 1 checkpoint at iter_13", cd_iter_names == ["iter_0000013"], f"got {cd_iter_names}")
 
 if cd_iters and main_iters:
     main_s = shard_set(main_iters[0])
@@ -156,7 +156,7 @@ if cd_iters and main_iters:
 
 # ---- 5. cooldown training log ------------------------------------------------
 print("\n=== cooldown log ===")
-cd_log = find_latest_log("wsdmc-smoke-cooldown")
+cd_log = find_latest_log("wsdmc-smoke-adamw-cd")
 if not cd_log:
     check("cooldown: log file present", False, "no log found")
 else:
@@ -168,15 +168,16 @@ else:
 
     lrs = parse_lr_seq(cd_log)
     if lrs:
-        # We expect ~5 cooldown training iters reporting LR. Drop any
-        # repeated leading lines from setup; keep last >=5.
-        train_lrs = lrs[-5:] if len(lrs) >= 5 else lrs
+        # Last N=3 training iters of the cooldown (matches WSDMC_COOLDOWN_ITERS=3).
+        n_cd = 3
+        train_lrs = lrs[-n_cd:] if len(lrs) >= n_cd else lrs
         decreasing = all(train_lrs[i + 1] <= train_lrs[i] + 1e-12 for i in range(len(train_lrs) - 1))
-        last_below_peak = train_lrs[-1] < 1e-2
+        # Final LR should land at or near min_lr. For peak=5e-4, min=5e-5.
+        last_at_min = train_lrs[-1] < 1.0e-4
         check("cooldown: LR sequence non-increasing across cooldown iters",
               decreasing, f"lrs={train_lrs}")
-        check("cooldown: LR ends below peak (1e-2)",
-              last_below_peak, f"final lr = {train_lrs[-1]:.3e}")
+        check("cooldown: LR ends at/near min_lr (< 1e-4)",
+              last_at_min, f"final lr = {train_lrs[-1]:.3e}")
     else:
         warn("cooldown: could not parse LR sequence from log")
 
