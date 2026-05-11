@@ -28,7 +28,7 @@ DEFAULT_COOLDOWN_SUFFIX=$(echo "$MAIN_BASE" | sed -E 's/^.*-wsdmc-//; s/\.sbatch
 # Extract size (e.g. "350m", "760m", "1.3b") from "transformer-pp-<size>-wsdmc-..."
 # and prefer a size-prefixed cooldown if present (avoids architecture-mismatch
 # when two different-size mains share the same optimizer/MoE suffix).
-MAIN_SIZE=$(echo "$MAIN_BASE" | sed -nE 's/^transformer-pp-([0-9.]+[mb])-wsdmc-.*/\1/p')
+MAIN_SIZE=$(echo "$MAIN_BASE" | sed -nE 's/^transformer-pp-([0-9a-z.]+)-wsdmc-.*/\1/p')
 if [ -n "${2:-}" ]; then
     COOLDOWN_SBATCH="$2"
 elif [ -n "$MAIN_SIZE" ] && [ -f "$MAIN_DIR/wsdmc-cooldown-${MAIN_SIZE}-${DEFAULT_COOLDOWN_SUFFIX}.sbatch" ]; then
