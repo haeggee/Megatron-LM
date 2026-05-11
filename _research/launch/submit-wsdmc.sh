@@ -22,8 +22,20 @@ set -euo pipefail
 MAIN_SBATCH="${1:?usage: submit-wsdmc.sh <main-sbatch> [cooldown-sbatch]}"
 # Default cooldown: same dir, same suffix-after-'wsdmc-' as main.
 # transformer-pp-350m-wsdmc-FOO.sbatch -> wsdmc-cooldown-FOO.sbatch
-DEFAULT_COOLDOWN_SUFFIX=$(basename "$MAIN_SBATCH" | sed -E 's/^.*-wsdmc-//; s/\.sbatch$//')
-COOLDOWN_SBATCH="${2:-$(dirname "$MAIN_SBATCH")/wsdmc-cooldown-${DEFAULT_COOLDOWN_SUFFIX}.sbatch}"
+MAIN_DIR=$(dirname "$MAIN_SBATCH")
+MAIN_BASE=$(basename "$MAIN_SBATCH")
+DEFAULT_COOLDOWN_SUFFIX=$(echo "$MAIN_BASE" | sed -E 's/^.*-wsdmc-//; s/\.sbatch$//')
+# Extract size (e.g. "350m", "760m", "1.3b") from "transformer-pp-<size>-wsdmc-..."
+# and prefer a size-prefixed cooldown if present (avoids architecture-mismatch
+# when two different-size mains share the same optimizer/MoE suffix).
+MAIN_SIZE=$(echo "$MAIN_BASE" | sed -nE 's/^transformer-pp-([0-9.]+[mb])-wsdmc-.*/\1/p')
+if [ -n "${2:-}" ]; then
+    COOLDOWN_SBATCH="$2"
+elif [ -n "$MAIN_SIZE" ] && [ -f "$MAIN_DIR/wsdmc-cooldown-${MAIN_SIZE}-${DEFAULT_COOLDOWN_SUFFIX}.sbatch" ]; then
+    COOLDOWN_SBATCH="$MAIN_DIR/wsdmc-cooldown-${MAIN_SIZE}-${DEFAULT_COOLDOWN_SUFFIX}.sbatch"
+else
+    COOLDOWN_SBATCH="$MAIN_DIR/wsdmc-cooldown-${DEFAULT_COOLDOWN_SUFFIX}.sbatch"
+fi
 
 [ -f "$MAIN_SBATCH" ]     || { echo "ERROR: main sbatch not found: $MAIN_SBATCH" >&2; exit 1; }
 [ -f "$COOLDOWN_SBATCH" ] || { echo "ERROR: cooldown sbatch not found: $COOLDOWN_SBATCH" >&2; exit 1; }
