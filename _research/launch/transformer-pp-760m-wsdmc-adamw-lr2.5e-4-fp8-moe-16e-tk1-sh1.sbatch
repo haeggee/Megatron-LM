@@ -32,10 +32,10 @@
 #   auto-saves and exits clean; the next link resumes via --load=--save.
 #
 #SBATCH --job-name=760m-wsdmc-adamw-lr2.5e-4-fp8-moe-16e-tk1-sh1
-#SBATCH --time=11:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline-wsdmc/_research/results/runs/%x-%j.log
 #SBATCH --error=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline-wsdmc/_research/results/runs/%x-%j.log
-#SBATCH --nodes=1
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=72
@@ -121,7 +121,7 @@ MEGATRON_ARGS=(
     --micro-batch-size 4
     --global-batch-size 128
     --train-samples 2929920
-    --exit-duration-in-mins 600
+    --exit-duration-in-mins 320
     --log-interval 1
     --eval-interval 2929920
     --eval-iters 0
@@ -157,6 +157,7 @@ MEGATRON_ARGS=(
     --sequence-parallel
     --use-distributed-optimizer
     --overlap-grad-reduce
+    --overlap-param-gather
     --save $CKPT_DIR
     --load $CKPT_DIR
     --save-interval 4578

@@ -12,7 +12,7 @@
 #SBATCH --job-name=wsdmc-cooldown-760m-adamw-lr2.5e-4-fp8-moe-16e-tk1-sh1
 #SBATCH --output=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline-wsdmc/_research/results/runs/%x-%j.log
 #SBATCH --error=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline-wsdmc/_research/results/runs/%x-%j.log
-#SBATCH --nodes=1
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=72
@@ -147,6 +147,7 @@ MEGATRON_ARGS=(
     --sequence-parallel
     --use-distributed-optimizer
     --overlap-grad-reduce
+    --overlap-param-gather
     --load $WSDMC_CKPT_DIR
     --ckpt-step $WSDMC_CKPT_ITER
     --save $COOLDOWN_CKPT_DIR
