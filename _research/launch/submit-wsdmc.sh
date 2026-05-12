@@ -83,9 +83,9 @@ fi
 # agree, and pass via env so cooldowns can target the same ckpt dir.
 GIT_SHA=$(git rev-parse --short HEAD)
 JOB_NAME=$(grep -E '^#SBATCH --job-name=' "$MAIN_SBATCH" | head -n1 | sed 's/^#SBATCH --job-name=//')
-WSDMC_EXP_NAME="${JOB_NAME}-${GIT_SHA}"
+WSDMC_EXP_NAME="${WSDMC_EXP_NAME:-${JOB_NAME}-${GIT_SHA}}"
 WORKDIR="$(pwd)"
-WSDMC_CKPT_DIR="$WORKDIR/_research/results/ckpts/$WSDMC_EXP_NAME"
+WSDMC_CKPT_DIR="${WSDMC_CKPT_DIR:-$WORKDIR/_research/results/ckpts/$WSDMC_EXP_NAME}"
 
 echo "WSDMC submission plan"
 echo "  main sbatch:     $MAIN_SBATCH"
@@ -104,17 +104,22 @@ echo
 # depend on the LAST link's afterok; intermediate links' afterok keeps the
 # chain alive only if the previous link exits cleanly (which Megatron does
 # at exit-duration-in-mins).
+# Set WSDMC_SKIP_MAIN=1 to submit cooldowns only (mains already done).
 LAST_MAIN_JID=""
-for j in $(seq 1 "$N_MAIN_JOBS"); do
-    DEP_ARG=()
-    if [ -n "$LAST_MAIN_JID" ]; then
-        DEP_ARG=(--dependency=afterok:"$LAST_MAIN_JID")
-    fi
-    MAIN_OUT=$(sbatch --parsable "${DEP_ARG[@]}" --export=ALL,WSDMC_EXP_NAME="$WSDMC_EXP_NAME",WSDMC_CKPT_DIR="$WSDMC_CKPT_DIR" "$MAIN_SBATCH")
-    MAIN_JID=$(echo "$MAIN_OUT" | tr -d '\n' | awk '{print $NF}')
-    echo "Submitted MAIN $j/$N_MAIN_JOBS: jobid=$MAIN_JID${LAST_MAIN_JID:+ (afterok:$LAST_MAIN_JID)}"
-    LAST_MAIN_JID="$MAIN_JID"
-done
+if [ "${WSDMC_SKIP_MAIN:-0}" = "0" ]; then
+    for j in $(seq 1 "$N_MAIN_JOBS"); do
+        DEP_ARG=()
+        if [ -n "$LAST_MAIN_JID" ]; then
+            DEP_ARG=(--dependency=afterok:"$LAST_MAIN_JID")
+        fi
+        MAIN_OUT=$(sbatch --parsable "${DEP_ARG[@]}" --export=ALL,WSDMC_EXP_NAME="$WSDMC_EXP_NAME",WSDMC_CKPT_DIR="$WSDMC_CKPT_DIR" "$MAIN_SBATCH")
+        MAIN_JID=$(echo "$MAIN_OUT" | tr -d '\n' | awk '{print $NF}')
+        echo "Submitted MAIN $j/$N_MAIN_JOBS: jobid=$MAIN_JID${LAST_MAIN_JID:+ (afterok:$LAST_MAIN_JID)}"
+        LAST_MAIN_JID="$MAIN_JID"
+    done
+else
+    echo "WSDMC_SKIP_MAIN=1 - skipping main submission; cooldowns will run immediately"
+fi
 MAIN_JID="$LAST_MAIN_JID"
 
 # Submit one cooldown per checkpoint
@@ -129,13 +134,21 @@ for i in $(seq 1 "$N_CKPTS"); do
 
     # SLURM time budget: ~1.0 sec/iter on the MoE-32E-tk3-sh1 config + 30%
     # margin + 5 min container/init overhead. Min 30 min.
-    SLURM_SECS=$(awk -v c="$COOLDOWN_ITERS" 'BEGIN{ s=c*1.0*1.3+300; if(s<1800)s=1800; printf "%d", s }')
+    # Per-iter sec estimate × 1.3 margin + 600s container/init overhead, min 30 min.
+    # Default 2.5 covers 350m bf16 (~2s), 350m fp8 2-node (~2.1s), 350mx2 PP=2 (~2.6s).
+    # Override via WSDMC_SEC_PER_ITER for faster configs (e.g. 4-node 760m fp8 at ~1.3).
+    SEC_PER_ITER="${WSDMC_SEC_PER_ITER:-2.5}"
+    SLURM_SECS=$(awk -v c="$COOLDOWN_ITERS" -v s="$SEC_PER_ITER" 'BEGIN{ x=c*s*1.3+600; if(x<1800)x=1800; printf "%d", x }')
     SLURM_HHMM=$(printf '%02d:%02d:00' $((SLURM_SECS/3600)) $(( (SLURM_SECS%3600)/60 )))
 
     JNAME="${WSDMC_EXP_NAME}-cd-${ENDPOINT_GB}B"
 
+    DEP_ARGS=()
+    if [ -n "$MAIN_JID" ]; then
+        DEP_ARGS=(--dependency=afterok:"$MAIN_JID")
+    fi
     CD_OUT=$(sbatch --parsable \
-        --dependency=afterok:"$MAIN_JID" \
+        "${DEP_ARGS[@]}" \
         --time="$SLURM_HHMM" \
         --job-name="$JNAME" \
         --export=ALL,WSDMC_EXP_NAME="$WSDMC_EXP_NAME",WSDMC_CKPT_DIR="$WSDMC_CKPT_DIR",WSDMC_CKPT_ITER="$CKPT_ITER",WSDMC_COOLDOWN_ITERS="$COOLDOWN_ITERS" \
