@@ -1,19 +1,20 @@
 #!/bin/bash
 #
 # 760M-active MoE wsdmc production run.
-#   Architecture: 16 routed experts top-1 + 1 shared, all width 1280
+#   Architecture: 16 routed experts top-1 + 1 shared, all width 2048
 #                 (Switch-routing with shared backstop, iso-active to dense).
-#                 Per-layer FFN active = (1 routed + 1 shared) * 3 * 1024 * 1280 = 7.86M
-#                                        (matches dense 350M)
-#                 Per-layer FFN total  = (16 + 1) * 3 * 1024 * 1280 = 66.8M
-#   Active params: ~355M.  Total params: ~1.76B.
+#                 Per-layer FFN active = (1 routed + 1 shared) * 3 * 1536 * 2048 = 18.87M
+#                                        (matches dense 760M)
+#                 Per-layer FFN total  = (16 + 1) * 3 * 1536 * 2048 = 160.4M
+#   Active params: ~760M.  Total params: ~4.16B.
 #   K=1 routing halves all-to-all dispatch volume vs K=2; shared expert
 #   provides the always-on stability backstop. Same MoE shape as the
 #   16e-tk1-sh1 entry on the 1B-ablation board (in -moe sidecar).
 #
-#   Optimizer: AdamW at lr=2.5e-4 (canonical dense 350M baseline uses 3e-4;
-#   slightly higher here per user direction). Standard state, torch_dist
-#   save works without the NorMuon per-row-moment shape issue.
+#   Optimizer: NorMuon (adaptive_muon, per-row 2nd moment) at matrix
+#   lr=6e-4 (high end of the 3-point LR sweep). Scalar LR 1.5e-3 on
+#   embeddings/norms/biases. Uses --ckpt-format torch (torch_dist breaks
+#   on the NorMuon per-row-moment shape).
 #
 #   WSDMC schedule (round endpoints {3, 6, 9, 12, 15}B):
 #     l/(t+l) = 0.2  =>  l = 0.25 * t (cooldown is 20% of the WSD
@@ -32,7 +33,7 @@
 #   auto-saves and exits clean; the next link resumes via --load=--save.
 #
 #SBATCH --job-name=760m-wsdmc-normuon-lr6e-4-fp8-moe-16e-tk1-sh1
-#SBATCH --time=06:00:00
+#SBATCH --time=11:00:00
 #SBATCH --output=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline-wsdmc/_research/results/runs/%x-%j.log
 #SBATCH --error=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline-wsdmc/_research/results/runs/%x-%j.log
 #SBATCH --nodes=4
@@ -121,7 +122,7 @@ MEGATRON_ARGS=(
     --micro-batch-size 4
     --global-batch-size 128
     --train-samples 2929920
-    --exit-duration-in-mins 320
+    --exit-duration-in-mins 600
     --log-interval 1
     --eval-interval 2929920
     --eval-iters 0
