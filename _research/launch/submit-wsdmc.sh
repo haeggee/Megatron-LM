@@ -71,11 +71,14 @@ SAVE_INTERVAL=$(get_arg "--save-interval")
 
 TRAIN_ITERS=$(( TRAIN_SAMPLES / GBS ))
 
-# Invariant
+# Invariant: train-iters must equal N_CKPTS * save-interval. Relaxed when
+# WSDMC_SKIP_COOLDOWNS=1 (custom non-uniform cooldowns submitted out-of-band).
 EXPECTED_INTERVAL=$(( TRAIN_ITERS / N_CKPTS ))
-if [ "$SAVE_INTERVAL" -ne "$EXPECTED_INTERVAL" ] || [ $(( SAVE_INTERVAL * N_CKPTS )) -ne "$TRAIN_ITERS" ]; then
-    echo "ERROR: invariant violated: train-iters ($TRAIN_ITERS) must equal N_CKPTS ($N_CKPTS) * save-interval ($SAVE_INTERVAL); got expected interval $EXPECTED_INTERVAL" >&2
-    exit 1
+if [ "${WSDMC_SKIP_COOLDOWNS:-0}" = "0" ]; then
+    if [ "$SAVE_INTERVAL" -ne "$EXPECTED_INTERVAL" ] || [ $(( SAVE_INTERVAL * N_CKPTS )) -ne "$TRAIN_ITERS" ]; then
+        echo "ERROR: invariant violated: train-iters ($TRAIN_ITERS) must equal N_CKPTS ($N_CKPTS) * save-interval ($SAVE_INTERVAL); got expected interval $EXPECTED_INTERVAL" >&2
+        exit 1
+    fi
 fi
 
 # Build experiment name. The main sbatch's EXP_NAME default is
@@ -122,7 +125,13 @@ else
 fi
 MAIN_JID="$LAST_MAIN_JID"
 
-# Submit one cooldown per checkpoint
+# Submit one cooldown per checkpoint, unless WSDMC_SKIP_COOLDOWNS=1
+# (e.g. when emitting non-uniform endpoints out-of-band).
+if [ "${WSDMC_SKIP_COOLDOWNS:-0}" = "1" ]; then
+    echo "WSDMC_SKIP_COOLDOWNS=1 - skipping cooldown submission${MAIN_JID:+; chain ends at MAIN_JID=$MAIN_JID}"
+    exit 0
+fi
+
 for i in $(seq 1 "$N_CKPTS"); do
     CKPT_ITER=$(( SAVE_INTERVAL * i ))
     CKPT_TOKENS=$(( CKPT_ITER * GBS * 4096 ))                          # GBS * seq=4096
