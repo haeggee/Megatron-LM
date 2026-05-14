@@ -13,8 +13,10 @@
 # stable + minus_sqrt cooldown over last 732420 samples (3B = 20% of 15B).
 # train-samples=3662109 -> 15.0B tokens at seq=4096; train-iters=28610.
 #
-# Final checkpoint only: save-interval set above train-iters so Megatron
-# saves once at end. No WSDMC, no mid-run cooldowns.
+# Save every 5000 iters (~47 min at ~570ms/iter) for resume safety.
+# Prior run (2226101) crashed at iter 24287/28610 from a NCCL watchdog
+# timeout on the DP+CP group with no recent save (save-interval was
+# 100k); ~3.1B tokens of compute lost. No WSDMC, no mid-run cooldowns.
 #
 # Expected wall: ~4-5 h on 4 nodes (16 GH200) at ~60 k tok/s/GPU dense.
 #
@@ -130,7 +132,7 @@ MEGATRON_ARGS=(
     --overlap-param-gather
     --save $CKPT_DIR
     --load $CKPT_DIR
-    --save-interval 100000
+    --save-interval 5000
     --ckpt-format torch_dist
     --log-throughput
     --log-progress
