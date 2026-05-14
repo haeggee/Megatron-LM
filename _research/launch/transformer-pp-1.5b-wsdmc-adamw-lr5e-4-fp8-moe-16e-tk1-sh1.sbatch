@@ -15,15 +15,16 @@
 #   Optimizer: AdamW at lr=5e-4 (parity with 760M / 350M / 175M AdamW
 #   lr=5e-4 chains; serves as D/N curve anchor).
 #
-#   Parallelism (4 nodes, 16 GPUs):
+#   Parallelism (8 nodes, 32 GPUs):
 #     TP=4 (intra-node NVLink across all 4 GPUs/node)
 #     EP=4 (cross-node alltoall for routed experts)
 #     ETP defaults to TP=4 (so each routed expert is sharded ETP*EP=16-way)
 #     PP=1, CP=1
-#     Decoder: TP=4, DP=4 (16 = TP*DP)
-#     Expert:  ETP=4, EP=4, EDP=1 (16 = ETP*EP*EDP) -- no expert DP, grad-accum
-#              across the 128-GBS handles it
-#   MBS=4, GBS=128 -> 8 grad-accum steps per attention DP rank.
+#     Decoder: TP=4, DP=8 (32 = TP*DP)
+#     Expert:  ETP=4, EP=4, EDP=2 (32 = ETP*EP*EDP)
+#   MBS=4, GBS=128 -> 4 grad-accum steps per attention DP rank.
+#   Selected after a 10-iter TP=4 EP=4 smoke on 4 nodes measured ~5.9 s/iter
+#   (~59 TFLOP/s/GPU); doubling nodes is expected to halve wall to ~3 s/iter.
 #
 #   WSDMC schedule (round endpoints {3, 6, 9, 12, 15}B):
 #     l/(t+l) = 0.2  =>  l = 0.25 * t (cooldown is 20% of the WSD
@@ -45,7 +46,7 @@
 #SBATCH --time=11:00:00
 #SBATCH --output=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline-wsdmc/_research/results/runs/%x-%j.log
 #SBATCH --error=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline-wsdmc/_research/results/runs/%x-%j.log
-#SBATCH --nodes=4
+#SBATCH --nodes=8
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=72
