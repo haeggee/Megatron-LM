@@ -15,16 +15,19 @@
 #   Optimizer: AdamW at lr=5e-4 (parity with 760M / 350M / 175M AdamW
 #   lr=5e-4 chains; serves as D/N curve anchor).
 #
-#   Parallelism (8 nodes, 32 GPUs):
+#   Parallelism (4 nodes, 16 GPUs):
 #     TP=4 (intra-node NVLink across all 4 GPUs/node)
 #     EP=4 (cross-node alltoall for routed experts)
 #     ETP defaults to TP=4 (so each routed expert is sharded ETP*EP=16-way)
 #     PP=1, CP=1
-#     Decoder: TP=4, DP=8 (32 = TP*DP)
-#     Expert:  ETP=4, EP=4, EDP=2 (32 = ETP*EP*EDP)
+#     Decoder: TP=4, DP=4 (16 = TP*DP)
+#     Expert:  ETP=4, EP=4, EDP=1 (16 = ETP*EP*EDP) -- Decoder DP=EDP=4 matches.
 #   MBS=4, GBS=128 -> 4 grad-accum steps per attention DP rank.
-#   Selected after a 10-iter TP=4 EP=4 smoke on 4 nodes measured ~5.9 s/iter
-#   (~59 TFLOP/s/GPU); doubling nodes is expected to halve wall to ~3 s/iter.
+#   Smoke at this config: ~5.9 s/iter (~59 TFLOP/s/GPU). Main wall ~38h;
+#   submit with WSDMC_N_MAIN_JOBS=4 (each 11h link runs ~10h training then
+#   auto-saves and exits; next link auto-resumes via --load=--save).
+#   Tried 8 nodes TP=4 EP=4 (EDP=2): NCCL-OFI ep_create failed at MoE metric
+#   tracker init. Staying at 4 nodes EDP=1 to keep Decoder DP = EDP.
 #
 #   WSDMC schedule (round endpoints {3, 6, 9, 12, 15}B):
 #     l/(t+l) = 0.2  =>  l = 0.25 * t (cooldown is 20% of the WSD
@@ -46,7 +49,7 @@
 #SBATCH --time=11:00:00
 #SBATCH --output=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline-wsdmc/_research/results/runs/%x-%j.log
 #SBATCH --error=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline-wsdmc/_research/results/runs/%x-%j.log
-#SBATCH --nodes=8
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=72
