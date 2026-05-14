@@ -151,6 +151,7 @@ MEGATRON_ARGS=(
     --lr-wsd-decay-style minus_sqrt
     --lr-decay-samples 50000000
     --lr-wsd-decay-samples 1024
+    --override-opt_param-scheduler
     --seed 42
     --init-method-std 0.02
     --bf16
