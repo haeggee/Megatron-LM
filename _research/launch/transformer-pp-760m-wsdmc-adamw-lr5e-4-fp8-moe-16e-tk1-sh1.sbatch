@@ -120,10 +120,10 @@ MEGATRON_ARGS=(
     --moe-per-layer-logging
     --micro-batch-size 4
     --global-batch-size 128
-    --train-samples 2929920
+    --train-samples 11719680
     --exit-duration-in-mins 600
     --log-interval 1
-    --eval-interval 2929920
+    --eval-interval 11719680
     --eval-iters 0
     --optimizer adam
     --dataloader-type single
@@ -143,8 +143,9 @@ MEGATRON_ARGS=(
     --lr-decay-style WSD
     --lr-warmup-samples 25600
     --lr-wsd-decay-style minus_sqrt
-    --lr-decay-samples 5859840
+    --lr-decay-samples 50000000
     --lr-wsd-decay-samples 1024
+    --override-opt_param-scheduler
     --seed 42
     --init-method-std 0.02
     --bf16
