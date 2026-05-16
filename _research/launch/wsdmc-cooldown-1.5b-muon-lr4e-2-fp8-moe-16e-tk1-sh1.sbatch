@@ -108,7 +108,7 @@ MEGATRON_ARGS=(
     --moe-permute-fusion
     --moe-token-dispatcher-type alltoall
     --moe-per-layer-logging
-    --micro-batch-size 4
+    --micro-batch-size 2
     --global-batch-size 128
     --train-samples $TRAIN_SAMPLES
     --log-interval 1
