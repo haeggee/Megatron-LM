@@ -75,15 +75,16 @@ EXP_NAME=${WSDMC_EXP_NAME:-350m-wsdmc-normuon-lr1.8e-5-from-lr1.8e-4-iter18312-f
 CKPT_DIR=${WSDMC_CKPT_DIR:-$WORKDIR/_research/results/ckpts/$EXP_NAME}
 mkdir -p $CKPT_DIR
 
-SOURCE_CKPT=$WORKDIR/_research/results/ckpts/350m-wsdmc-normuon-lr1.8e-4-fp8-moe-16e-tk1-sh1-b563f2696
+# Patched iter_0018312 (max_lr already set to 1.8e-5) is pre-populated in CKPT_DIR.
+# On first run latest=18312, apply --override-opt_param-scheduler to set decay/warmup from new sbatch.
+# On resume (latest>18312), use saved scheduler state from new chain.
 SOURCE_CKPT_STEP=18312
-# If new chain has saved iters past 18312, load from it; otherwise load from source
-if [ -f "$CKPT_DIR/latest_checkpointed_iteration.txt" ] && [ "$(cat $CKPT_DIR/latest_checkpointed_iteration.txt 2>/dev/null)" -gt $SOURCE_CKPT_STEP ]; then
-    LOAD_DIR=$CKPT_DIR
+LATEST=$(cat $CKPT_DIR/latest_checkpointed_iteration.txt 2>/dev/null)
+LOAD_DIR=$CKPT_DIR
+if [ -n "$LATEST" ] && [ "$LATEST" -gt $SOURCE_CKPT_STEP ]; then
     EXTRA_LOAD_ARGS=""
 else
-    LOAD_DIR=$SOURCE_CKPT
-    EXTRA_LOAD_ARGS="--ckpt-step $SOURCE_CKPT_STEP --override-opt_param-scheduler"
+    EXTRA_LOAD_ARGS="--override-opt_param-scheduler"
 fi
 
 
