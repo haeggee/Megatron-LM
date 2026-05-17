@@ -350,6 +350,24 @@ class OptimizerConfig:
     """Numerical-stability clamp on the row L2 norm denominator in RMNP's
     row normalization. Default 1e-7."""
 
+    # Muown (Lion et al., 2026, arXiv 2605.10797): Muon optimizer with
+    # internal weight normalization. Applies Muon to direction component
+    # and AdamW to per-row magnitude g. Reuses muon_momentum / muon_nesterov
+    # / muon_num_ns_steps / muon_no_split_qkv / muon_scalar_* / adam_beta1
+    # / adam_beta2 / weight_decay.
+    muown_eps: float = 1e-8
+    """Stability epsilon for the AdamW denominator on the magnitude g in
+    Muown / NorMuown. Default 1e-8."""
+
+    muown_use_normuon: bool = False
+    """If True, apply NorMuon-style per-row second-moment rescaling to the
+    orthogonalized direction update inside Muown (= NorMuown). Default
+    False."""
+
+    muown_normuon_beta2: float = 0.95
+    """EMA coefficient for the per-row second moment when
+    muown_use_normuon=True. Default 0.95."""
+
     #######################
     # Distributed optimizer
     #######################

@@ -42,6 +42,7 @@ except ImportError:
 
 from .aurora import TensorParallelAurora
 from .rmnp import TensorParallelRMNP
+from .muown import Muown
 
 
 logger = logging.getLogger(__name__)
@@ -400,6 +401,37 @@ def _adaptive_muon_config_to_kwargs(config, model_chunks, pg_collection) -> Dict
     return kwargs
 
 
+def _muown_config_to_kwargs(config, model_chunks, pg_collection) -> Dict[str, Any]:
+    """Convert OptimizerConfig to Muown constructor kwargs.
+
+    Muown reuses muon_momentum / muon_nesterov for the direction component and
+    adds muown_betas / muown_eps / muown_use_normuon / muown_normuon_beta2 for
+    the magnitude (AdamW) component and the optional NorMuon rescaling.
+    """
+    kwargs = dict(
+        lr=config.lr,
+        momentum=getattr(config, "muon_momentum", 0.95),
+        nesterov=getattr(config, "muon_nesterov", True),
+        betas=(config.adam_beta1, config.adam_beta2),
+        weight_decay=config.weight_decay,
+        adam_eps=getattr(config, "muown_eps", 1e-8),
+        ns_steps=getattr(config, "muon_num_ns_steps", 5),
+        use_normuon=getattr(config, "muown_use_normuon", False),
+        normuon_beta2=getattr(config, "muown_normuon_beta2", 0.95),
+        split_qkv=getattr(config, "muon_no_split_qkv", True),
+        is_qkv_fn=lambda p: getattr(p, "is_qkv", False),
+        qkv_split_shapes=_get_qkv_split_shapes(model_chunks[0].config),
+    )
+    return kwargs
+
+
+def _normuown_config_to_kwargs(config, model_chunks, pg_collection) -> Dict[str, Any]:
+    """Same as Muown but forces use_normuon=True."""
+    kwargs = _muown_config_to_kwargs(config, model_chunks, pg_collection)
+    kwargs["use_normuon"] = True
+    return kwargs
+
+
 def _rmnp_config_to_kwargs(config, model_chunks, pg_collection) -> Dict[str, Any]:
     """Convert OptimizerConfig to TensorParallelRMNP constructor kwargs.
 
@@ -487,6 +519,30 @@ _EMERGING_OPTIMIZERS.update(
             optimizer_cls=TensorParallelRMNP,
             init_state_fn=_eopt_init_state_fn,
             config_to_kwargs=_rmnp_config_to_kwargs,
+            default_param_overrides={
+                ParamKey(
+                    predicate=ParamPredicate(
+                        name="nonlinear_or_embedding", fn=_is_nonlinear_or_embedding
+                    )
+                ): {'optimizer': 'adam'}
+            },
+        ),
+        "muown": EmergingOptimizerEntry(
+            optimizer_cls=Muown,
+            init_state_fn=_eopt_init_state_fn,
+            config_to_kwargs=_muown_config_to_kwargs,
+            default_param_overrides={
+                ParamKey(
+                    predicate=ParamPredicate(
+                        name="nonlinear_or_embedding", fn=_is_nonlinear_or_embedding
+                    )
+                ): {'optimizer': 'adam'}
+            },
+        ),
+        "normuown": EmergingOptimizerEntry(
+            optimizer_cls=Muown,
+            init_state_fn=_eopt_init_state_fn,
+            config_to_kwargs=_normuown_config_to_kwargs,
             default_param_overrides={
                 ParamKey(
                     predicate=ParamPredicate(

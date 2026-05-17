@@ -172,6 +172,8 @@ def get_mup_config_overrides(
         'muon' in optimizer_type_lower
         or 'aurora' in optimizer_type_lower
         or 'rmnp' in optimizer_type_lower
+        or 'muown' in optimizer_type_lower
+        or 'normuown' in optimizer_type_lower
     )
 
     decoupled_lr_enabled = config.decoupled_lr is not None
@@ -793,7 +795,7 @@ def _get_megatron_emerging_optimizer(
     # (Adam/Lion) group when --muon-scalar-lr / --muon-scalar-weight-decay are
     # set. combine_param_group_overrides merges the {optimizer: adam} route
     # registered above with these lr/wd fields into a single override.
-    if eopt_name in ('muon', 'adaptive_muon', 'aurora', 'rmnp'):
+    if eopt_name in ('muon', 'adaptive_muon', 'aurora', 'rmnp', 'muown', 'normuown'):
         muon_scalar_lr = getattr(config, 'muon_scalar_lr', None)
         muon_scalar_wd = getattr(config, 'muon_scalar_weight_decay', None)
 
