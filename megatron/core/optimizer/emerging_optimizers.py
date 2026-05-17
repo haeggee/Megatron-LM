@@ -41,6 +41,7 @@ except ImportError:
     AdaptiveMuon = object
 
 from .aurora import TensorParallelAurora
+from .rmnp import TensorParallelRMNP
 
 
 logger = logging.getLogger(__name__)
@@ -399,6 +400,21 @@ def _adaptive_muon_config_to_kwargs(config, model_chunks, pg_collection) -> Dict
     return kwargs
 
 
+def _rmnp_config_to_kwargs(config, model_chunks, pg_collection) -> Dict[str, Any]:
+    """Convert OptimizerConfig to TensorParallelRMNP constructor kwargs.
+
+    RMNP reuses muon_* fields for shared knobs (momentum, nesterov,
+    scalar group routing, tp_mode, extra_scale_factor) and adds rmnp_eps
+    for its row-norm denominator clamp.
+    """
+    kwargs = _kwargs_from_config(TensorParallelRMNP, "muon", config)
+    kwargs.update(_kwargs_from_config(TensorParallelRMNP, "rmnp", config))
+    kwargs["is_qkv_fn"] = lambda p: getattr(p, "is_qkv", False)
+    kwargs["qkv_split_shapes"] = _get_qkv_split_shapes(model_chunks[0].config)
+    kwargs["pg_collection"] = pg_collection
+    return kwargs
+
+
 def _aurora_config_to_kwargs(config, model_chunks, pg_collection) -> Dict[str, Any]:
     """Convert OptimizerConfig to TensorParallelAurora constructor kwargs.
 
@@ -459,6 +475,18 @@ _EMERGING_OPTIMIZERS.update(
             optimizer_cls=TensorParallelAurora,
             init_state_fn=_eopt_init_state_fn,
             config_to_kwargs=_aurora_config_to_kwargs,
+            default_param_overrides={
+                ParamKey(
+                    predicate=ParamPredicate(
+                        name="nonlinear_or_embedding", fn=_is_nonlinear_or_embedding
+                    )
+                ): {'optimizer': 'adam'}
+            },
+        ),
+        "rmnp": EmergingOptimizerEntry(
+            optimizer_cls=TensorParallelRMNP,
+            init_state_fn=_eopt_init_state_fn,
+            config_to_kwargs=_rmnp_config_to_kwargs,
             default_param_overrides={
                 ParamKey(
                     predicate=ParamPredicate(

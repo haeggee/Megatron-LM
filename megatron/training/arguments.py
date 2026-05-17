@@ -2361,6 +2361,14 @@ def _add_regularization_args(parser):
                        help='Number of Newton-Schulz iterations inside Aurora\'s polar '
                        'function. Default 12 (Tilde reference); drives all input '
                        'singular values in (0, sqrt(2)) to ~1 within bf16 precision.')
+    # RMNP optimizer flags (Deng et al., 2026; arXiv 2603.20527). RMNP is
+    # Muon with row L2 normalization in place of Newton-Schulz; it reuses
+    # --muon-momentum / --muon-nesterov / --muon-scalar-* / --muon-extra-scale-factor
+    # / --muon-tp-mode via the shared 'muon' prefix in
+    # emerging_optimizers._rmnp_config_to_kwargs.
+    group.add_argument('--rmnp-eps', type=float, default=1e-7,
+                       help='Numerical-stability clamp on the row L2 norm denominator '
+                       'in RMNP\'s row normalization. Default 1e-7.')
     group.add_argument('--lion-beta1', type=float, default=0.95,
                        help='First beta coefficient for Lion optimizer '
                        '(used in sign update). Default: 0.95.')
@@ -2583,7 +2591,7 @@ def _add_training_args(parser):
                        help='use FlashAttention implementation of attention. '
                        'https://arxiv.org/abs/2205.14135')
     group.add_argument('--optimizer', type=str, default='adam',
-                       choices=['adam', 'sgd', 'muon', 'dist_muon', 'lion', 'soap', 'adaptive_muon', 'aurora'],
+                       choices=['adam', 'sgd', 'muon', 'dist_muon', 'lion', 'soap', 'adaptive_muon', 'aurora', 'rmnp'],
                        help='Optimizer function. '
                             'Note: dist_muon is deprecated; use --optimizer muon '
                             'with --use-distributed-optimizer instead.')

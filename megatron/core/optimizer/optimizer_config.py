@@ -343,6 +343,13 @@ class OptimizerConfig:
     aurora_num_ns_steps: int = 12
     """Newton-Schulz iterations inside Aurora's polar. Default 12 (Tilde)."""
 
+    # RMNP (Deng et al., 2026, arXiv 2603.20527): row L2 normalization in
+    # place of Newton-Schulz. Reuses muon_momentum / muon_nesterov /
+    # muon_scalar_* / muon_extra_scale_factor / muon_tp_mode.
+    rmnp_eps: float = 1e-7
+    """Numerical-stability clamp on the row L2 norm denominator in RMNP's
+    row normalization. Default 1e-7."""
+
     #######################
     # Distributed optimizer
     #######################
