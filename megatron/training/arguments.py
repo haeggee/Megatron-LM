@@ -2334,7 +2334,7 @@ def _add_regularization_args(parser):
                        'muon. When unset, inherits --weight-decay. Set to 0 to disable '
                        'WD on the Adam group while keeping it on the Muon matrix group.')
     group.add_argument('--adaptive-muon-moment2-method', type=str, default='adamuon',
-                       choices=['adamuon', 'normuon'],
+                       choices=["adamuon", "normuon", "normuonfix"],
                        help='Second-moment accumulation method for adaptive_muon. '
                        '"normuon" applies per-row (neuron) normalisation after '
                        'Newton-Schulz (NorMuon, arXiv 2510.05491). Default "adamuon".')

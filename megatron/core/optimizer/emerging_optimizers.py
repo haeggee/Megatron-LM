@@ -329,7 +329,7 @@ class TensorParallelAdaptiveMuon(TensorParallelMuon, AdaptiveMuon):
         extra_scale_factor: float = 1.0,
         pg_collection: Optional[ProcessGroupCollection] = None,
         tp_mode: Literal["blockwise", "duplicated", "distributed"] = "duplicated",
-        moment2_method: Literal["adamuon", "normuon"] = "adamuon",
+        moment2_method: Literal["adamuon", "normuon", "normuonfix"] = "adamuon",
         beta2: float = 0.95,
         eps: float = 1e-8,
     ) -> None:
