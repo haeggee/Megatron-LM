@@ -202,9 +202,11 @@ class AdaptiveMuon(muon.Muon):
             # the pre-applied scale, normalizing on the raw orth grad, then re-applying scale, the
             # Muon spectral/shape_scaling factor is preserved end-to-end.
             from emerging_optimizers.orthogonalized_optimizers import muon as _muon
+            scale_mode = self.defaults.get("scale_mode", "spectral")
+            extra_scale_factor = self.defaults.get("extra_scale_factor", 1.0)
             scale_factor = _muon.get_muon_scale_factor(
-                orth_grad.size(-2), orth_grad.size(-1), mode=self.scale_mode
-            ) * self.extra_scale_factor
+                orth_grad.size(-2), orth_grad.size(-1), mode=scale_mode
+            ) * extra_scale_factor
             raw_orth_grad = orth_grad / scale_factor
             avg_dim = -1 if raw_orth_grad.shape[-2] >= raw_orth_grad.shape[-1] else -2
             v_mean = raw_orth_grad.square().mean(dim=avg_dim, keepdim=True)
