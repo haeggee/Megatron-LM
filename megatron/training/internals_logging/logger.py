@@ -393,10 +393,12 @@ class InternalsLogger:
                         continue
                     state = inner_opt.state.get(p, {})
                     clean = name.replace('.', '/')
-                    for gain_key in ('row_gain', 'col_gain', 'flat_gain'):
+                    for gain_key in GainsMasterOptimizer._GAIN_KEYS:
                         gain = state.get(gain_key)
                         if gain is not None:
                             metrics[f'gains/{gain_key}_norm/{clean}'] = gain.norm().item()
+                            metrics[f'gains/{gain_key}_max/{clean}'] = gain.max().item()
+                            metrics[f'gains/{gain_key}_min/{clean}'] = gain.min().item()
         return metrics
 
     def _compute_activation_metrics(self) -> Dict[str, float]:
