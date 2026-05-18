@@ -227,15 +227,36 @@ class OptimizerConfig:
     muon_lr_factor: float = 1.0
     """Muon parameters will use a learning rate of lr * muon_lr_factor instead of just lr."""
 
+    matrix_lr: Optional[float] = None
+    """Absolute learning rate for matrix (linear) parameters. When set, overrides
+    muon_lr_factor * lr so the matrix LR is independent of the base LR."""
+
     embedding_lr_multiplier: Optional[float] = None
     """Embedding/output parameters will use lr * embedding_lr_multiplier.
     If None, falls back to muon_lr_factor * lr."""
+
+    scale_min_lr: bool = False
+    """When True, each param group's min_lr is scaled proportionally to its max_lr,
+    keeping the same max_lr/min_lr ratio as the base (lr / min_lr)."""
 
     hypersphere_mode: Optional[Literal["row", "col", "rowcol", "flat"]] = None
     """When specified, enables hypersphere constraint of the parameters, either row-wise, column-wise, row+column-wise or of the flattened vector."""
 
     hypersphere_gains_mode: Optional[Literal["row", "col", "rowcol", "flat", "embed"]] = None
     """When specified, enables learnable gains for matrices :)."""
+
+    hypersphere_gains_mode_output: Optional[Literal["row", "col", "rowcol", "flat", "none"]] = None
+    """When specified, overrides the gains mode for the final LM head (output layer).
+    If None, the output layer uses hypersphere_gains_mode like all other matrices.
+    Set to "none" to disable gains on the output layer entirely."""
+
+    hypersphere_gains_mode_embedding: Optional[Literal["row", "col", "rowcol", "flat", "none"]] = None
+    """When specified, overrides the gains mode for the embedding (input) layer.
+    If None, the embedding layer uses hypersphere_gains_mode like all other matrices.
+    Set to "none" to disable gains on the embedding layer entirely."""
+
+    split_qkv_gains: bool = False
+    """When True and col gains are active, QKV parameters get separate column gains for Q, K, and V instead of one shared column gain."""
 
     hypersphere_kind: Optional[Literal["l2", "standard", "spectral"]] = "l2"
     """When hypersphere constraint is enabled, specified the normalization to perform, either l2 normalization, (x-mu)/std standardization or spectral norm."""

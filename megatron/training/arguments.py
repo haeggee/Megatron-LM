@@ -1842,6 +1842,7 @@ def _add_network_size_args(parser):
     group.add_argument('--post-norm', action='store_true')
     group.add_argument('--post-block-norm', action='store_true')
     group.add_argument('--no-learnable-norms', action='store_false', dest='learnable_norms')
+    group.add_argument('--pre-norm-no-gain', action='store_true')
     group.add_argument('--post-norm-no-gain', action='store_true')
     group.add_argument('--final-layernorm-no-gain', action='store_true')
     group.add_argument('--qk-layer-scale', type=float)
@@ -2210,11 +2211,27 @@ def _add_regularization_args(parser):
     group.add_argument('--muon-extra-scale-factor', type=float, default=1.0,
                        help='Additional scale factor for the muon update')
     group.add_argument('--muon-lr-factor', type=float, default=1.0)
+    group.add_argument('--matrix-lr', type=float, default=None,
+                       help='Absolute learning rate for matrix (linear) parameters. '
+                            'When set, overrides muon-lr-factor * lr.')
     group.add_argument('--embedding-lr-multiplier', type=float, default=None,
                        help='LR multiplier for embedding/output parameters in the master optimizer. '
                             'Final LR = embedding_lr_multiplier * lr. If None, uses muon-lr-factor * lr.')
+    group.add_argument('--scale-min-lr', action='store_true',
+                       help='Scale min_lr proportionally to max_lr for each param group, '
+                            'keeping the same max_lr/min_lr ratio as the base lr.')
     group.add_argument('--hypersphere-mode', type=_float_or_str)
     group.add_argument('--hypersphere-gains-mode', choices=["flat", "embed", "row", "col", "rowcol"])
+    group.add_argument('--hypersphere-gains-mode-output', choices=["flat", "row", "col", "rowcol", "none"],
+                       help='Override gains mode for the LM head output layer. '
+                            'If not set, the output layer uses --hypersphere-gains-mode. '
+                            'Set to "none" to disable gains on the output layer.')
+    group.add_argument('--hypersphere-gains-mode-embedding', choices=["flat", "row", "col", "rowcol", "none"],
+                       help='Override gains mode for the embedding (input) layer. '
+                            'If not set, the embedding layer uses --hypersphere-gains-mode. '
+                            'Set to "none" to disable gains on the embedding layer.')
+    group.add_argument('--split-qkv-gains', action="store_true",
+                       help='Give Q, K, V separate column gains instead of one shared column gain.')
     group.add_argument('--hypersphere-kind', type=_float_or_str, default="l2")
     group.add_argument('--hypersphere-radius', type=_float_or_str, default=1.0)
     group.add_argument('--hypersphere-no-update', action="store_false", dest="hypersphere_update")
