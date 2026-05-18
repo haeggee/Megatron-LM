@@ -430,8 +430,13 @@ class MegatronOptimizer(ABC):
                     f"Parameter group key definition: {use_param_group_identifier_keys}"
                 )
 
-            # Update group's parameters to preserve state dict ordering
-            group = loaded_groups_map[key]
+            # Shallow-copy so multiple needed_groups that share the same identifier
+            # tuple don't alias the same dict in final_groups. Without this, a
+            # downstream torch.optim.Optimizer.load_state_dict deepcopy preserves
+            # the shared reference and update_group writes "params" into the same
+            # dict twice — the last write wins, collapsing two groups into one.
+            # GainsMasterOptimizer surfaces this immediately in _setup_inner_opts.
+            group = dict(loaded_groups_map[key])
             group['params'] = params
             final_groups.append(group)
 
