@@ -1,8 +1,9 @@
 #= Prelude =#
 # General settings.
+#CONTAINER=/iopsstor/scratch/cscs/ahernnde/ngc_25-12-alps1.toml
 CONTAINER=/iopsstor/scratch/cscs/ahernnde/ncg_new_v3.toml
 
-SCRIPT_VERSION=v1
+SCRIPT_VERSION=debugv1
 SEQ_LEN=4096
 TOKENIZER=mistralai/Mistral-Nemo-Base-2407
 TOKENIZED_DATA_PATH=/iopsstor/scratch/cscs/jpcoles/a06/swissai-fineweb-edu-filterrobots-merge
@@ -58,7 +59,7 @@ WSD=minus_sqrt
 
 # Validation defaults.
 EVAL_INTERVAL=0
-EVAL_ITERS=50
+EVAL_ITERS=10
 
 # Misc. defaults.
 EXTRA_LOG=true
@@ -66,7 +67,7 @@ NO_SAVE=false
 
 # Usage function.
 usage () {
-	echo "Usage: submit.sh <size> [options...]"
+	echo "Usage: debug_run.sh <size> [options...]"
 	echo "<size>: 110/390/1"
 	echo "Options:"
 	# Misc settings.
@@ -84,7 +85,7 @@ usage () {
 	echo " --lr <float>: Learning rate."
 	echo " --no-warmup: Deactivates learning rate warmup"
 	echo " --warmup-iters <int> (default=$WARMUP_ITERS): LR warmup steps (\`--lr-warmup-iters\`)"
-	echo " --decay <wsd/cos/linear/inverse-square-root/isrwsd>"
+	echo " --decay <wsd/cos>"
 	echo " --cooldown <float>: Fraction to do cooldown"
 	echo " --clip-grad <float>: Gradient clipping"
 	# Architecture settings.
@@ -97,7 +98,6 @@ usage () {
 	echo " --post-norm"
 	echo " --pre-norm-no-gain"
 	echo " --post-norm-no-gain"
-	echo " --final-layernorm-no-gain"
 	echo " --post-block-norm"
 	echo " --use-stream-minus-residual"
 	echo " --layer-scale <float>"
@@ -109,7 +109,6 @@ usage () {
 	echo " --mlp-layer-scale <float>"
 	echo " --mlp-layer-scale-gate-scale <float>"
 	echo " --mlp-out-scale <float>"
-	echo " --fixed-layer-scale <float>"
 	echo " --logits-layer-scale <float>"
 	echo " --logits-layer-scale-scale <float>"
 	echo " --upscale-embedding <float>"
@@ -166,7 +165,7 @@ TP=1
 PP=1
 UNTIE=true
 INIT_STD=0.02
-if [[ $1 -eq 110 ]]; then 
+if [[ $1 -eq 110 ]]; then
 	# batch_size: ~0.52M.
 	LAYERS=12
 	HIDDEN_SIZE=512
@@ -176,14 +175,14 @@ if [[ $1 -eq 110 ]]; then
 	MBS="${MBS:-8}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.003
+	LR=0.002
 	SIZE=110
-	SAVE_FREQ=10000
-	DEF_TOKENS=25
+	SAVE_FREQ=1000
+	DEF_TOKENS=5
 	INTERMEDIATE_METRICS_INTERVAL=10
 	SCALE=M
 	UNTIE=false
-	LOG_FREQ=50
+	LOG_FREQ=1
 elif [[ $1 -eq 47 ]]; then # 0.5x=256 dim from 110m
 	# batch_size: ~0.52M.
 	LAYERS=12
@@ -310,25 +309,7 @@ elif [[ $1 -eq 292 ]]; then # 2x=1024 dim, correct heads/query groups
 	SCALE=M
 	UNTIE=false
 	LOG_FREQ=50
-elif [[ $1 -eq 860 ]]; then # 4x=2048 dim, correct heads/query groups
-	# batch_size: ~0.52M.
-	LAYERS=12
-	HIDDEN_SIZE=2048
-	FFN_SIZE=8192
-	NUM_HEADS=16
-	NUM_QUERY_GROUPS=8
-	MBS="${MBS:-4}"
-	GBS=128
-	ITERS_PER_BT=2000
-	LR=0.002
-	SIZE=860
-	SAVE_FREQ=10000
-	DEF_TOKENS=25
-	INTERMEDIATE_METRICS_INTERVAL=10
-	SCALE=M
-	UNTIE=false
-	LOG_FREQ=50
-elif [[ $1 -eq 390 ]]; then 
+elif [[ $1 -eq 390 ]]; then
 	# batch_size: ~0.52M.
 	LAYERS=16
 	HIDDEN_SIZE=1024
@@ -346,7 +327,7 @@ elif [[ $1 -eq 390 ]]; then
 	SCALE=M
 	UNTIE=false
 	LOG_FREQ=50
-elif [[ $1 -eq 1 ]]; then 
+elif [[ $1 -eq 1 ]]; then
 	# batch_size: ~1.05M.
 	LAYERS=16
 	HIDDEN_SIZE=2048
@@ -391,13 +372,13 @@ while [[ $# -gt 0 ]]; do
 		# FP8 settings.
 		--fp8)
 			FP8=true; shift;;
-		--fp8dpa)
+		--fp8-dpa)
 			FP8DPA=true; shift;;
 		# Training settings.
 		--tokens)
 			TOKENS=$2; shift 2;;
 		--lr)
-			LR=$2; 
+			LR=$2;
 			CHANGED_LR=true
 			shift 2;;
 		--no-warmup)
@@ -429,8 +410,6 @@ while [[ $# -gt 0 ]]; do
 			PRE_NORM_NO_GAIN=true; shift;;
 		--post-norm-no-gain)
 			POST_NORM_NO_GAIN=true; shift;;
-		--final-layernorm-no-gain)
-			FINAL_LAYERNORM_NO_GAIN=true; shift;;
 		--post-block-norm)
 			POST_BLOCK_NORM=true; shift;;
 		--use-stream-minus-residual)
@@ -568,7 +547,7 @@ elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
 		SUFFIX=${SUFFIX}_b$ADAMBETA1
 	fi
 	if [[ ! -z "${MUON_LR_FACTOR+xxx}" ]]; then
-		SUFFIX=${SUFFIX}_mlr$(printf "%.1f" "$MUON_LR_FACTOR")
+		SUFFIX=${SUFFIX}_mlr$MUON_LR_FACTOR
 		OPT_ARGS+=(--muon-lr-factor $MUON_LR_FACTOR)
 	fi
 	if [[ $MUON_NUM_NS_STEPS != 5 ]]; then
@@ -595,19 +574,18 @@ elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
 	MUON_MOMENTUM=$BETA1
 	BETA1=$ADAMBETA1
 elif [[ $OPT = dmaster ]] || [[ $OPT = master ]]; then
-	# SUFFIX=$SUFFIX-${OPT}_h
-	SUFFIX=$SUFFIX-mas
+	SUFFIX=$SUFFIX-${OPT}_h
 	IS_MASTER_OPT=true
 	if [[ $MASTER_ORTHOGONALIZE = true ]]; then
 		SUFFIX=${SUFFIX}_o
 		if [[ $BETA1 != 0.95 ]]; then
 			SUFFIX=${SUFFIX}_m$BETA1
 		fi
-		if [[ $ADAMBETA1 != 0.9 ]]; then
+		if [[ $ADAMBETA1 != 0.95 ]]; then
 			SUFFIX=${SUFFIX}_b$ADAMBETA1
 		fi
 		if [[ ! -z "${MUON_LR_FACTOR+xxx}" ]]; then
-			SUFFIX=${SUFFIX}_mlr$(printf "%.1f" "$MUON_LR_FACTOR")
+			SUFFIX=${SUFFIX}_mlr$MUON_LR_FACTOR
 			OPT_ARGS+=(--muon-lr-factor $MUON_LR_FACTOR)
 		fi
 		if [[ $MUON_NUM_NS_STEPS != 5 ]]; then
@@ -636,7 +614,7 @@ elif [[ $OPT = dmaster ]] || [[ $OPT = master ]]; then
 			SUFFIX=${SUFFIX}_b${BETA1}_${BETA2}_$BETA3
 		fi
 		if [[ ! -z "${MUON_LR_FACTOR+xxx}" ]]; then
-			SUFFIX=${SUFFIX}_mlr$(printf "%.1f" "$MUON_LR_FACTOR")
+			SUFFIX=${SUFFIX}_mlr$MUON_LR_FACTOR
 			OPT_ARGS+=(--muon-lr-factor $MUON_LR_FACTOR)
 		fi
 	fi
@@ -789,30 +767,23 @@ if [[ $NO_LEARNABLE_NORMS = true ]]; then
 	SUFFIX=$SUFFIX-fz
 	ARCH_ARGS+=(--no-learnable-norms)
 fi
-if [[ ! -z "${QK_NORM+xxx}" ]]; then
-	if [[ $QK_NORM = RMSNorm ]]; then
-		if [[ $NORMALIZATION != RMSNorm ]]; then
-			echo When using qkRMSNorm you must also use --normalization RMSNorm
-			exit 1
-		fi
-		ARCH_ARGS+=(--qk-layernorm)
-		if [[ $QK_FROZEN = true ]]; then
-			ARCH_ARGS+=(--qk-layernorm-frozen)
-		fi
-	elif [[ $QK_NORM = L2Norm ]]; then
-		SUFFIX=$SUFFIX-qkL2
-		ARCH_ARGS+=(--qk-l2-norm)
-	else
-		# If not RMSNorm, must indicate in suffix
-		SUFFIX=$SUFFIX-qk$QK_NORM
-	fi
-elif [[ $NORMALIZATION = RMSNorm ]]; then
-	# no QK_NORM specified, nothing to add
-	:
-else
-	# If neither/QK_NORM set to something else, reflect it
-	SUFFIX=$SUFFIX-nqkRMS
-fi
+# if [[ ! -z "${QK_NORM+xxx}" ]]; then
+# 	if [[ $QK_NORM = RMSNorm ]]; then
+# 		if [[ $NORMALIZATION != RMSNorm ]]; then
+# 			echo When using qkRMSNorm you must also use --normalization RMSNorm
+# 			exit 1
+# 		fi
+# 		SUFFIX=$SUFFIX-qkRMS
+# 		ARCH_ARGS+=(--qk-layernorm)
+# 		if [[ $QK_FROZEN = true ]]; then
+# 			SUFFIX=${SUFFIX}fz
+# 			ARCH_ARGS+=(--qk-layernorm-frozen)
+# 		fi
+# 	elif [[ $QK_NORM = L2Norm ]]; then
+# 		SUFFIX=$SUFFIX-qkL2
+# 		ARCH_ARGS+=(--qk-l2-norm)
+# 	fi
+# fi
 
 if [[ $NO_PRE_NORM = true ]]; then
 	SUFFIX=$SUFFIX-nPre
@@ -834,10 +805,6 @@ if [[ $POST_NORM_NO_GAIN = true ]]; then
 	SUFFIX=$SUFFIX-png
 	ARCH_ARGS+=(--post-norm-no-gain)
 fi
-if [[ $FINAL_LAYERNORM_NO_GAIN = true ]]; then
-	SUFFIX=$SUFFIX-fng
-	ARCH_ARGS+=(--final-layernorm-no-gain)
-fi
 if [[ $POST_BLOCK_NORM = true ]]; then
 	SUFFIX=$SUFFIX-ppst
 	ARCH_ARGS+=(--post-block-norm)
@@ -857,7 +824,7 @@ if [[ ! -z "${SOFT_MAX_SCALE+xxx}" ]]; then
 fi
 
 if [[ ! -z "${LAYER_SCALE+xxx}" ]]; then
-	SUFFIX=$SUFFIX-ls${LAYER_SCALE}
+	SUFFIX=$SUFFIX-ls
 	LONG_SUFFIX=$LONG_SUFFIX-ls$LAYER_SCALE
 	ARCH_ARGS+=(--layer-scale $LAYER_SCALE)
 	if [[ ! -z "${LAYER_SCALE_SCALE+xxx}" ]]; then
@@ -909,13 +876,8 @@ if [[ ! -z "${MLP_OUT_SCALE+xxx}" ]]; then
 	LONG_SUFFIX=$LONG_SUFFIX-mlpO$MLP_OUT_SCALE
 	ARCH_ARGS+=(--mlp-out-scale $MLP_OUT_SCALE)
 fi
-if [[ ! -z "${FIXED_LAYER_SCALE+xxx}" ]]; then
-	SUFFIX=$SUFFIX-fls${FIXED_LAYER_SCALE}
-	LONG_SUFFIX=$LONG_SUFFIX-fls$FIXED_LAYER_SCALE
-	ARCH_ARGS+=(--fixed-layer-scale $FIXED_LAYER_SCALE)
-fi
 if [[ ! -z "${LOGITS_LAYER_SCALE+xxx}" ]]; then
-	SUFFIX=$SUFFIX-lg$LOGITS_LAYER_SCALE
+	SUFFIX=$SUFFIX-lgsls$LOGITS_LAYER_SCALE
 	LONG_SUFFIX=$LONG_SUFFIX-lgsls$LOGITS_LAYER_SCALE
 	ARCH_ARGS+=(--logits-layer-scale $LOGITS_LAYER_SCALE)
 	if [[ ! -z "${LOGITS_LAYER_SCALE_SCALE+xxx}" ]]; then
@@ -938,7 +900,7 @@ if [[ $NO_WARMUP = true ]]; then
 	WARMUP=0
 else
 	WARMUP=$WARMUP_ITERS
-	if [[ $WARMUP_ITERS -ne 1000 ]]; then
+	if [[ $WARMUP_ITERS -ne 5000 ]]; then
 		SUFFIX=$SUFFIX-wu$WARMUP_ITERS
 		LONG_SUFFIX=$LONG_SUFFIX-wu$WARMUP_ITERS
 	fi
@@ -979,30 +941,6 @@ elif [[ $DECAY = linear ]]; then
 		--lr-decay-style linear
 		--lr-decay-iters $ITERS
 	)
-elif [[ $DECAY = inverse-square-root ]]; then
-	SUFFIX=$SUFFIX-invsq
-	LONG_SUFFIX=$LONG_SUFFIX-invsq
-	DECAY_ARGS+=(
-		--lr-decay-style inverse-square-root
-		--lr-decay-iters $ITERS
-	)
-elif [[ $DECAY = isrwsd ]]; then
-	SUFFIX=$SUFFIX-isrwsd
-	LONG_SUFFIX=$LONG_SUFFIX-isrwsd
-	if [[ $COOLDOWN != 0.2 ]]; then
-		SUFFIX=$SUFFIX-cd$COOLDOWN
-		LONG_SUFFIX=$LONG_SUFFIX-cd${COOLDOWN}
-	fi
-	if [[ $WSD != minus_sqrt ]]; then
-		SUFFIX=$SUFFIX-$WSD
-		LONG_SUFFIX=$LONG_SUFFIX-$WSD
-	fi
-	DECAY_ITERS=$(python3 -c "print(int($ITERS * $COOLDOWN))")
-	DECAY_ARGS+=(
-		--lr-decay-style inverse-square-root-WSD
-		--lr-wsd-decay-style $WSD
-		--lr-wsd-decay-iters $DECAY_ITERS
-	)
 else
 	echo "Unknown decay method $DECAY"
 	exit 1
@@ -1041,7 +979,7 @@ if [ "$DEBUG" = true ]; then
 else
 	WANDB_ENTITY=epfl-relay
 fi
-WANDB_PROJECT=megatron_opt_$SCRIPT_VERSION
+WANDB_PROJECT=megatron_debug_$SCRIPT_VERSION
 EXP_NAME=$SIZE$SCALE"1"$SUFFIX
 ROOT_PATH=$TRAIN_ROOT/$SCRIPT_VERSION/$SIZE$SCALE"1"$LONG_SUFFIX
 DEBUG_ROOT=$ROOT_PATH/debug
@@ -1058,9 +996,7 @@ if [[ -z ${WANDB_NAME+x} ]]; then
 fi
 
 if [[ ${#WANDB_NAME} -gt 117 ]]; then
-	# We compare against 117 because WANDB_NAME gets appended -n$NODE_COUNT-$JOB_ID in the final sbatch.
-	CHARS=${#WANDB_NAME}
-	>&2 echo "WANDB_NAME is too long (it has $CHARS characters, shouldn't exceed 117 characters): $WANDB_NAME"
+	>&2 echo "WANDB_NAME is too long (it shouldn't exceed 117 characters): $WANDB_NAME"
 	exit 1
 fi
 
@@ -1170,79 +1106,23 @@ EXTRA_ARGS+=(
 
 ARGS="${LLAMA_ARGS[@]} ${TRAINING_ARGS[@]} ${SCHEDULER_ARGS[@]} ${DATA_ARGS[@]} ${LOGGING[@]} ${EXTRA_ARGS[@]} ${FP8_ARGS[@]} ${ARCH_ARGS[@]} ${OPT_ARGS[@]} ${DECAY_ARGS[@]}"
 
-#= RUNNING: Prepare and launch a slurm script =#
-CMD="numactl --membind=0-3 env python3 pretrain_gpt.py $ARGS"
-
-mkdir -p $ROOT_PATH
-cat > $ROOT_PATH/submission.sbatch <<- EOM
-#!/bin/bash
-#SBATCH --time=$TIME
-#SBATCH --job-name=$EXP_NAME
-#SBATCH --output=$ROOT_PATH/slurmlogs/%j.out
-#SBATCH --error=$ROOT_PATH/slurmlogs/%j.err
-#SBATCH --nodes=$NODES
-#SBATCH --ntasks-per-node=4
-#SBATCH --gpus-per-node=4
-#SBATCH --cpus-per-task=36
-#SBATCH --mem=460000
-#SBATCH --exclusive
-#SBATCH --account=infra01
-#SBATCH --partition=${PARTITION:-normal}
-#SBATCH --signal=SIGTERM@180
-#SBATCH --dependency=singleton
-
-
-# Wake up.
-echo [\$(date)] Starting job
-echo [\$(date)] Using nodes: \$SLURM_JOB_NODELIST
-srun --environment=$CONTAINER -l --mpi=pmix --network=disable_rdzv_get bash -c 'echo \$(hostname) \$(nvidia-smi | grep -o "|\\s*[0-9]*MiB")'
-
-
-# Log git status.
-cd $CODE_PATH
-echo ---------
-echo git status:
-git status
-echo git log:
-git log -n 1
-echo ---------
-git diff > $DIFFS_PATH/\$SLURM_JOBID.diff
-
-export MASTER_ADDR=\$(hostname)
-export WORLD_SIZE=\$SLURM_NPROCS
+#= RUNNING: Launch directly for interactive srun debugging =#
+export MASTER_ADDR=$(hostname)
 export MASTER_PORT=25678
-
+export WORLD_SIZE=$((NODES * 4))
 export WANDB__FILE_STREAM_RETRY_MAX=10
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
-export OMP_NUM_THREADS=\$SLURM_CPUS_PER_TASK
-
+export OMP_NUM_THREADS=36
 export TRITON_HOME=$TRITON_HOME_DIR
 export TRITON_CACHE_DIR=$TRITON_HOME_DIR/cache
+export PYTHONPATH=$CODE_PATH:$EMERGING_OPTIMIZERS_PATH
 
-# debug!
-DEBUG_DIR=$DEBUG_ROOT/\$SLURM_JOB_ID
-mkdir -p \$DEBUG_DIR
-cp \$0 \$DEBUG_DIR/submit.sbatch
-cat \$SLURM_SPANK__SLURM_SPANK_OPTION_pyxis_environment > \$DEBUG_DIR/env.toml
-echo "\\nMegatron path: $CODE_PATH (\$(git -C $CODE_PATH rev-parse --verify HEAD))" > \$DEBUG_DIR/git
-git diff > \$DEBUG_DIR/git.diff
-pip list > \$DEBUG_DIR/pip.txt
-nvidia-smi > \$DEBUG_DIR/cuda
-printenv > \$DEBUG_DIR/env.sh
+mkdir -p $TRITON_CACHE_DIR
 
-srun --environment=$CONTAINER -lu --cpus-per-task \$SLURM_CPUS_PER_TASK --mpi=pmix --network=disable_rdzv_get bash -c "
-	cd $CODE_PATH
-	export PYTHONPATH=\$PWD:$EMERGING_OPTIMIZERS_PATH
-	export RANK=\\\$SLURM_PROCID
-	export LOCAL_RANK=\\\$SLURM_LOCALID
-	mkdir -p \\\$TRITON_CACHE_DIR
-	$CMD --wandb-exp-name $EXP_NAME-n$NODES-\\\$SLURM_JOBID
-"
+cd $CODE_PATH
+echo "Run arguments:"
+echo $ARGS
+echo "Run name: $WANDB_NAME"
 
-# Goodbye lol.
-echo [\$(date)] Goodbye
-EOM
-echo "Saved sbatch to $ROOT_PATH/submission.sbatch"
-
-sbatch $ROOT_PATH/submission.sbatch
+torchrun --nproc_per_node=4 pretrain_gpt.py $ARGS --wandb-exp-name $WANDB_NAME
