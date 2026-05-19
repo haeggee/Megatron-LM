@@ -693,6 +693,10 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                                 main_param.expert_tp = param.expert_tp
                             if hasattr(param, 'is_embedding_or_output_parameter'):
                                 main_param.is_embedding_or_output_parameter = param.is_embedding_or_output_parameter
+                            if hasattr(param, 'is_embedding_parameter'):
+                                main_param.is_embedding_parameter = param.is_embedding_parameter
+                            if hasattr(param, 'is_output_parameter'):
+                                main_param.is_output_parameter = param.is_output_parameter
                             # Replace the optimizer params with the new fp32 copy.
                             param_group['params'][i] = main_param
 
