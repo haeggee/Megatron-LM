@@ -368,6 +368,71 @@ class OptimizerConfig:
     """EMA coefficient for the per-row second moment when
     muown_use_normuon=True. Default 0.95."""
 
+    ##########################################################################
+    # Master optimizer (Adam/AdEMAMix + optional Muon orthogonalized updates +
+    # L2 hypersphere weight clipping + learnable per-axis gains). Flag-gated
+    # via --optimizer master. Defaults below leave non-master runs unchanged.
+    ##########################################################################
+    matrix_lr: Optional[float] = None
+    """Absolute LR for matrix (2D non-embedding/output) params under
+    --optimizer master. When None, falls back to ``muon_lr_factor * lr``."""
+
+    embedding_lr_multiplier: Optional[float] = None
+    """LR multiplier for embedding/LM-head params under --optimizer master.
+    Final max_lr for those params = embedding_lr_multiplier * lr. When None,
+    those params use ``lr`` directly."""
+
+    master_min_lr_mode: str = 'relative'
+    """How per-group min_lr is set under --optimizer master.
+    'relative' (default): each group decays by the same fraction
+    (config.min_lr / config.lr), so min_lr = max_lr * ratio per group — the
+    schedule shape is preserved across groups, floors differ.
+    'absolute': every group decays to the same absolute floor config.min_lr."""
+
+    muon_lr_factor: float = 1.0
+    """When ``matrix_lr`` is None, the matrix-param LR for master is
+    ``muon_lr_factor * lr``."""
+
+    hypersphere_mode: Optional[str] = None
+    """Hypersphere normalization mode for non-embedding/output 2D matrices.
+    One of 'row', 'col', 'flat', 'embed', or None (off). Applied post-step
+    to project the weight onto the L2 sphere."""
+
+    hypersphere_embedding_mode: Optional[str] = None
+    """Hypersphere normalization mode override for embedding + LM-head params.
+    Same choices as hypersphere_mode. When set, embedding/LM-head 2D params
+    stay in master (Adam branch) and get this mode of post-step normalization.
+    When None, those params route to external Adam with no hypersphere."""
+
+    hypersphere_gains_mode: Optional[str] = None
+    """Learnable per-axis gains for matrix params under master. One of 'row',
+    'col', 'rowcol', 'flat', 'embed', or None (no gains)."""
+
+    hypersphere_gains_mode_output: Optional[str] = None
+    """Gains mode override for the LM head. One of 'row', 'col', 'rowcol',
+    'flat', 'none' (no gains for LM head), or None (use hypersphere_gains_mode)."""
+
+    hypersphere_gains_mode_embedding: Optional[str] = None
+    """Gains mode override for the embedding. Same choices as
+    hypersphere_gains_mode_output."""
+
+    use_orthogonal_updates: bool = False
+    """When True under --optimizer master, matrix params use Muon-style
+    orthogonalized updates (Newton-Schulz). Embedding + LM head ALWAYS use
+    the Adam branch regardless of this flag (hardcoded — no toggle)."""
+
+    ademamix_alpha: float = 0.0
+    """AdEMAMix slow-EMA mixing weight. 0.0 (default) collapses to plain Adam."""
+
+    ademamix_beta3: float = 0.9999
+    """AdEMAMix slow-EMA coefficient (beta3)."""
+
+    ademamix_alpha_warmup: Optional[int] = None
+    """Linear warmup steps for ademamix_alpha. None disables warmup."""
+
+    ademamix_beta3_warmup: Optional[int] = None
+    """Half-life-linear warmup steps for ademamix_beta3. None disables warmup."""
+
     #######################
     # Distributed optimizer
     #######################
