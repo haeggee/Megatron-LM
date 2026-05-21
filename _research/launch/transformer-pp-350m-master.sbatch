@@ -155,9 +155,7 @@ MASTER_ARGS=(
     --embedding-lr-multiplier 3
     # 'absolute': every group decays to MIN_LR (clamped to <= max_lr).
     # Switch to 'relative' to decay each group by min_lr/lr fraction instead.
-    --master-min-lr-mode absolute
-    --master-use-normuon
-    
+    --master-min-lr-mode absolute    
 )
 
 LEARNING_RATE_ARGS=(
