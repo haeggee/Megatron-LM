@@ -156,6 +156,8 @@ MASTER_ARGS=(
     # 'absolute': every group decays to MIN_LR (clamped to <= max_lr).
     # Switch to 'relative' to decay each group by min_lr/lr fraction instead.
     --master-min-lr-mode absolute
+    --master-use-normuon
+    
 )
 
 LEARNING_RATE_ARGS=(
@@ -170,6 +172,8 @@ LEARNING_RATE_ARGS=(
 INITIALIZATION_ARGS=(
     --seed 42
     --init-method-std 0.02
+    # Fixed scalar multiplied into embeddings in forward (HIDDEN=1024 -> sqrt(1024)=32).
+    --embedding-multiplier 32.0
 )
 
 MIXED_PRECISION_ARGS=(
@@ -208,27 +212,38 @@ DATA_ARGS=(
     --num-workers 4
 )
 
-MEGATRON_ARGS="\
-    ${TRANSFORMER_ENGINE_ARGS[@]} \
-    ${NETWORK_SIZE_ARGS[@]} \
-    ${TRAINING_ARGS[@]} \
-    ${REGULARIZATION_ARGS[@]} \
-    ${MASTER_ARGS[@]} \
-    ${LEARNING_RATE_ARGS[@]} \
-    ${INITIALIZATION_ARGS[@]} \
-    ${MIXED_PRECISION_ARGS[@]} \
-    ${DISTRIBUTED_ARGS[@]} \
-    ${LOGGING_ARGS[@]} \
-    ${TOKENIZER_ARGS[@]} \
-    ${DATA_ARGS[@]}"
+# Flat array so `interactive-run.sh` (which expands "${MEGATRON_ARGS[@]}")
+# sees each token as its own argv element. Concatenating into a string and
+# referencing it as ${VAR[@]} collapses to a single argv element under
+# argparse, which fails with "unrecognized arguments: <everything>".
+MEGATRON_ARGS=(
+    "${TRANSFORMER_ENGINE_ARGS[@]}"
+    "${NETWORK_SIZE_ARGS[@]}"
+    "${TRAINING_ARGS[@]}"
+    "${REGULARIZATION_ARGS[@]}"
+    "${MASTER_ARGS[@]}"
+    "${LEARNING_RATE_ARGS[@]}"
+    "${INITIALIZATION_ARGS[@]}"
+    "${MIXED_PRECISION_ARGS[@]}"
+    "${DISTRIBUTED_ARGS[@]}"
+    "${LOGGING_ARGS[@]}"
+    "${TOKENIZER_ARGS[@]}"
+    "${DATA_ARGS[@]}"
+)
 
 if [ -n "${WANDB_API_KEY:-}" ]; then
     export WANDB_PROJECT=$PROJECT
     export WANDB_NAME=$EXP_NAME-$SLURM_JOB_ID
-    MEGATRON_ARGS="$MEGATRON_ARGS --wandb-project $PROJECT --wandb-exp-name $EXP_NAME-$SLURM_JOB_ID --wandb-save-dir $WORKDIR/_research/results/runs"
+    MEGATRON_ARGS+=(
+        --wandb-project "$PROJECT"
+        --wandb-exp-name "$EXP_NAME-$SLURM_JOB_ID"
+        --wandb-save-dir "$WORKDIR/_research/results/runs"
+    )
 else
     export WANDB_MODE=disabled
 fi
+
+MEGATRON_ARGS_STR="${MEGATRON_ARGS[@]}"
 
 ENV_SETUP="export MASTER_ADDR=$MASTER_ADDR; \
     export MASTER_PORT=$MASTER_PORT; \
@@ -239,7 +254,7 @@ ENV_SETUP="export MASTER_ADDR=$MASTER_ADDR; \
     export PYTHONPATH=$WORKDIR:$PACKAGE_DIR:$WORKDIR\${PYTHONPATH:+:\$PYTHONPATH}; \
     cd $WORKDIR"
 
-TRAINING_CMD="bash $WORKDIR/_research/launch/install_python_deps.sh $PACKAGE_DIR && python3 $WORKDIR/pretrain_gpt.py $MEGATRON_ARGS"
+TRAINING_CMD="bash $WORKDIR/_research/launch/install_python_deps.sh $PACKAGE_DIR && python3 $WORKDIR/pretrain_gpt.py $MEGATRON_ARGS_STR"
 
 echo "CMD: $TRAINING_CMD"
 export APERTUS_PHASE_PRE_SRUN=$(date +%s.%N)

@@ -43,7 +43,7 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 export SLURM_SUBMIT_DIR=$REPO_ROOT
 cd $REPO_ROOT
 
-DEFAULT_SBATCH=_research/launch/transformer-pp-350m-master.sbatch
+DEFAULT_SBATCH=_research/launch/transformer-pp-350m-ablation-master-fp8.sbatch
 SBATCH=${1:-$DEFAULT_SBATCH}
 [ $# -gt 0 ] && shift
 
