@@ -421,6 +421,15 @@ class OptimizerConfig:
     orthogonalized updates (Newton-Schulz). Embedding + LM head ALWAYS use
     the Adam branch regardless of this flag (hardcoded — no toggle)."""
 
+    master_use_normuon: bool = False
+    """When True under --optimizer master with --use-orthogonal-updates, apply
+    NorMuon-style per-row second-moment rescaling to the orthogonalized matrix
+    update (norm-preserving). Default False."""
+
+    master_normuon_beta2: float = 0.95
+    """EMA coefficient for the per-row second moment when
+    master_use_normuon=True. Default 0.95."""
+
     ademamix_alpha: float = 0.0
     """AdEMAMix slow-EMA mixing weight. 0.0 (default) collapses to plain Adam."""
 

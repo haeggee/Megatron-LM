@@ -2439,6 +2439,13 @@ def _add_regularization_args(parser):
                        help='Use Muon-style orthogonalized updates for matrix params '
                        'under --optimizer master. Embedding + LM head ALWAYS use the '
                        'Adam branch regardless of this flag.')
+    group.add_argument('--master-use-normuon', action='store_true', default=False,
+                       help='With --optimizer master --use-orthogonal-updates, apply '
+                       'NorMuon-style per-row 2nd-moment rescaling to the orthogonalized '
+                       'matrix update (norm-preserving). Default False.')
+    group.add_argument('--master-normuon-beta2', type=float, default=0.95,
+                       help='EMA coefficient for the per-row 2nd moment when '
+                       '--master-use-normuon is set. Default 0.95.')
     group.add_argument('--ademamix-alpha', type=float, default=0.0,
                        help='AdEMAMix slow-EMA mixing weight. 0.0 collapses to Adam.')
     group.add_argument('--ademamix-beta3', type=float, default=0.9999,

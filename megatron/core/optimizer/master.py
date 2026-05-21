@@ -1,12 +1,9 @@
-# Adapted (slim) from megatron-lm-alex's master.py.
+# Adapted (slim) from alex's master.py.
 #
 # Slim cut:
 #   - Hypersphere weight clipping (post-step only, no update normalization).
-#   - L2 only (no spectral / orthogonal / standard kinds).
-#   - Modes: row, col, flat, embed. No sinkhorn / equilibration / invrowcol.
-#   - No hypersphere_project, hypersphere_soft, learnable radius.
-#   - No poor_mans_ortho, no split_qkv_heads, no split_qkv_gains.
-#   - weight_decay_method = "decoupled" only.
+#   - L2 only 
+#   - Modes: row, col, flat, embed
 #   - GainsMasterOptimizer also handles the no-gains case (mode=None), so a
 #     single class can be registered in _EMERGING_OPTIMIZERS for both cases.
 
@@ -81,11 +78,21 @@ class MasterOptimizer(torch.optim.Optimizer):
         num_ns_steps: int = 5,
         scale_mode: str = "spectral",
         extra_scale_factor: float = 1.0,
+        # NorMuon (per-row or per-col 2nd-moment rescale on the orthogonalized
+        # update; arXiv 2510.05491). Reduces along the longer axis, so the
+        # buffer lives along the shorter axis. No norm-preservation step.
+        use_normuon: bool = False,
+        normuon_beta2: float = 0.95,
+        normuon_eps: float = 1e-8,
         pg_collection: Optional[ProcessGroupCollection] = None,
         tp_mode: Literal["blockwise", "duplicated", "distributed"] = "duplicated",
     ):
         self.fp32_matmul_prec = fp32_matmul_prec
         self.use_nesterov = use_nesterov
+
+        self.use_normuon = use_normuon
+        self.normuon_beta2 = normuon_beta2
+        self.normuon_eps = normuon_eps
 
         self.hypersphere_mode = hypersphere_mode
         self.hypersphere_embedding_mode = hypersphere_embedding_mode
@@ -181,6 +188,8 @@ class MasterOptimizer(torch.optim.Optimizer):
                 grad = exp_avg
             with emerging_optimizers.utils.fp32_matmul_precision(self.fp32_matmul_prec):
                 update = self._orthogonalize_param(p, grad, is_qkv=is_qkv)
+            if self.use_normuon:
+                update = self._normuon_rescale(update, state)
         else:  # AdamW / AdEMAMix branch.
             beta2 = group["beta2"]
             exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
@@ -227,6 +236,38 @@ class MasterOptimizer(torch.optim.Optimizer):
         if p.ndim == 2 and self._resolve_mode(is_embedding) is not None:
             self._normalize(p, p, is_qkv=is_qkv, is_out_proj=is_out_proj,
                             is_embedding=is_embedding)
+
+    def _normuon_rescale(self, update, state):
+        """Pure NorMuon (arXiv 2510.05491): 2nd-moment rescale of the
+        orthogonalized update along the shorter axis. Reduces (averages
+        squared values) along the longer axis; rescales by 1/sqrt(max(v, eps)).
+        """
+        avg_dim = -1 if update.shape[-2] >= update.shape[-1] else -2
+        if "normuon_v" not in state:
+            buf_shape = list(update.shape)
+            buf_shape[avg_dim] = 1
+            state["normuon_v"] = update.new_zeros(buf_shape)
+        moment2 = state["normuon_v"]
+        v_mean = update.square().mean(dim=avg_dim, keepdim=True)
+        moment2.lerp_(v_mean, 1 - self.normuon_beta2)
+        res = update * moment2.clamp_min(self.normuon_eps).rsqrt()
+
+        # to reuse the same shape factors as muon, we do the following:
+        # * we now that a semi-ortho matrix has frob norm of min(d_out, d_in) ** 0.5
+        # * we divide by frob norm of the scaled matrix of normuon rescaled matrix to get 1
+        # * we scale by min(d_out, d_in) ** 0.5 to get the same frob norm as the original matrix
+        # * we can then apply other shape scaling factors as in muon
+
+        # new norm
+        vnorm_new = res.norm(dim=(-2, -1), keepdim=True).clamp_min(self.normuon_eps)
+        shape_scaling = min(update.size(-2), update.size(-1)) ** 0.5
+        # now we have a matrix with frob norm 1, we can apply other shape scaling factors as in muon
+        res = res * shape_scaling / vnorm_new
+
+        # apply other shape scaling factors as in muon
+        scaling_factor = _get_muon_scale_factor(update.size(-2), update.size(-1), mode=self.scale_mode)
+        return res * scaling_factor
+ 
 
     def _apply_weight_decay_inplace(self, p, group):
         weight_decay = group["weight_decay"]
@@ -313,6 +354,10 @@ class MasterOptimizer(torch.optim.Optimizer):
         x.div_(norm)
         if mode == "flat":
             x.mul_(max(x.size(-2), x.size(-1)) ** 0.5)
+        row_l2_after = x.norm(dim=-1).mean()
+        col_l2_after = x.norm(dim=-2).mean()
+        frob_norm = x.norm()
+        print(f"Hypersphere normalization: {x.shape} | row_norm avg: {row_l2_after.item():.5f}, col_norm avg: {col_l2_after.item():.5f}, frob_norm: {frob_norm.item():.5f}")
 
 
 class GainsMasterOptimizer(MasterOptimizer):

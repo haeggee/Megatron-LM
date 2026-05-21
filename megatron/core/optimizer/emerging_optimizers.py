@@ -544,6 +544,8 @@ def _master_config_to_kwargs(config, model_chunks, pg_collection) -> Dict[str, A
         num_ns_steps=config.muon_num_ns_steps,
         scale_mode=config.muon_scale_mode,
         extra_scale_factor=config.muon_extra_scale_factor,
+        use_normuon=config.master_use_normuon,
+        normuon_beta2=config.master_normuon_beta2,
         pg_collection=pg_collection,
         tp_mode=config.muon_tp_mode,
         # Gains. None → GainsMasterOptimizer behaves like plain MasterOptimizer.
