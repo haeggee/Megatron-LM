@@ -709,7 +709,7 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                             # covered by copy_tensor_model_parallel_attributes
                             # via _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS.)
                             for _attr in (
-                                'is_out_proj',
+                                'is_out_proj', 'is_router',
                                 'is_embedding_or_output_parameter',
                                 'is_embedding_parameter', 'is_output_parameter',
                             ):

@@ -531,6 +531,7 @@ def _master_config_to_kwargs(config, model_chunks, pg_collection) -> Dict[str, A
         # Hypersphere.
         hypersphere_mode=config.hypersphere_mode,
         hypersphere_embedding_mode=config.hypersphere_embedding_mode,
+        hypersphere_router_mode=config.hypersphere_router_mode,
         # Muon.
         use_orthogonal_updates=config.use_orthogonal_updates,
         momentum_beta=config.muon_momentum,

@@ -64,6 +64,7 @@ class MasterOptimizer(torch.optim.Optimizer):
         # Hypersphere (L2, post-step weight projection only).
         hypersphere_mode: Optional[Literal["row", "col", "flat", "embed"]] = None,
         hypersphere_embedding_mode: Optional[Literal["row", "col", "flat", "embed"]] = None,
+        hypersphere_router_mode: Optional[Literal["row", "col", "flat", "embed"]] = None,
         hypersphere_eps: float = 1e-8,
         # Muon (orthogonalized updates).
         use_orthogonal_updates: bool = False,
@@ -96,6 +97,7 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         self.hypersphere_mode = hypersphere_mode
         self.hypersphere_embedding_mode = hypersphere_embedding_mode
+        self.hypersphere_router_mode = hypersphere_router_mode
         self.hypersphere_eps = hypersphere_eps
 
         self.split_qkv = split_qkv
@@ -128,7 +130,9 @@ class MasterOptimizer(torch.optim.Optimizer):
         super().__init__(params, defaults)
 
         # Normalize parameters at init so the first forward sees on-sphere weights.
-        if self.hypersphere_mode is not None or self.hypersphere_embedding_mode is not None:
+        if (self.hypersphere_mode is not None
+                or self.hypersphere_embedding_mode is not None
+                or self.hypersphere_router_mode is not None):
             with torch.no_grad():
                 for group in self.param_groups:
                     for p in group["params"]:
@@ -137,8 +141,9 @@ class MasterOptimizer(torch.optim.Optimizer):
                         is_qkv = self.is_qkv_fn(p)
                         is_out_proj = getattr(p, "is_out_proj", False)
                         is_embedding = getattr(p, "is_embedding_or_output_parameter", False)
+                        is_router = getattr(p, "is_router", False)
                         self._normalize(p, p, is_qkv=is_qkv, is_out_proj=is_out_proj,
-                                        is_embedding=is_embedding)
+                                        is_embedding=is_embedding, is_router=is_router)
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -175,6 +180,7 @@ class MasterOptimizer(torch.optim.Optimizer):
         is_qkv = self.is_qkv_fn(p)
         is_out_proj = getattr(p, "is_out_proj", False)
         is_embedding = getattr(p, "is_embedding_or_output_parameter", False)
+        is_router = getattr(p, "is_router", False)
 
         if group["use_orthogonal_updates"]:  # Muon branch.
             assert emerging_optimizers is not None, (
@@ -233,9 +239,9 @@ class MasterOptimizer(torch.optim.Optimizer):
         p.add_(update, alpha=-group["lr"])
 
         # Post-step hypersphere normalization (matrix clipping).
-        if p.ndim == 2 and self._resolve_mode(is_embedding) is not None:
+        if p.ndim == 2 and self._resolve_mode(is_embedding, is_router) is not None:
             self._normalize(p, p, is_qkv=is_qkv, is_out_proj=is_out_proj,
-                            is_embedding=is_embedding)
+                            is_embedding=is_embedding, is_router=is_router)
 
     def _normuon_rescale(self, update, state):
         """Pure NorMuon (arXiv 2510.05491): 2nd-moment rescale of the
@@ -310,13 +316,15 @@ class MasterOptimizer(torch.optim.Optimizer):
         scale = _get_muon_scale_factor(size[0], size[1], mode=self.scale_mode)
         return orth * scale * self.extra_scale_factor
 
-    def _resolve_mode(self, is_embedding: bool):
+    def _resolve_mode(self, is_embedding: bool, is_router: bool = False):
+        if is_router and self.hypersphere_router_mode is not None:
+            return self.hypersphere_router_mode
         if is_embedding and self.hypersphere_embedding_mode is not None:
             return self.hypersphere_embedding_mode
         return self.hypersphere_mode
 
     def _normalize(self, p, x, is_qkv: bool = False, is_out_proj: bool = False,
-                   is_embedding: bool = False):
+                   is_embedding: bool = False, is_router: bool = False):
         """In-place L2-sphere projection of a 2D tensor `x` (sized like `p`).
 
         For QKV-merged weights, normalize each of Q/K/V separately. Modes:
@@ -325,7 +333,7 @@ class MasterOptimizer(torch.optim.Optimizer):
             flat   → unit Frobenius then scale by sqrt(max(d_out, d_in))
             embed  → row for non-out_proj, col for out_proj
         """
-        mode = self._resolve_mode(is_embedding)
+        mode = self._resolve_mode(is_embedding, is_router)
         if mode is None:
             return
 
@@ -354,10 +362,10 @@ class MasterOptimizer(torch.optim.Optimizer):
         x.div_(norm)
         if mode == "flat":
             x.mul_(max(x.size(-2), x.size(-1)) ** 0.5)
-        row_l2_after = x.norm(dim=-1).mean()
-        col_l2_after = x.norm(dim=-2).mean()
-        frob_norm = x.norm()
-        print(f"Hypersphere normalization: {x.shape} | row_norm avg: {row_l2_after.item():.5f}, col_norm avg: {col_l2_after.item():.5f}, frob_norm: {frob_norm.item():.5f}")
+        # row_l2_after = x.norm(dim=-1).mean()
+        # col_l2_after = x.norm(dim=-2).mean()
+        # frob_norm = x.norm()
+        # print(f"Hypersphere normalization: {x.shape} | row_norm avg: {row_l2_after.item():.5f}, col_norm avg: {col_l2_after.item():.5f}, frob_norm: {frob_norm.item():.5f}")
 
 
 class GainsMasterOptimizer(MasterOptimizer):

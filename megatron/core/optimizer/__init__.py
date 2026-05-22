@@ -803,6 +803,8 @@ def _get_megatron_emerging_optimizer(
             # TODO(deyuf): support MLA
             if 'linear_qkv.weight' in name and len(param.shape) == 2:
                 param.is_qkv = True
+            if name.endswith('router.weight') and len(param.shape) == 2:
+                param.is_router = True
 
     # Apply optimizer-specific default param overrides (e.g. muon: non-linear -> adam).
     config_overrides.update(_EMERGING_OPTIMIZERS[eopt_name].default_param_overrides)
@@ -881,11 +883,34 @@ def _get_megatron_emerging_optimizer(
             # Hypersphere on embedding/LM head → keep in master, force Adam branch.
             config_overrides[emb_key] = {'use_orthogonal_updates': False}
 
-        # Matrix LR for non-embedding/non-output 2D weights.
+        # MoE router optimizer-branch override (orthogonal hypersphere normalization
+        # for routers is wired separately through hypersphere_router_mode on the
+        # MasterOptimizer; this only controls Muon-vs-Adam for routers).
+        # Effective branch: explicit override > global use_orthogonal_updates.
+        router_uses_adam = (
+            config.master_router_use_orthogonal_updates is False
+            or (config.master_router_use_orthogonal_updates is None
+                and not config.use_orthogonal_updates)
+        )
+        router_override = {}
+        if config.master_router_use_orthogonal_updates is not None:
+            router_override['use_orthogonal_updates'] = (
+                config.master_router_use_orthogonal_updates
+            )
+        if router_uses_adam:
+            # Adam routers use base lr (matrix_lr is Muon-tuned; doesn't fit Adam).
+            router_override['max_lr'] = config.lr
+            router_override['min_lr'] = _master_min_lr(config, config.lr)
+        if router_override:
+            config_overrides[ParamKey(attr='is_router')] = router_override
+
+        # Matrix LR for non-embedding/non-output 2D weights. Adam-branch routers
+        # are excluded — they get base lr from the router_override above.
         non_emb_2d = ParamPredicate(
             name="master_non_embedding_or_output_2d",
             fn=lambda p: (not getattr(p, "is_embedding_or_output_parameter", False)
-                          and len(p.shape) == 2),
+                          and len(p.shape) == 2
+                          and not (router_uses_adam and getattr(p, "is_router", False))),
         )
         config_overrides[ParamKey(predicate=non_emb_2d)] = {
             'max_lr': matrix_lr,

@@ -2425,6 +2425,19 @@ def _add_regularization_args(parser):
                        '--optimizer master. When set, those params stay in master (Adam '
                        'branch) and get post-step normalization. When None, they route '
                        'to external Adam with no hypersphere.')
+    group.add_argument('--hypersphere-router-mode', type=str, default=None,
+                       choices=['row', 'col', 'flat', 'embed'],
+                       help='Hypersphere mode override for MoE router weights under '
+                       '--optimizer master. When set, router 2D weights get post-step '
+                       'L2 projection in this mode. None disables router-specific '
+                       'normalization. Independent of --master-router-use-orthogonal-updates.')
+    group.add_argument('--master-router-use-orthogonal-updates',
+                       type=lambda s: {'true': True, 'false': False}[s.lower()],
+                       default=None, choices=[True, False],
+                       help='Per-param-group override for use_orthogonal_updates on MoE '
+                       'router weights under --optimizer master. "true" → force Muon for '
+                       'routers. "false" → force Adam branch for routers. Unset (default) '
+                       '→ routers follow --use-orthogonal-updates.')
     group.add_argument('--hypersphere-gains-mode', type=str, default=None,
                        choices=['row', 'col', 'rowcol', 'flat', 'embed'],
                        help='Learnable per-axis gains for matrix params under master.')

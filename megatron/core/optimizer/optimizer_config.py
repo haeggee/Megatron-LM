@@ -404,6 +404,20 @@ class OptimizerConfig:
     stay in master (Adam branch) and get this mode of post-step normalization.
     When None, those params route to external Adam with no hypersphere."""
 
+    hypersphere_router_mode: Optional[str] = None
+    """Hypersphere normalization mode override for MoE router weights.
+    Same choices as hypersphere_mode. When set, router 2D weights get this
+    mode of post-step L2 projection. When None, no special normalization is
+    applied to routers (they fall back to hypersphere_mode). Orthogonal vs
+    Adam updates for routers are controlled separately by
+    master_router_use_orthogonal_updates."""
+
+    master_router_use_orthogonal_updates: Optional[bool] = None
+    """Per-param-group override for use_orthogonal_updates on MoE router
+    weights under --optimizer master. True → force Muon for routers.
+    False → force Adam branch for routers. None (default) → routers follow
+    the global use_orthogonal_updates setting."""
+
     hypersphere_gains_mode: Optional[str] = None
     """Learnable per-axis gains for matrix params under master. One of 'row',
     'col', 'rowcol', 'flat', 'embed', or None (no gains)."""

@@ -1,9 +1,12 @@
 #!/bin/bash
 #
-# Transformer++ 350M baseline on 1 GH200 node (4 GPUs).
-# 24L / 1024H / 2560F / 16h / 4kv (GQA).
-# SwiGLU, RMSNorm, RoPE, master optimizer, WSD, bf16.
-# 15B tokens on ClimbMix, ~28610 steps at 524K tokens/step.
+# Transformer++ 350M-active MoE on 1 GH200 node (4 GPUs).
+# 24L / 1024H / 16h / 4kv (GQA). MoE: 16 routed experts top-1 + 1 shared,
+# ffn-hidden 1280 (iso-active to dense 2560). QK-LayerNorm. FP8 blockwise.
+# SwiGLU, RMSNorm, RoPE, master optimizer, WSD.
+# 15B tokens on ClimbMix, ~57220 steps at 262K tokens/step (MBS=8).
+#
+# Architecture matches the 350m-wsdmc MoE runs for apples-to-apples comparison.
 #
 # Master = Adam/AdEMAMix + Muon-style orthogonalized updates + L2 hypersphere
 # weight clipping + learnable per-axis gains. Embedding + LM head ALWAYS use
@@ -52,7 +55,7 @@ export TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER=0
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export TMPDIR=$TMP_CACHE_DIR
 
-mkdir -p $DATASET_CACHE_DIR $TRITON_CACHE_DIR $TORCHINDUCTOR_CACHE_DIR $TMP_CACHE_DIR $PACKAGE_DIR _research/results/runs _research/results/performance
+mkdir -p $DATASET_CACHE_DIR $TRITON_CACHE_DIR $TORCHINDUCTOR_CACHE_DIR $TMP_CACHE_DIR $PACKAGE_DIR _research/results/runs _research/results/performance _research/results/ckpts
 
 MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)
 MASTER_PORT=25678
@@ -63,30 +66,38 @@ FFN_HIDDEN=2560
 NUM_HEADS=16
 NUM_KV_HEADS=4
 
-MBS=16
+MBS=8
 GBS=128
 SEQ_LEN=4096
 TRAIN_SAMPLES=3662109
 
 # Master LR knobs. Tune $MLR independently of $LR — they control different
 # param groups (embedding/LM-head/biases use $LR, matrices use $MLR).
-LR=1e-3
-MLR=8e-3
-MIN_LR=1e-5
+# Override via env: MLR=1e-2 sbatch ... or LR=3e-4 sbatch ...
+LR=${LR:-1e-3}
+MLR=${MLR:-8e-3}
+MIN_LR=${MIN_LR:-1e-5}
 
 TP=1
 PP=1
 CP=1
 
 PROJECT=${WANDB_PROJECT:-megatron-lm-research-baseline}
-EXP_NAME=transformer-pp-350m-master-$(git rev-parse --short HEAD)
+EXP_NAME=transformer-pp-350m-master-lr${LR}-mlr${MLR}-$(git rev-parse --short HEAD)
+CKPT_DIR=${MASTER_CKPT_DIR:-$WORKDIR/_research/results/ckpts/$EXP_NAME}
+mkdir -p $CKPT_DIR
 
 export APERTUS_LOG_DIR=$WORKDIR/_research/results/performance
 export APERTUS_FEATURE=transformer-pp
 export APERTUS_TRACK=transformer-pp-350m
 export APERTUS_RUN_NAME=$EXP_NAME-$SLURM_JOB_ID
-export APERTUS_LOG_ACT_STATS=0
-export APERTUS_LOG_TOP1_ACC=0
+export APERTUS_LOG_ACT_STATS=1
+export APERTUS_LOG_TOP1_ACC=1
+export APERTUS_LOG_ROW_CV=1
+export APERTUS_LOG_NEURON_STATS=1
+export APERTUS_LOG_NEURON_INTERVAL=50
+export APERTUS_LOG_PER_LAYER_GRADS=1
+export APERTUS_LOG_LOSS_SPIKES=1
 
 TRANSFORMER_ENGINE_ARGS=(
     --transformer-impl transformer_engine
@@ -106,9 +117,25 @@ NETWORK_SIZE_ARGS=(
     --make-vocab-size-divisible-by 128
     --normalization RMSNorm
     --swiglu
+    --qk-layernorm
     --untie-embeddings-and-output-weights
     --attention-backend auto
     --seq-length $SEQ_LEN
+)
+
+MOE_ARGS=(
+    --num-experts 16
+    --moe-router-topk 1
+    --moe-router-pre-softmax
+    --moe-ffn-hidden-size 1280
+    --moe-shared-expert-intermediate-size 1280
+    --moe-router-load-balancing-type aux_loss
+    --moe-aux-loss-coeff 1e-2
+    --moe-z-loss-coeff 1e-3
+    --moe-grouped-gemm
+    --moe-permute-fusion
+    --moe-token-dispatcher-type alltoall
+    --moe-per-layer-logging
 )
 
 TRAINING_ARGS=(
@@ -153,9 +180,12 @@ MASTER_ARGS=(
     --muon-scale-mode shape_up
     --matrix-lr $MLR
     --embedding-lr-multiplier 3
+    # router: use adam branch, and normalize row-wise.
+    --master-router-use-orthogonal-updates false
+    --hypersphere-router-mode row
     # 'absolute': every group decays to MIN_LR (clamped to <= max_lr).
     # Switch to 'relative' to decay each group by min_lr/lr fraction instead.
-    --master-min-lr-mode absolute    
+    --master-min-lr-mode absolute
 )
 
 LEARNING_RATE_ARGS=(
@@ -176,18 +206,25 @@ INITIALIZATION_ARGS=(
 
 MIXED_PRECISION_ARGS=(
     --bf16
+    --fp8-format e4m3
+    --fp8-recipe blockwise
 )
 
 DISTRIBUTED_ARGS=(
     --tensor-model-parallel-size $TP
     --pipeline-model-parallel-size $PP
     --context-parallel-size $CP
+    --expert-model-parallel-size 1
     --use-distributed-optimizer
     --overlap-grad-reduce
     --sequence-parallel
 )
 
 LOGGING_ARGS=(
+    --save $CKPT_DIR
+    --load $CKPT_DIR
+    --save-interval 5722
+    --ckpt-format torch
     --log-throughput
     --log-progress
     --log-memory-to-tensorboard
@@ -217,6 +254,7 @@ DATA_ARGS=(
 MEGATRON_ARGS=(
     "${TRANSFORMER_ENGINE_ARGS[@]}"
     "${NETWORK_SIZE_ARGS[@]}"
+    "${MOE_ARGS[@]}"
     "${TRAINING_ARGS[@]}"
     "${REGULARIZATION_ARGS[@]}"
     "${MASTER_ARGS[@]}"

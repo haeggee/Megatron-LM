@@ -395,7 +395,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         # Propagate master-optimizer routing attrs not covered
                         # by copy_tensor_model_parallel_attributes.
                         for _attr in (
-                            'is_out_proj',
+                            'is_out_proj', 'is_router',
                             'is_embedding_or_output_parameter',
                             'is_embedding_parameter', 'is_output_parameter',
                         ):
@@ -435,7 +435,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         # Propagate master-optimizer routing attrs not covered
                         # by copy_tensor_model_parallel_attributes.
                         for _attr in (
-                            'is_out_proj',
+                            'is_out_proj', 'is_router',
                             'is_embedding_or_output_parameter',
                             'is_embedding_parameter', 'is_output_parameter',
                         ):
@@ -467,7 +467,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         shard_model_param.shared = model_param.shared
                     # Propagate routing/identity attrs for emerging optimizers.
                     for _attr in (
-                        'is_qkv', 'is_out_proj', 'expert_tp',
+                        'is_qkv', 'is_out_proj', 'is_router', 'expert_tp',
                         'is_embedding_or_output_parameter',
                         'is_embedding_parameter', 'is_output_parameter',
                     ):
