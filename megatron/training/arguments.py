@@ -2420,13 +2420,13 @@ def _add_regularization_args(parser):
                        'matrices under --optimizer master. Applied post-step to project '
                        'the weight onto the L2 sphere. None = off.')
     group.add_argument('--hypersphere-embedding-mode', type=str, default=None,
-                       choices=['row', 'col', 'flat', 'embed'],
+                       choices=['row', 'col', 'flat', 'embed', 'none'],
                        help='Hypersphere mode override for embedding + LM head under '
                        '--optimizer master. When set, those params stay in master (Adam '
                        'branch) and get post-step normalization. When None, they route '
                        'to external Adam with no hypersphere.')
     group.add_argument('--hypersphere-router-mode', type=str, default=None,
-                       choices=['row', 'col', 'flat', 'embed'],
+                       choices=['row', 'col', 'flat', 'embed', 'none'],
                        help='Hypersphere mode override for MoE router weights under '
                        '--optimizer master. When set, router 2D weights get post-step '
                        'L2 projection in this mode. None disables router-specific '
@@ -2448,6 +2448,12 @@ def _add_regularization_args(parser):
     group.add_argument('--hypersphere-gains-mode-embedding', type=str, default=None,
                        choices=['row', 'col', 'rowcol', 'flat', 'none'],
                        help='Gains mode override for the embedding under master.')
+    group.add_argument('--gains-lr', type=float, default=None,
+                       help='Absolute LR for the per-axis gains AdamW under '
+                       '--optimizer master. When unset, falls back to --lr. '
+                       'The gains LR is still multiplied each step by the '
+                       'scheduler ratio (current_lr / max_lr), so it tracks '
+                       'the schedule shape of the main LR.')
     group.add_argument('--use-orthogonal-updates', action='store_true', default=False,
                        help='Use Muon-style orthogonalized updates for matrix params '
                        'under --optimizer master. Embedding + LM head ALWAYS use the '

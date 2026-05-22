@@ -12,7 +12,6 @@ import math
 from typing import Callable, Literal, Optional
 
 import torch
-from torch import nn
 
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.utils import get_pg_size, log_single_rank
@@ -63,8 +62,8 @@ class MasterOptimizer(torch.optim.Optimizer):
         eps: float = 1e-8,
         # Hypersphere (L2, post-step weight projection only).
         hypersphere_mode: Optional[Literal["row", "col", "flat", "embed"]] = None,
-        hypersphere_embedding_mode: Optional[Literal["row", "col", "flat", "embed"]] = None,
-        hypersphere_router_mode: Optional[Literal["row", "col", "flat", "embed"]] = None,
+        hypersphere_embedding_mode: Optional[Literal["row", "col", "flat", "embed", "none"]] = None,
+        hypersphere_router_mode: Optional[Literal["row", "col", "flat", "embed", "none"]] = None,
         hypersphere_eps: float = 1e-8,
         # Muon (orthogonalized updates).
         use_orthogonal_updates: bool = False,
@@ -318,10 +317,12 @@ class MasterOptimizer(torch.optim.Optimizer):
 
     def _resolve_mode(self, is_embedding: bool, is_router: bool = False):
         if is_router and self.hypersphere_router_mode is not None:
-            return self.hypersphere_router_mode
-        if is_embedding and self.hypersphere_embedding_mode is not None:
-            return self.hypersphere_embedding_mode
-        return self.hypersphere_mode
+            mode = self.hypersphere_router_mode
+        elif is_embedding and self.hypersphere_embedding_mode is not None:
+            mode = self.hypersphere_embedding_mode
+        else:
+            mode = self.hypersphere_mode
+        return None if mode == "none" else mode
 
     def _normalize(self, p, x, is_qkv: bool = False, is_out_proj: bool = False,
                    is_embedding: bool = False, is_router: bool = False):
@@ -376,6 +377,13 @@ class GainsMasterOptimizer(MasterOptimizer):
     to plain `MasterOptimizer` — no gain tensors are created and the gain hooks
     in step() are no-ops. This lets a single class cover both cases for
     registry registration.
+
+    Gain optimizer state (1st/2nd moments) is tracked manually as plain tensors
+    in `self.state[p]`, like Muown's magnitude state. This avoids registering
+    gain `nn.Parameter`s in an inner `AdamW` that lives outside `self.param_groups`
+    — torch.optim's state_dict id-mapping doesn't survive that, which is what
+    breaks `torch.save(super().state_dict(), ...)`. Gain tensors have a
+    different shape than `p`, so use `--ckpt-format torch` (same caveat as Muown).
     """
 
     def __init__(
@@ -393,14 +401,41 @@ class GainsMasterOptimizer(MasterOptimizer):
         self.hypersphere_gains_mode = hypersphere_gains_mode
         self.hypersphere_gains_mode_output = hypersphere_gains_mode_output
         self.hypersphere_gains_mode_embedding = hypersphere_gains_mode_embedding
-        self.gains_adam_kwargs = dict(
-            lr=gains_lr if gains_lr is not None else kwargs.get("lr", 1e-3),
-            betas=gains_betas,
-            eps=gains_eps,
-            weight_decay=gains_weight_decay,
-        )
+        self.gains_lr = gains_lr  # None → follow group["lr"] verbatim
+        self.gains_betas = gains_betas
+        self.gains_eps = gains_eps
+        self.gains_weight_decay = gains_weight_decay
         super().__init__(params, **kwargs)
-        self._setup_inner_opts()
+        self._setup_gains()
+
+    def _setup_gains(self):
+        if self.hypersphere_gains_mode is None:
+            return
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.ndim < 2:
+                    continue
+                mode = self._resolve_gains_mode(p)
+                if mode is None or mode == "none":
+                    continue
+                is_out_proj = getattr(p, "is_out_proj", False)
+                state = self.state[p]
+
+                if ("row" in mode) or (mode == "embed" and not is_out_proj):
+                    if "row_gain" not in state:
+                        state["row_gain"] = torch.ones(p.size(0), dtype=torch.float32, device=p.device)
+                        state["row_gain_m"] = torch.zeros_like(state["row_gain"])
+                        state["row_gain_v"] = torch.zeros_like(state["row_gain"])
+                if ("col" in mode) or (mode == "embed" and is_out_proj):
+                    if "col_gain" not in state:
+                        state["col_gain"] = torch.ones(p.size(1), dtype=torch.float32, device=p.device)
+                        state["col_gain_m"] = torch.zeros_like(state["col_gain"])
+                        state["col_gain_v"] = torch.zeros_like(state["col_gain"])
+                if mode == "flat":
+                    if "flat_gain" not in state:
+                        state["flat_gain"] = torch.ones((), dtype=torch.float32, device=p.device)
+                        state["flat_gain_m"] = torch.zeros_like(state["flat_gain"])
+                        state["flat_gain_v"] = torch.zeros_like(state["flat_gain"])
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -418,23 +453,9 @@ class GainsMasterOptimizer(MasterOptimizer):
                 group["momentum_beta"] = group["beta1"]
             for p in group["params"]:
                 if p.grad is not None:
-                    self._preprocess_gains(p)
+                    gain_grads = self._preprocess_gains(p)
                     self._param_step(p, group)
-
-        # Sync gains LR with the param-scheduler's max-lr-decayed value.
-        ref = self.param_groups[0]
-        max_lr = ref.get("max_lr", ref["lr"])
-        schedule_mult = ref["lr"] / max_lr if max_lr > 0 else 1.0
-        gains_lr = self.gains_adam_kwargs["lr"] * schedule_mult
-        for inner_opt in self.inner_opts.values():
-            for g in inner_opt.param_groups:
-                g["lr"] = gains_lr
-            inner_opt.step()
-            inner_opt.zero_grad()
-
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p.grad is not None:
+                    self._gains_step(p, group, gain_grads)
                     self._apply_gains(p)
 
         return loss
@@ -447,7 +468,7 @@ class GainsMasterOptimizer(MasterOptimizer):
         row = state.get("row_gain")
         col = state.get("col_gain")
         if flat is None and row is None and col is None:
-            return
+            return None
 
         # Undo gains to recover bare normalized weight.
         if flat is not None:
@@ -457,26 +478,63 @@ class GainsMasterOptimizer(MasterOptimizer):
         if col is not None:
             p.div_(col[None, :].clamp_min(eps))
 
-        # Compute gain.grad.
+        # Compute ∂L/∂gain from bare p and the gain-baked grad still on p.grad.
         p_times_pgrad = p * p.grad
+        gain_grads = {}
         if flat is not None:
             assert row is None and col is None
-            flat.grad = torch.sum(p_times_pgrad)
+            gain_grads["flat_gain"] = torch.sum(p_times_pgrad)
         elif row is not None and col is not None:
-            row.grad = torch.sum(p_times_pgrad * col[None, :], dim=1)
-            col.grad = torch.sum(p_times_pgrad * row[:, None], dim=0)
+            gain_grads["row_gain"] = torch.sum(p_times_pgrad * col[None, :], dim=1)
+            gain_grads["col_gain"] = torch.sum(p_times_pgrad * row[:, None], dim=0)
         elif row is not None:
-            row.grad = torch.sum(p_times_pgrad, dim=1)
+            gain_grads["row_gain"] = torch.sum(p_times_pgrad, dim=1)
         else:
-            col.grad = torch.sum(p_times_pgrad, dim=0)
+            gain_grads["col_gain"] = torch.sum(p_times_pgrad, dim=0)
 
-        # Rescale p.grad by gains so MasterOptimizer's step computes the right delta.
+        # Rescale p.grad so MasterOptimizer's step sees ∂L/∂(bare p).
         if flat is not None:
             p.grad.mul_(flat)
         if row is not None:
             p.grad.mul_(row[:, None])
         if col is not None:
             p.grad.mul_(col[None, :])
+
+        return gain_grads
+
+    @torch.no_grad()
+    def _gains_step(self, p, group, gain_grads):
+        if not gain_grads:
+            return
+        state = self.state[p]
+        step = group["step"]
+        beta1, beta2 = self.gains_betas
+        eps = self.gains_eps
+        wd = self.gains_weight_decay
+
+        # Gains follow the param-group LR. If gains_lr is unset, use group["lr"]
+        # verbatim (so the param scheduler drives gains too). Otherwise treat
+        # gains_lr as a base LR and apply the param schedule shape on top.
+        if self.gains_lr is None:
+            lr = group["lr"]
+        else:
+            max_lr = group.get("max_lr", group["lr"])
+            schedule_mult = (group["lr"] / max_lr) if max_lr > 0 else 1.0
+            lr = self.gains_lr * schedule_mult
+
+        bias_correction1 = 1.0 - beta1 ** step
+        bias_correction2 = 1.0 - beta2 ** step
+
+        for name, grad in gain_grads.items():
+            gain = state[name]
+            m = state[f"{name}_m"]
+            v = state[f"{name}_v"]
+            if wd != 0.0:
+                gain.mul_(1.0 - lr * wd)
+            m.mul_(beta1).add_(grad, alpha=1 - beta1)
+            v.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+            denom = (v.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+            gain.addcdiv_(m, denom, value=-lr / bias_correction1)
 
     @torch.no_grad()
     def _apply_gains(self, p):
@@ -499,110 +557,6 @@ class GainsMasterOptimizer(MasterOptimizer):
         if is_embedding and self.hypersphere_gains_mode_embedding is not None:
             return self.hypersphere_gains_mode_embedding
         return self.hypersphere_gains_mode
-
-    def _setup_inner_opts(self):
-        # No-gains case: GainsMasterOptimizer behaves like plain MasterOptimizer.
-        if self.hypersphere_gains_mode is None:
-            self.inner_opts = {}
-            return
-
-        row_groups, col_groups, flat_groups = [], [], []
-        for group in self.param_groups:
-            row_gains, col_gains, flat_gains = [], [], []
-            for p in group["params"]:
-                if p.ndim < 2:
-                    continue
-                mode = self._resolve_gains_mode(p)
-                if mode is None or mode == "none":
-                    continue
-                is_out_proj = getattr(p, "is_out_proj", False)
-
-                if ("row" in mode) or (mode == "embed" and not is_out_proj):
-                    gain = self.state[p].get("row_gain")
-                    if gain is None:
-                        gain = nn.Parameter(torch.ones(p.size(0), dtype=torch.float32,
-                                                      device=p.device))
-                    elif not isinstance(gain, nn.Parameter):
-                        gain = nn.Parameter(gain)
-                    self.state[p]["row_gain"] = gain
-                    row_gains.append(gain)
-
-                if ("col" in mode) or (mode == "embed" and is_out_proj):
-                    gain = self.state[p].get("col_gain")
-                    if gain is None:
-                        gain = nn.Parameter(torch.ones(p.size(1), dtype=torch.float32,
-                                                      device=p.device))
-                    elif not isinstance(gain, nn.Parameter):
-                        gain = nn.Parameter(gain)
-                    self.state[p]["col_gain"] = gain
-                    col_gains.append(gain)
-
-                if mode == "flat":
-                    gain = self.state[p].get("flat_gain")
-                    if gain is None:
-                        gain = nn.Parameter(torch.ones((), dtype=torch.float32,
-                                                      device=p.device))
-                    elif not isinstance(gain, nn.Parameter):
-                        gain = nn.Parameter(gain)
-                    self.state[p]["flat_gain"] = gain
-                    flat_gains.append(gain)
-
-            _skip = {"params", "lr", "weight_decay", "eps"}
-            if row_gains:
-                row_groups.append({**{k: v for k, v in group.items() if k not in _skip},
-                                   "params": row_gains})
-            if col_gains:
-                col_groups.append({**{k: v for k, v in group.items() if k not in _skip},
-                                   "params": col_gains})
-            if flat_gains:
-                flat_groups.append({**{k: v for k, v in group.items() if k not in _skip},
-                                    "params": flat_gains})
-
-        self.inner_opts = {}
-        if row_groups:
-            self.inner_opts["row"] = torch.optim.AdamW(row_groups, **self.gains_adam_kwargs)
-        if col_groups:
-            self.inner_opts["col"] = torch.optim.AdamW(col_groups, **self.gains_adam_kwargs)
-        if flat_groups:
-            self.inner_opts["flat"] = torch.optim.AdamW(flat_groups, **self.gains_adam_kwargs)
-
-    _GAIN_KEYS = ("row_gain", "col_gain", "flat_gain")
-
-    def state_dict(self):
-        sd = super().state_dict()
-        # Separate gains from per-param state so dist checkpointing's shape inference
-        # doesn't see a 1D/scalar gain alongside a 2D model param.
-        gains = {}
-        new_state = {}
-        for param_id, param_state in sd["state"].items():
-            param_gains = {k: param_state[k] for k in self._GAIN_KEYS if k in param_state}
-            if param_gains:
-                gains[param_id] = param_gains
-                new_state[param_id] = {k: v for k, v in param_state.items()
-                                       if k not in self._GAIN_KEYS}
-            else:
-                new_state[param_id] = param_state
-        sd["state"] = new_state
-        if gains:
-            sd["gains"] = gains
-        if self.inner_opts:
-            sd["inner"] = {name: inner.state_dict() for name, inner in self.inner_opts.items()}
-        return sd
-
-    def load_state_dict(self, state_dict):
-        sd = state_dict
-        if "gains" in sd:
-            gains = sd.pop("gains")
-            for param_id, param_gains in gains.items():
-                sd["state"].setdefault(param_id, {}).update(param_gains)
-        inner_sds = sd.pop("inner", None)
-        super().load_state_dict(sd)
-        # Re-link self.state[p][*_gain] to inner_opt params.
-        self._setup_inner_opts()
-        if inner_sds is not None:
-            for name, inner_sd in inner_sds.items():
-                self.inner_opts[name].load_state_dict(inner_sd)
-        # NOTE: don't call _apply_gains() — checkpoint weights already have gains baked in.
 
 
 def _split_qkv(x, shapes: tuple[int, int, int]) -> list[torch.Tensor]:

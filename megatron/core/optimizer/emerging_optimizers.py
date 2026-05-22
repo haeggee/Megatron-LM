@@ -553,7 +553,7 @@ def _master_config_to_kwargs(config, model_chunks, pg_collection) -> Dict[str, A
         hypersphere_gains_mode=config.hypersphere_gains_mode,
         hypersphere_gains_mode_output=config.hypersphere_gains_mode_output,
         hypersphere_gains_mode_embedding=config.hypersphere_gains_mode_embedding,
-        gains_lr=config.lr,
+        gains_lr=config.gains_lr if config.gains_lr is not None else config.lr,
         gains_betas=(config.adam_beta1, config.adam_beta2),
         gains_eps=config.adam_eps,
         gains_weight_decay=config.weight_decay,

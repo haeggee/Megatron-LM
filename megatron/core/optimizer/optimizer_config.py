@@ -430,6 +430,12 @@ class OptimizerConfig:
     """Gains mode override for the embedding. Same choices as
     hypersphere_gains_mode_output."""
 
+    gains_lr: Optional[float] = None
+    """Absolute LR for the per-axis gains AdamW under --optimizer master.
+    When None, falls back to config.lr. The gains LR is still scaled each
+    step by the main scheduler's (lr / max_lr) ratio so it tracks the
+    schedule shape."""
+
     use_orthogonal_updates: bool = False
     """When True under --optimizer master, matrix params use Muon-style
     orthogonalized updates (Newton-Schulz). Embedding + LM head ALWAYS use
