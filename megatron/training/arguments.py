@@ -2431,6 +2431,15 @@ def _add_regularization_args(parser):
                        '--optimizer master. When set, router 2D weights get post-step '
                        'L2 projection in this mode. None disables router-specific '
                        'normalization. Independent of --master-router-use-orthogonal-updates.')
+    group.add_argument('--hypersphere-tangential-grad', action='store_true', default=False,
+                       help='Project p.grad onto the hypersphere tangent space before '
+                       'Newton-Schulz (Muown-style grad_v construction). Only effective '
+                       'with --use-orthogonal-updates and an active hypersphere mode.')
+    group.add_argument('--hypersphere-preserve-init', action='store_true', default=False,
+                       help='Skip init-time hypersphere projection so the model init '
+                       'magnitude survives into training. When gains are configured '
+                       '(single-axis), gains absorb the per-axis init magnitude '
+                       '(Muown-style g = ||W[i]||).')
     group.add_argument('--master-router-use-orthogonal-updates',
                        type=lambda s: {'true': True, 'false': False}[s.lower()],
                        default=None, choices=[True, False],

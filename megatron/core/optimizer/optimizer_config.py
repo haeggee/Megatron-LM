@@ -412,6 +412,22 @@ class OptimizerConfig:
     Adam updates for routers are controlled separately by
     master_router_use_orthogonal_updates."""
 
+    hypersphere_tangential_grad: bool = False
+    """When True (and use_orthogonal_updates=True), project p.grad onto the
+    tangent space of the active hypersphere mode before Newton-Schulz, matching
+    Muown's grad_v construction. When False, Newton-Schulz sees the full
+    rescaled gradient and the post-step _normalize retracts. Default False
+    (preserves current behavior)."""
+
+    hypersphere_preserve_init: bool = False
+    """When True, skip the init-time _normalize so the model's initialization
+    magnitude is preserved into training. If gains are configured (single-axis
+    mode: row/col/flat/embed), gains are initialized to absorb the per-axis
+    magnitude so p = gain * bare_p is identical to the original init. For
+    rowcol gains, falls back to the canonical row-absorbing decomposition
+    (col_gain stays at 1). Matches Muown's `g = ||W[i]||` initialization.
+    Default False."""
+
     master_router_use_orthogonal_updates: Optional[bool] = None
     """Per-param-group override for use_orthogonal_updates on MoE router
     weights under --optimizer master. True → force Muon for routers.

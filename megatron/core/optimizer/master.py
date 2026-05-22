@@ -65,6 +65,9 @@ class MasterOptimizer(torch.optim.Optimizer):
         hypersphere_embedding_mode: Optional[Literal["row", "col", "flat", "embed", "none"]] = None,
         hypersphere_router_mode: Optional[Literal["row", "col", "flat", "embed", "none"]] = None,
         hypersphere_eps: float = 1e-8,
+        # Muown-style options (off by default).
+        hypersphere_tangential_grad: bool = False,
+        hypersphere_preserve_init: bool = False,
         # Muon (orthogonalized updates).
         use_orthogonal_updates: bool = False,
         momentum_beta: float = 0.95,
@@ -98,6 +101,8 @@ class MasterOptimizer(torch.optim.Optimizer):
         self.hypersphere_embedding_mode = hypersphere_embedding_mode
         self.hypersphere_router_mode = hypersphere_router_mode
         self.hypersphere_eps = hypersphere_eps
+        self.hypersphere_tangential_grad = hypersphere_tangential_grad
+        self.hypersphere_preserve_init = hypersphere_preserve_init
 
         self.split_qkv = split_qkv
         self.is_qkv_fn = is_qkv_fn if is_qkv_fn is not None else (lambda p: False)
@@ -129,9 +134,13 @@ class MasterOptimizer(torch.optim.Optimizer):
         super().__init__(params, defaults)
 
         # Normalize parameters at init so the first forward sees on-sphere weights.
-        if (self.hypersphere_mode is not None
-                or self.hypersphere_embedding_mode is not None
-                or self.hypersphere_router_mode is not None):
+        # When hypersphere_preserve_init=True we skip this so the model's init
+        # magnitude survives into training (Muown-style — gains absorb the
+        # magnitude downstream in GainsMasterOptimizer._setup_gains).
+        if (not self.hypersphere_preserve_init
+                and (self.hypersphere_mode is not None
+                     or self.hypersphere_embedding_mode is not None
+                     or self.hypersphere_router_mode is not None)):
             with torch.no_grad():
                 for group in self.param_groups:
                     for p in group["params"]:
@@ -185,6 +194,14 @@ class MasterOptimizer(torch.optim.Optimizer):
             assert emerging_optimizers is not None, (
                 "emerging_optimizers package required for --use-orthogonal-updates"
             )
+            # Muown-style: remove the radial component of the gradient w.r.t.
+            # the hypersphere mode at p, so Newton-Schulz sees a tangential
+            # gradient. Runs on p before _apply_weight_decay_inplace shrinks it.
+            if self.hypersphere_tangential_grad:
+                self._project_tangent_inplace(
+                    p, grad, is_qkv=is_qkv, is_out_proj=is_out_proj,
+                    is_embedding=is_embedding, is_router=is_router,
+                )
             self._apply_weight_decay_inplace(p, group)
             exp_avg.lerp_(grad, 1 - momentum_beta)
             if self.use_nesterov:
@@ -324,6 +341,42 @@ class MasterOptimizer(torch.optim.Optimizer):
             mode = self.hypersphere_mode
         return None if mode == "none" else mode
 
+    def _project_tangent_inplace(self, p, grad, is_qkv: bool = False, is_out_proj: bool = False,
+                                  is_embedding: bool = False, is_router: bool = False):
+        """In-place: remove the radial component of `grad` w.r.t. the hypersphere
+        mode at `p`. Mirrors _normalize's QKV-split layout so the constraint
+        matches the post-step projection. Muown's grad_v construction."""
+        mode = self._resolve_mode(is_embedding, is_router)
+        if mode is None:
+            return
+        if is_qkv and self.split_qkv:
+            ps = _split_qkv(p, self.qkv_split_shapes)
+            gs = _split_qkv(grad, self.qkv_split_shapes)
+            for pi, gi in zip(ps, gs):
+                self._project_tangent_single_(pi, gi, is_out_proj, mode)
+            grad.copy_(_merge_qkv(gs, grad.size(), self.qkv_split_shapes))
+            return
+        self._project_tangent_single_(p, grad, is_out_proj, mode)
+
+    def _project_tangent_single_(self, p, grad, is_out_proj: bool, mode: str):
+        if mode == "col":
+            dim = 0
+        elif mode == "row":
+            dim = 1
+        elif mode == "embed":
+            dim = 0 if is_out_proj else 1
+        elif mode == "flat":
+            dim = None
+        else:
+            return
+        if dim is None:
+            p_norm_sq = (p * p).sum().clamp_min(self.hypersphere_eps)
+            radial = (p * grad).sum() / p_norm_sq
+        else:
+            p_norm_sq = (p * p).sum(dim=dim, keepdim=True).clamp_min(self.hypersphere_eps)
+            radial = (p * grad).sum(dim=dim, keepdim=True) / p_norm_sq
+        grad.sub_(p * radial)
+
     def _normalize(self, p, x, is_qkv: bool = False, is_out_proj: bool = False,
                    is_embedding: bool = False, is_router: bool = False):
         """In-place L2-sphere projection of a 2D tensor `x` (sized like `p`).
@@ -406,36 +459,83 @@ class GainsMasterOptimizer(MasterOptimizer):
         self.gains_eps = gains_eps
         self.gains_weight_decay = gains_weight_decay
         super().__init__(params, **kwargs)
-        self._setup_gains()
+        # Gain state is initialized lazily at first step (see step() →
+        # _maybe_init_gain_state). Eager init here would write entries into
+        # self.state keyed by the bf16 model param, but with
+        # --use-distributed-optimizer the layer-wise wrapper later (1) shards
+        # param_groups (dropping params owned by other ranks) and then (2)
+        # clones bf16 → fp32 main_params via Float16OptimizerWithFloat16Params,
+        # which migrates self.state[bf16_p] → self.state[main_p] only for
+        # params still in param_groups on this rank. Entries for params
+        # sharded onto OTHER ranks become orphan tensor keys in self.state,
+        # which then blows up torch.optim.Optimizer.state_dict() with
+        # `KeyError: <id>` at save time (param_mappings is built from
+        # self.param_groups, so the orphans don't map). Deferring to step()
+        # mirrors Muown's approach: by then param_groups holds the final
+        # post-shard main_params and the keys stay consistent.
 
-    def _setup_gains(self):
-        if self.hypersphere_gains_mode is None:
+    @torch.no_grad()
+    def _maybe_init_gain_state(self, p):
+        if self.hypersphere_gains_mode is None or p.ndim < 2:
             return
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p.ndim < 2:
-                    continue
-                mode = self._resolve_gains_mode(p)
-                if mode is None or mode == "none":
-                    continue
-                is_out_proj = getattr(p, "is_out_proj", False)
-                state = self.state[p]
+        mode = self._resolve_gains_mode(p)
+        if mode is None or mode == "none":
+            return
+        state = self.state[p]
+        if any(k in state for k in ("row_gain", "col_gain", "flat_gain")):
+            return
+        is_out_proj = getattr(p, "is_out_proj", False)
+        preserve = self.hypersphere_preserve_init
 
-                if ("row" in mode) or (mode == "embed" and not is_out_proj):
-                    if "row_gain" not in state:
-                        state["row_gain"] = torch.ones(p.size(0), dtype=torch.float32, device=p.device)
-                        state["row_gain_m"] = torch.zeros_like(state["row_gain"])
-                        state["row_gain_v"] = torch.zeros_like(state["row_gain"])
-                if ("col" in mode) or (mode == "embed" and is_out_proj):
-                    if "col_gain" not in state:
-                        state["col_gain"] = torch.ones(p.size(1), dtype=torch.float32, device=p.device)
-                        state["col_gain_m"] = torch.zeros_like(state["col_gain"])
-                        state["col_gain_v"] = torch.zeros_like(state["col_gain"])
-                if mode == "flat":
-                    if "flat_gain" not in state:
-                        state["flat_gain"] = torch.ones((), dtype=torch.float32, device=p.device)
-                        state["flat_gain_m"] = torch.zeros_like(state["flat_gain"])
-                        state["flat_gain_v"] = torch.zeros_like(state["flat_gain"])
+        wants_row = ("row" in mode) or (mode == "embed" and not is_out_proj)
+        wants_col = ("col" in mode) or (mode == "embed" and is_out_proj)
+        wants_flat = mode == "flat"
+
+        # For preserve_init, absorb the original magnitude into exactly one
+        # axis (row wins when both are configured — the rowcol canonical
+        # decomposition leaves col_gain at 1). Other gain axes start at 1.
+        # We do NOT touch p.data: like Muown's `g = ||W[i]||`, the
+        # decomposition is implicit at init — p still holds the original
+        # weight, and the next step's _preprocess_gains will divide by
+        # gain_init to recover bare_p before updating. This way the first
+        # forward sees the model's original init.
+        absorb_axis = None
+        if preserve:
+            if wants_row:
+                absorb_axis = "row"
+            elif wants_col:
+                absorb_axis = "col"
+            elif wants_flat:
+                absorb_axis = "flat"
+
+        if wants_row:
+            if absorb_axis == "row":
+                state["row_gain"] = (p.detach().norm(dim=1).to(torch.float32)
+                                     .clamp_min(self.hypersphere_eps))
+            else:
+                state["row_gain"] = torch.ones(p.size(0), dtype=torch.float32, device=p.device)
+            state["row_gain_m"] = torch.zeros_like(state["row_gain"])
+            state["row_gain_v"] = torch.zeros_like(state["row_gain"])
+
+        if wants_col:
+            if absorb_axis == "col":
+                state["col_gain"] = (p.detach().norm(dim=0).to(torch.float32)
+                                     .clamp_min(self.hypersphere_eps))
+            else:
+                state["col_gain"] = torch.ones(p.size(1), dtype=torch.float32, device=p.device)
+            state["col_gain_m"] = torch.zeros_like(state["col_gain"])
+            state["col_gain_v"] = torch.zeros_like(state["col_gain"])
+
+        if wants_flat:
+            if absorb_axis == "flat":
+                target_frob = max(p.size(-2), p.size(-1)) ** 0.5
+                cur_frob = (p.detach().norm().to(torch.float32)
+                            .clamp_min(self.hypersphere_eps))
+                state["flat_gain"] = (cur_frob / target_frob).reshape(())
+            else:
+                state["flat_gain"] = torch.ones((), dtype=torch.float32, device=p.device)
+            state["flat_gain_m"] = torch.zeros_like(state["flat_gain"])
+            state["flat_gain_v"] = torch.zeros_like(state["flat_gain"])
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -453,6 +553,7 @@ class GainsMasterOptimizer(MasterOptimizer):
                 group["momentum_beta"] = group["beta1"]
             for p in group["params"]:
                 if p.grad is not None:
+                    self._maybe_init_gain_state(p)
                     gain_grads = self._preprocess_gains(p)
                     self._param_step(p, group)
                     self._gains_step(p, group, gain_grads)
