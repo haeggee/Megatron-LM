@@ -2,7 +2,7 @@
 # General settings.
 CONTAINER=/iopsstor/scratch/cscs/ahernnde/ncg_new_v3.toml
 
-SCRIPT_VERSION=v1
+SCRIPT_VERSION=vf
 SEQ_LEN=4096
 TOKENIZER=mistralai/Mistral-Nemo-Base-2407
 TOKENIZED_DATA_PATH=/iopsstor/scratch/cscs/jpcoles/a06/swissai-fineweb-edu-filterrobots-merge
@@ -89,6 +89,7 @@ usage () {
 	echo " --clip-grad <float>: Gradient clipping"
 	# Architecture settings.
 	echo " --init <float>: Change init std."
+	echo " --scaled-output-init: Enable the 1/sqrt(2*L) scaling of the output layer init (off by default)"
 	echo " --activation (default=$ACTIVATION): MLP activation. Choices=[swiglu, gelu]."
 	echo " --no-pre-norm"
 	echo " --no-final-layernorm"
@@ -129,6 +130,8 @@ usage () {
 	echo " --mlr: muon learning rate factor"
 	echo " --matrix-lr <float>: absolute matrix LR (overrides mlr * lr)"
 	echo " --elr <float>: embedding/output LR multiplier (final LR = elr * lr)"
+	echo " --embedding-lr <float>: absolute embedding LR (overrides --elr; applies whether or not --hs-embed is set)"
+	echo " --output-lr <float>: absolute LM-head output LR (when untied)"
 	echo " --scale-min-lr: scale min_lr proportionally to each group's max_lr"
 	echo " --wd: weight decay"
 	echo " --wd-method (decoupled/independent): weight decay method"
@@ -143,7 +146,10 @@ usage () {
 	echo " --hs-g <flat/embed/row/col/rowcol>: hypersphere gains mode"
 	echo " --hs-g-output <flat/row/col/rowcol/none>: gains mode override for LM head output layer"
 	echo " --hs-g-embed <flat/row/col/rowcol/none>: gains mode override for embedding input layer"
+	echo " --glr <float>: absolute gains LR (default: follows param group LR)"
+	echo " --hs-preserve-init: skip init projection; absorb init norms into gains"
 	echo " --split-qkv-gains: separate column gains for Q, K, V"
+	echo " --hs-g-param <direct/offset/softplus>: gain parametrization (phi). direct=g, offset=1+g, softplus=softplus(g)."
 	echo " --hs-p: project gradient to tangent space"
 	echo " --hs-s: soft hyperball norm clipping."
 	# Validation.
@@ -165,7 +171,6 @@ SCALE=B  # M or B.
 TP=1
 PP=1
 UNTIE=true
-INIT_STD=0.02
 if [[ $1 -eq 110 ]]; then 
 	# batch_size: ~0.52M.
 	LAYERS=12
@@ -369,6 +374,9 @@ else
 fi
 shift
 
+# Default init std: 1/sqrt(hidden_size). Can be overridden by --init.
+INIT_STD=$(python3 -c "import math; print(1/math.sqrt($HIDDEN_SIZE))")
+
 # Now get the general options.
 TOKENS=$DEF_TOKENS
 SUFFIX=""
@@ -397,8 +405,7 @@ while [[ $# -gt 0 ]]; do
 		--tokens)
 			TOKENS=$2; shift 2;;
 		--lr)
-			LR=$2; 
-			CHANGED_LR=true
+			LR=$2;
 			shift 2;;
 		--no-warmup)
 			NO_WARMUP=true; shift;;
@@ -413,6 +420,8 @@ while [[ $# -gt 0 ]]; do
 		# Architecture settings.
 		--init)
 			NEW_INIT_STD=$2; shift 2;;
+		--scaled-output-init)
+			SCALED_OUTPUT_INIT=true; shift;;
 		--activation)
 			ACTIVATION=$2; shift 2;;
 		--no-pre-norm)
@@ -459,6 +468,8 @@ while [[ $# -gt 0 ]]; do
 			MLP_LAYER_SCALE_GATE_SCALE=$2; shift 2;;
 		--mlp-out-scale)
 			MLP_OUT_SCALE=$2; shift 2;;
+		--fixed-layer-scale)
+			FIXED_LAYER_SCALE=$2; shift 2;;
 		--logits-layer-scale)
 			LOGITS_LAYER_SCALE=$2; shift 2;;
 		--logits-layer-scale-scale)
@@ -488,6 +499,10 @@ while [[ $# -gt 0 ]]; do
 			MATRIX_LR=$2; shift 2;;
 		--elr)
 			EMBEDDING_LR_MULTIPLIER=$2; shift 2;;
+		--embedding-lr)
+			EMBEDDING_LR=$2; shift 2;;
+		--output-lr)
+			OUTPUT_LR=$2; shift 2;;
 		--scale-min-lr)
 			SCALE_MIN_LR=true; shift;;
 		--alpha)
@@ -530,8 +545,14 @@ while [[ $# -gt 0 ]]; do
 			HS_GAINS_MODE_OUTPUT=$2; shift 2;;
 		--hs-g-embed)
 			HS_GAINS_MODE_EMBEDDING=$2; shift 2;;
+		--glr)
+			GAINS_LR=$2; shift 2;;
+		--hs-preserve-init)
+			HS_PRESERVE_INIT=true; shift;;
 		--split-qkv-gains)
 			SPLIT_QKV_GAINS=true; shift;;
+		--hs-g-param)
+			HS_GAINS_PARAM=$2; shift 2;;
 		--hs-p)
 			HS_PROJECT=true; shift;;
 		--hs-s)
@@ -582,14 +603,14 @@ elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
 			SUFFIX=${SUFFIX}_urm
 		elif [[ $MUON_SCALE_MODE = shape_scaling ]]; then
 			SUFFIX=${SUFFIX}_shsc
-		elif [[ $MUON_SCALE_MODE = shape_up ]]; then
-			SUFFIX=${SUFFIX}_shup
+		# elif [[ $MUON_SCALE_MODE = shape_up ]]; then
+		# 	SUFFIX=${SUFFIX}_shup
 		else
 			SUFFIX=${SUFFIX}_$MUON_SCALE_MODE
 		fi
 	fi
 	if [[ $MUON_NESTEROV = true ]]; then
-		SUFFIX=${SUFFIX}_nest
+		# SUFFIX=${SUFFIX}_nest
 		OPT_ARGS+=(--muon-use-nesterov)
 	fi
 	MUON_MOMENTUM=$BETA1
@@ -631,6 +652,10 @@ elif [[ $OPT = dmaster ]] || [[ $OPT = master ]]; then
 				SUFFIX=${SUFFIX}_$MUON_SCALE_MODE
 			fi
 		fi
+		if [[ $MUON_NESTEROV = true ]]; then
+			SUFFIX=${SUFFIX}_nest
+			OPT_ARGS+=(--muon-use-nesterov)
+		fi
 	else
 		if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.99 ]] || [[ $BETA3 != 0.999 ]]; then
 			SUFFIX=${SUFFIX}_b${BETA1}_${BETA2}_$BETA3
@@ -640,9 +665,9 @@ elif [[ $OPT = dmaster ]] || [[ $OPT = master ]]; then
 			OPT_ARGS+=(--muon-lr-factor $MUON_LR_FACTOR)
 		fi
 	fi
-	if [[ $ALPHA != 5 ]]; then
-		SUFFIX=${SUFFIX}_a$ALPHA
-	fi
+	# if [[ $ALPHA != 5 ]]; then
+	# 	SUFFIX=${SUFFIX}_a$ALPHA
+	# fi
 	if [[ $OPT = dmaster ]]; then
 		OPT=dist_master
 	fi
@@ -652,9 +677,9 @@ elif [[ $OPT = ademamix ]]; then
 	if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.95 ]] || [[ $BETA3 != 0.999 ]]; then
 		SUFFIX=${SUFFIX}_b${BETA1}_${BETA2}_$BETA3
 	fi
-	if [[ $ALPHA != 5 ]]; then
-		SUFFIX=${SUFFIX}_a$ALPHA
-	fi
+	# if [[ $ALPHA != 5 ]]; then
+	# 	SUFFIX=${SUFFIX}_a$ALPHA
+	# fi
 	if [[ $HYPERBALL = false ]]; then
 		OPT_ARGS+=(--use-distributed-optimizer)
 	fi
@@ -665,7 +690,7 @@ if [[ $CLIP_GRAD != 1.0 ]]; then
 	ARCH_ARGS+=(--clip-grad $CLIP_GRAD)
 fi
 
-if [[ $WEIGHT_DECAY != 0.1 ]]; then
+if [[ $WEIGHT_DECAY != 0.0 ]]; then
 	SUFFIX=$SUFFIX-wd$WEIGHT_DECAY
 fi
 if [[ $WEIGHT_DECAY_METHOD != decoupled ]]; then
@@ -725,21 +750,39 @@ if [[ $HYPERBALL != false ]]; then
 			OPT_ARGS+=(--hypersphere-gains-mode-output $HS_GAINS_MODE_OUTPUT)
 		fi
 		if [[ ! -z "${HS_GAINS_MODE_EMBEDDING+xxx}" ]]; then
-			SUFFIX=${SUFFIX}_ge${HS_GAINS_MODE_EMBEDDING}
+			# SUFFIX=${SUFFIX}_ge${HS_GAINS_MODE_EMBEDDING}
 			OPT_ARGS+=(--hypersphere-gains-mode-embedding $HS_GAINS_MODE_EMBEDDING)
 		fi
 		if [[ $SPLIT_QKV_GAINS = true ]]; then
 			SUFFIX=${SUFFIX}_sqg
 			OPT_ARGS+=(--split-qkv-gains)
 		fi
+		if [[ ! -z "${GAINS_LR+xxx}" ]]; then
+			SUFFIX=${SUFFIX}_glr$GAINS_LR
+			OPT_ARGS+=(--gains-lr $GAINS_LR)
+		fi
+		if [[ ! -z "${HS_GAINS_PARAM+xxx}" ]] && [[ $HS_GAINS_PARAM != direct ]]; then
+			if [[ $HS_GAINS_PARAM = softplus ]]; then
+				SUFFIX=${SUFFIX}_gpsp
+			elif [[ $HS_GAINS_PARAM = offset ]]; then
+				SUFFIX=${SUFFIX}_gpof
+			else
+				SUFFIX=${SUFFIX}_gp$HS_GAINS_PARAM
+			fi
+			OPT_ARGS+=(--gain-parametrization $HS_GAINS_PARAM)
+		fi
+		if [[ $HS_PRESERVE_INIT = true ]]; then
+			SUFFIX=${SUFFIX}_pi
+			OPT_ARGS+=(--hypersphere-preserve-init)
+		fi
 	fi
 fi
 
 if [[ $CHANGED_LR = true ]]; then
-	SUFFIX=$SUFFIX-lr$LR
+	SUFFIX=$SUFFIX-lr$(printf "%.4g" $LR)
 fi
 if [[ ! -z "${MATRIX_LR+xxx}" ]]; then
-	SUFFIX=${SUFFIX}-Mlr$MATRIX_LR
+	SUFFIX=${SUFFIX}-Mlr$(printf "%.4g" $MATRIX_LR)
 	OPT_ARGS+=(--matrix-lr $MATRIX_LR)
 fi
 if [[ $SCALE_MIN_LR = true ]]; then
@@ -747,11 +790,19 @@ if [[ $SCALE_MIN_LR = true ]]; then
 	OPT_ARGS+=(--scale-min-lr)
 fi
 if [[ ! -z "${EMBEDDING_LR_MULTIPLIER+xxx}" ]]; then
-	SUFFIX=${SUFFIX}-elr
+	# SUFFIX=${SUFFIX}-elr
 	if [[ $EMBEDDING_LR_MULTIPLIER != 1.0 ]]; then
 		SUFFIX=${SUFFIX}$EMBEDDING_LR_MULTIPLIER
 	fi
 	OPT_ARGS+=(--embedding-lr-multiplier $EMBEDDING_LR_MULTIPLIER)
+fi
+if [[ ! -z "${EMBEDDING_LR+xxx}" ]]; then
+	SUFFIX=${SUFFIX}-Elr$(printf "%.4g" $EMBEDDING_LR)
+	OPT_ARGS+=(--embedding-lr $EMBEDDING_LR)
+fi
+if [[ ! -z "${OUTPUT_LR+xxx}" ]]; then
+	SUFFIX=${SUFFIX}-Olr$(printf "%.4g" $OUTPUT_LR)
+	OPT_ARGS+=(--output-lr $OUTPUT_LR)
 fi
 
 # FP8 settings.
@@ -770,6 +821,11 @@ ARCH_ARGS=()
 if [[ ! -z ${NEW_INIT_STD+x} ]]; then
 	SUFFIX=$SUFFIX-std$NEW_INIT_STD
 	INIT_STD=$NEW_INIT_STD
+fi
+if [[ $SCALED_OUTPUT_INIT = true ]]; then
+	SUFFIX=$SUFFIX-soi
+else
+	ARCH_ARGS+=(--no-scaled-output-layer-init)
 fi
 
 if [[ $ACTIVATION = gelu ]]; then
@@ -823,7 +879,7 @@ if [[ $NO_FINAL_LAYERNORM = true ]]; then
 	ARCH_ARGS+=(--no-final-layernorm)
 fi
 if [[ $POST_NORM = true ]]; then
-	SUFFIX=$SUFFIX-pst
+	# SUFFIX=$SUFFIX-pst
 	ARCH_ARGS+=(--post-norm)
 fi
 if [[ $PRE_NORM_NO_GAIN = true ]]; then
@@ -846,9 +902,9 @@ if [[ $USE_STREAM_MINUS_RESIDUAL = true ]]; then
 	SUFFIX=$SUFFIX-usmr
 	ARCH_ARGS+=(--use-stream-minus-residual)
 fi
-if [[ $FORCE_UNTIE = true ]]; then
-	SUFFIX=${SUFFIX}-unt
-fi
+# if [[ $FORCE_UNTIE = true ]]; then
+# 	# SUFFIX=${SUFFIX}-unt
+# fi
 LONG_SUFFIX=$SUFFIX  # To save checkpoints haha.
 if [[ ! -z "${SOFT_MAX_SCALE+xxx}" ]]; then
 	SUFFIX=$SUFFIX-ss
@@ -1165,7 +1221,7 @@ SCHEDULER_ARGS=(
 )
 
 EXTRA_ARGS+=(
-	--async-save
+	--ckpt-format torch
 )
 
 ARGS="${LLAMA_ARGS[@]} ${TRAINING_ARGS[@]} ${SCHEDULER_ARGS[@]} ${DATA_ARGS[@]} ${LOGGING[@]} ${EXTRA_ARGS[@]} ${FP8_ARGS[@]} ${ARCH_ARGS[@]} ${OPT_ARGS[@]} ${DECAY_ARGS[@]}"

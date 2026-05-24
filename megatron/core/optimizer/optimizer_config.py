@@ -235,6 +235,16 @@ class OptimizerConfig:
     """Embedding/output parameters will use lr * embedding_lr_multiplier.
     If None, falls back to muon_lr_factor * lr."""
 
+    embedding_lr: Optional[float] = None
+    """Absolute learning rate for the input embedding. When set, overrides
+    embedding_lr_multiplier * lr. Applied regardless of whether embeddings
+    are inside the master optimizer (--hs-embed) or in the chained adam path."""
+
+    output_lr: Optional[float] = None
+    """Absolute learning rate for the LM head output layer when untied.
+    When set, overrides the default (which is base lr when embedding_lr_multiplier
+    is set, or matrix_lr otherwise)."""
+
     scale_min_lr: bool = False
     """When True, each param group's min_lr is scaled proportionally to its max_lr,
     keeping the same max_lr/min_lr ratio as the base (lr / min_lr)."""
@@ -257,6 +267,23 @@ class OptimizerConfig:
 
     split_qkv_gains: bool = False
     """When True and col gains are active, QKV parameters get separate column gains for Q, K, and V instead of one shared column gain."""
+
+    gains_lr: Optional[float] = None
+    """Absolute learning rate for gain parameters. When None, gains follow the param group LR (i.e. the same schedule as the weights they scale)."""
+
+    gain_parametrization: Literal["direct", "offset", "softplus"] = "direct"
+    """How the learned gain `g` maps to the effective multiplier `phi(g)` applied to W_bare.
+    - "direct":   phi(g) = g           (current behaviour; identity-init = 1.0)
+    - "offset":   phi(g) = 1 + g       (identity-init = 0.0; wd attractor is identity)
+    - "softplus": phi(g) = softplus(g) (identity-init = ln(e-1); phi'(g) = sigmoid(g) caps
+                                       per-step change in phi(g) to ~lr, mitigating sudden
+                                       grad-norm spikes from heavy-tailed gain gradients)."""
+
+    hypersphere_preserve_init: bool = False
+    """When True, skip the init-time projection onto the hypersphere. With gains, the init
+    norms are absorbed into the gains so the effective weight (p * gains) equals the original
+    init. Without gains, the bare parameter is left as-is and the first optimizer step projects
+    it onto the sphere."""
 
     hypersphere_kind: Optional[Literal["l2", "standard", "spectral"]] = "l2"
     """When hypersphere constraint is enabled, specified the normalization to perform, either l2 normalization, (x-mu)/std standardization or spectral norm."""

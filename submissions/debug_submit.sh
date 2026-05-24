@@ -109,6 +109,7 @@ usage () {
 	echo " --mlp-layer-scale <float>"
 	echo " --mlp-layer-scale-gate-scale <float>"
 	echo " --mlp-out-scale <float>"
+	echo " --fixed-layer-scale <float>"
 	echo " --logits-layer-scale <float>"
 	echo " --logits-layer-scale-scale <float>"
 	echo " --upscale-embedding <float>"
@@ -143,6 +144,7 @@ usage () {
 	echo " --hs-g-output <flat/row/col/rowcol/none>: gains mode override for LM head output layer"
 	echo " --hs-g-embed <flat/row/col/rowcol/none>: gains mode override for embedding input layer"
 	echo " --split-qkv-gains: separate column gains for Q, K, V"
+	echo " --hs-g-param <direct/offset/softplus>: gain parametrization (phi). direct=g, offset=1+g, softplus=softplus(g)."
 	echo " --hs-p: project gradient to tangent space"
 	echo " --hs-s: soft hyperball norm clipping."
 	# Validation.
@@ -438,6 +440,8 @@ while [[ $# -gt 0 ]]; do
 			MLP_LAYER_SCALE_GATE_SCALE=$2; shift 2;;
 		--mlp-out-scale)
 			MLP_OUT_SCALE=$2; shift 2;;
+		--fixed-layer-scale)
+			FIXED_LAYER_SCALE=$2; shift 2;;
 		--logits-layer-scale)
 			LOGITS_LAYER_SCALE=$2; shift 2;;
 		--logits-layer-scale-scale)
@@ -511,6 +515,8 @@ while [[ $# -gt 0 ]]; do
 			HS_GAINS_MODE_EMBEDDING=$2; shift 2;;
 		--split-qkv-gains)
 			SPLIT_QKV_GAINS=true; shift;;
+		--hs-g-param)
+			HS_GAINS_PARAM=$2; shift 2;;
 		--hs-p)
 			HS_PROJECT=true; shift;;
 		--hs-s)
@@ -703,12 +709,22 @@ if [[ $HYPERBALL != false ]]; then
 			OPT_ARGS+=(--hypersphere-gains-mode-output $HS_GAINS_MODE_OUTPUT)
 		fi
 		if [[ ! -z "${HS_GAINS_MODE_EMBEDDING+xxx}" ]]; then
-			SUFFIX=${SUFFIX}_ge${HS_GAINS_MODE_EMBEDDING}
+			# SUFFIX=${SUFFIX}_ge${HS_GAINS_MODE_EMBEDDING}
 			OPT_ARGS+=(--hypersphere-gains-mode-embedding $HS_GAINS_MODE_EMBEDDING)
 		fi
 		if [[ $SPLIT_QKV_GAINS = true ]]; then
 			SUFFIX=${SUFFIX}_sqg
 			OPT_ARGS+=(--split-qkv-gains)
+		fi
+		if [[ ! -z "${HS_GAINS_PARAM+xxx}" ]] && [[ $HS_GAINS_PARAM != direct ]]; then
+			if [[ $HS_GAINS_PARAM = softplus ]]; then
+				SUFFIX=${SUFFIX}_gpsp
+			elif [[ $HS_GAINS_PARAM = offset ]]; then
+				SUFFIX=${SUFFIX}_gpof
+			else
+				SUFFIX=${SUFFIX}_gp$HS_GAINS_PARAM
+			fi
+			OPT_ARGS+=(--gain-parametrization $HS_GAINS_PARAM)
 		fi
 	fi
 fi
@@ -794,7 +810,7 @@ if [[ $NO_FINAL_LAYERNORM = true ]]; then
 	ARCH_ARGS+=(--no-final-layernorm)
 fi
 if [[ $POST_NORM = true ]]; then
-	SUFFIX=$SUFFIX-pst
+	# SUFFIX=$SUFFIX-pst
 	ARCH_ARGS+=(--post-norm)
 fi
 if [[ $PRE_NORM_NO_GAIN = true ]]; then
@@ -813,9 +829,9 @@ if [[ $USE_STREAM_MINUS_RESIDUAL = true ]]; then
 	SUFFIX=$SUFFIX-usmr
 	ARCH_ARGS+=(--use-stream-minus-residual)
 fi
-if [[ $FORCE_UNTIE = true ]]; then
-	SUFFIX=${SUFFIX}-unt
-fi
+# if [[ $FORCE_UNTIE = true ]]; then
+# 	# SUFFIX=${SUFFIX}-unt
+# fi
 LONG_SUFFIX=$SUFFIX  # To save checkpoints haha.
 if [[ ! -z "${SOFT_MAX_SCALE+xxx}" ]]; then
 	SUFFIX=$SUFFIX-ss
@@ -875,6 +891,11 @@ if [[ ! -z "${MLP_OUT_SCALE+xxx}" ]]; then
 	SUFFIX=$SUFFIX-mlpO
 	LONG_SUFFIX=$LONG_SUFFIX-mlpO$MLP_OUT_SCALE
 	ARCH_ARGS+=(--mlp-out-scale $MLP_OUT_SCALE)
+fi
+if [[ ! -z "${FIXED_LAYER_SCALE+xxx}" ]]; then
+	SUFFIX=$SUFFIX-fls${FIXED_LAYER_SCALE}
+	LONG_SUFFIX=$LONG_SUFFIX-fls$FIXED_LAYER_SCALE
+	ARCH_ARGS+=(--fixed-layer-scale $FIXED_LAYER_SCALE)
 fi
 if [[ ! -z "${LOGITS_LAYER_SCALE+xxx}" ]]; then
 	SUFFIX=$SUFFIX-lgsls$LOGITS_LAYER_SCALE

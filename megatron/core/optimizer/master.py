@@ -4,7 +4,6 @@ import logging
 from typing import Callable,Optional, Literal, override
 
 import torch
-from torch import nn
 
 from . import _get_param_groups, get_megatron_optimizer
 from .ademamix import linear_hl_warmup_scheduler, linear_warmup_scheduler
@@ -78,8 +77,10 @@ class MasterOptimizer(torch.optim.Optimizer):
         extra_scale_factor: float = 1.0,
         pg_collection: Optional[ProcessGroupCollection] = None,
         mode: Literal["blockwise", "duplicated", "distributed"] = "duplicated",
+        preserve_init: bool = False,
     ):
 
+        self.preserve_init = preserve_init
         self.fp32_matmul_prec = fp32_matmul_prec
         self.use_nesterov = use_nesterov
         self.weight_decay_method = weight_decay_method
@@ -134,7 +135,7 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         # Normalize parameters at initialization so the first forward pass
         # uses weights that are already on the hypersphere.
-        if self.hypersphere_mode is not None:
+        if self.hypersphere_mode is not None and not self.preserve_init:
             with torch.no_grad():
                 for group in self.param_groups:
                     for p in group["params"]:
@@ -159,9 +160,6 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         for group in self.param_groups:
             group["step"] += 1
-
-            if "momentum_beta" not in group:  # To be able to use old checkpoints.
-                group["momentum_beta"] = group["beta1"]
             for p in group["params"]:
                 if p.grad is not None:
                     self._param_step(p, group)
@@ -520,7 +518,14 @@ class GainsMasterOptimizer(MasterOptimizer):
     The gains are fused into the forward/backward pass: before each param step the
     gains are undone, the base optimizer update is computed on the bare normalized
     weights, and afterwards the (potentially updated) gains are re-applied.
+
+    Gain optimizer state (1st/2nd moments) is stored as plain tensors in
+    self.state[p] alongside the regular optimizer state, so it ships through
+    torch.optim.Optimizer.{state_dict,load_state_dict} without any override.
+    Requires --ckpt-format torch.
     """
+
+    _GAIN_KEYS = ("flat_gain", "row_gain", "col_gain", "q_col_gain", "k_col_gain", "v_col_gain")
 
     def __init__(
         self,
@@ -533,6 +538,7 @@ class GainsMasterOptimizer(MasterOptimizer):
         gains_betas: tuple[float, float] = (0.9, 0.999),
         gains_eps: float = 1e-8,
         gains_weight_decay: float = 0.0,
+        gain_parametrization: Literal["direct", "offset", "softplus"] = "direct",
         **kwargs,
     ):
         assert hypersphere_gains_mode is not None
@@ -540,14 +546,46 @@ class GainsMasterOptimizer(MasterOptimizer):
         self.hypersphere_gains_mode_output = hypersphere_gains_mode_output
         self.hypersphere_gains_mode_embedding = hypersphere_gains_mode_embedding
         self.split_qkv_gains = split_qkv_gains
-        self.gains_adam_kwargs = dict(
-            lr=gains_lr if gains_lr is not None else kwargs.get("lr", 1e-3),
-            betas=gains_betas,
-            eps=gains_eps,
-            weight_decay=gains_weight_decay,
-        )
+        self.gains_lr = gains_lr
+        self.gains_betas = gains_betas
+        self.gains_eps = gains_eps
+        self.gains_weight_decay = gains_weight_decay
+        self.gain_parametrization = gain_parametrization
         super().__init__(params, **kwargs)
-        self._setup_inner_opts()
+        self._setup_gains()
+
+    def _phi(self, g: torch.Tensor) -> torch.Tensor:
+        """Forward map from raw gain g to effective multiplier phi(g)."""
+        mode = self.gain_parametrization
+        if mode == "direct":
+            return g
+        if mode == "offset":
+            return 1.0 + g
+        if mode == "softplus":
+            return torch.nn.functional.softplus(g)
+        raise ValueError(f"Unknown gain_parametrization {mode}")
+
+    def _phi_prime(self, g: torch.Tensor) -> torch.Tensor | float:
+        """Derivative phi'(g). Returns a scalar 1.0 for the linear modes to skip a multiply."""
+        mode = self.gain_parametrization
+        if mode in ("direct", "offset"):
+            return 1.0
+        if mode == "softplus":
+            return torch.sigmoid(g)
+        raise ValueError(f"Unknown gain_parametrization {mode}")
+
+    def _phi_inv(self, x: torch.Tensor) -> torch.Tensor:
+        """Inverse map: given a target effective multiplier x>0, return g s.t. phi(g) = x."""
+        mode = self.gain_parametrization
+        if mode == "direct":
+            return x
+        if mode == "offset":
+            return x - 1.0
+        if mode == "softplus":
+            # Stable softplus_inv for x > 0: g = x + log1p(-exp(-x)).
+            # As x -> inf, g -> x. As x -> 0+, g -> -inf.
+            return x + torch.log1p(-torch.exp(-x))
+        raise ValueError(f"Unknown gain_parametrization {mode}")
 
     @torch.no_grad()  # type: ignore[misc]
     @override
@@ -560,81 +598,80 @@ class GainsMasterOptimizer(MasterOptimizer):
 
         for group in self.param_groups:
             group["step"] += 1
-            if "momentum_beta" not in group:
-                group["momentum_beta"] = group["beta1"]
             for p in group["params"]:
                 if p.grad is not None:
-                    self._preprocess_gains(p)
+                    gain_grads = self._preprocess_gains(p)
                     self._param_step(p, group)
-
-        # Sync gains lr with the param scheduler's warmup/decay schedule.
-        # The scheduler already updated group['lr'] on the master's param_groups
-        # before this step() call; we derive the schedule multiplier from that.
-        ref = self.param_groups[0]
-        max_lr = ref.get("max_lr", ref["lr"])
-        schedule_mult = ref["lr"] / max_lr if max_lr > 0 else 1.0
-        gains_lr = self.gains_adam_kwargs["lr"] * schedule_mult
-        for inner_opt in self.inner_opts.values():
-            for g in inner_opt.param_groups:
-                g["lr"] = gains_lr
-            inner_opt.step()
-            inner_opt.zero_grad()
-
-        # p was already normalized inside _param_step, but we needed to wait for the
-        # inner_opt steps in order to rescale p according to its updated gains.
-        # Only re-apply gains to params that had them undone (i.e. had gradients).
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p.grad is not None:
+                    self._gains_step(p, group, gain_grads)
                     self._apply_gains(p)
 
         return loss
 
     @torch.no_grad()
-    def _preprocess_gains(self, p: torch.nn.Parameter):
+    def _preprocess_gains(self, p: torch.nn.Parameter) -> dict:
+        """Undo gains on p, compute ∂L/∂gain, rescale p.grad. Returns gain gradient dict."""
         state = self.state[p]
         eps = 1e-8
 
-        # It is important to first update p, then gain.grad and in the end p.grad
-        # because of interdependence (e.g. scalar.grad requires the \hat{p} gradient,
-        # so updating p.grad before scalar.grad would be incorrect).
+        # Dispatch to split-QKV variant if applicable.
+        if self.split_qkv_gains and self.is_qkv_fn(p) and "q_col_gain" in state:
+            return self._preprocess_split_qkv_gains(p)
+
         flat = state.get("flat_gain")
         row = state.get("row_gain")
         col = state.get("col_gain")
 
-        # No gains for this parameter (e.g. 1D bias / LayerNorm weight).
         if flat is None and row is None and col is None:
-            return
+            return {}
 
-        # p update: undo gains to recover the bare normalized weight.
-        if flat is not None:
-            p.div_(flat.clamp_min(eps))
-        if row is not None:
-            p.div_(row[:, None].clamp_min(eps))
-        if col is not None:
-            p.div_(col[None, :].clamp_min(eps))
-        # gain.grad update.
+        # Effective multipliers phi(g). Stored values are raw g; multiplication
+        # onto p uses phi(g). Computed once and reused for undo/rescale.
+        flat_phi = self._phi(flat) if flat is not None else None
+        row_phi = self._phi(row) if row is not None else None
+        col_phi = self._phi(col) if col is not None else None
+
+        # Undo gains to recover bare normalized weight.
+        if flat_phi is not None:
+            p.div_(flat_phi.clamp_min(eps))
+        if row_phi is not None:
+            p.div_(row_phi[:, None].clamp_min(eps))
+        if col_phi is not None:
+            p.div_(col_phi[None, :].clamp_min(eps))
+
+        # ∂L/∂phi(g) (must be computed before p.grad is rescaled).
         p_times_pgrad = p * p.grad
-        if flat is not None:
-            assert row is None and col is None
-            flat.grad = torch.sum(p_times_pgrad)
-        elif row is not None and col is not None:
-            row.grad = torch.sum(p_times_pgrad * col[None, :], dim=1)
-            col.grad = torch.sum(p_times_pgrad * row[:, None], dim=0)
-        elif row is not None:
-            row.grad = torch.sum(p_times_pgrad, dim=1)
+        gain_grads = {}
+        if flat_phi is not None:
+            assert row_phi is None and col_phi is None
+            gain_grads["flat_gain"] = torch.sum(p_times_pgrad)
+        elif row_phi is not None and col_phi is not None:
+            gain_grads["row_gain"] = torch.sum(p_times_pgrad * col_phi[None, :], dim=1)
+            gain_grads["col_gain"] = torch.sum(p_times_pgrad * row_phi[:, None], dim=0)
+        elif row_phi is not None:
+            gain_grads["row_gain"] = torch.sum(p_times_pgrad, dim=1)
         else:
-            col.grad = torch.sum(p_times_pgrad, dim=0)
-        # p.grad update: rescale gradient by gains.
+            gain_grads["col_gain"] = torch.sum(p_times_pgrad, dim=0)
+
+        # Chain rule: ∂L/∂g = phi'(g) · ∂L/∂phi(g). For direct/offset phi' = 1.
         if flat is not None:
-            p.grad.mul_(flat)
+            gain_grads["flat_gain"] = gain_grads["flat_gain"] * self._phi_prime(flat)
         if row is not None:
-            p.grad.mul_(row[:, None])
+            gain_grads["row_gain"] = gain_grads["row_gain"] * self._phi_prime(row)
         if col is not None:
-            p.grad.mul_(col[None, :])
+            gain_grads["col_gain"] = gain_grads["col_gain"] * self._phi_prime(col)
+
+        # Rescale p.grad so MasterOptimizer sees ∂L/∂(bare p).
+        if flat_phi is not None:
+            p.grad.mul_(flat_phi)
+        if row_phi is not None:
+            p.grad.mul_(row_phi[:, None])
+        if col_phi is not None:
+            p.grad.mul_(col_phi[None, :])
+
+        return gain_grads
 
     @torch.no_grad()
-    def _preprocess_split_qkv_gains(self, p: torch.nn.Parameter):
+    def _preprocess_split_qkv_gains(self, p: torch.nn.Parameter) -> dict:
         """_preprocess_gains variant for QKV parameters with separate Q/K/V column gains."""
         state = self.state[p]
         eps = 1e-8
@@ -644,40 +681,88 @@ class GainsMasterOptimizer(MasterOptimizer):
         v_col = state["v_col_gain"]
         shapes = self.qkv_split_shapes
 
+        # Effective multipliers phi(g) for each stored raw g.
+        row_phi = self._phi(row) if row is not None else None
+        q_col_phi = self._phi(q_col)
+        k_col_phi = self._phi(k_col)
+        v_col_phi = self._phi(v_col)
+
         # 1. Undo gains on p to recover the bare normalized weight.
-        if row is not None:
-            p.div_(row[:, None].clamp_min(eps))
+        if row_phi is not None:
+            p.div_(row_phi[:, None].clamp_min(eps))
         qs, ks, vs = split_qkv(p, shapes)
-        qs.div_(q_col[None, :].clamp_min(eps))
-        ks.div_(k_col[None, :].clamp_min(eps))
-        vs.div_(v_col[None, :].clamp_min(eps))
+        qs.div_(q_col_phi[None, :].clamp_min(eps))
+        ks.div_(k_col_phi[None, :].clamp_min(eps))
+        vs.div_(v_col_phi[None, :].clamp_min(eps))
         p.copy_(merge_qkv((qs, ks, vs), p.size(), shapes))
 
-        # 2. Gain gradients.
+        # 2. Gain gradients w.r.t. phi(g); chain rule by phi'(g) applied below.
         p_times_pgrad = p * p.grad
         ptp_q, ptp_k, ptp_v = split_qkv(p_times_pgrad, shapes)
-        if row is not None:
-            rq, rk, rv = split_qkv_1d(row, shapes)
-            q_col.grad = torch.sum(ptp_q * rq[:, None], dim=0)
-            k_col.grad = torch.sum(ptp_k * rk[:, None], dim=0)
-            v_col.grad = torch.sum(ptp_v * rv[:, None], dim=0)
-            rg_q = torch.sum(ptp_q * q_col[None, :], dim=1)
-            rg_k = torch.sum(ptp_k * k_col[None, :], dim=1)
-            rg_v = torch.sum(ptp_v * v_col[None, :], dim=1)
-            row.grad = merge_qkv_1d((rg_q, rg_k, rg_v), row.shape[0], shapes)
+        gain_grads = {}
+        if row_phi is not None:
+            rq_phi, rk_phi, rv_phi = split_qkv_1d(row_phi, shapes)
+            gain_grads["q_col_gain"] = torch.sum(ptp_q * rq_phi[:, None], dim=0)
+            gain_grads["k_col_gain"] = torch.sum(ptp_k * rk_phi[:, None], dim=0)
+            gain_grads["v_col_gain"] = torch.sum(ptp_v * rv_phi[:, None], dim=0)
+            rg_q = torch.sum(ptp_q * q_col_phi[None, :], dim=1)
+            rg_k = torch.sum(ptp_k * k_col_phi[None, :], dim=1)
+            rg_v = torch.sum(ptp_v * v_col_phi[None, :], dim=1)
+            gain_grads["row_gain"] = merge_qkv_1d((rg_q, rg_k, rg_v), row.shape[0], shapes)
         else:
-            q_col.grad = torch.sum(ptp_q, dim=0)
-            k_col.grad = torch.sum(ptp_k, dim=0)
-            v_col.grad = torch.sum(ptp_v, dim=0)
+            gain_grads["q_col_gain"] = torch.sum(ptp_q, dim=0)
+            gain_grads["k_col_gain"] = torch.sum(ptp_k, dim=0)
+            gain_grads["v_col_gain"] = torch.sum(ptp_v, dim=0)
+
+        # Chain rule: ∂L/∂g = phi'(g) · ∂L/∂phi(g).
+        if row is not None:
+            gain_grads["row_gain"] = gain_grads["row_gain"] * self._phi_prime(row)
+        gain_grads["q_col_gain"] = gain_grads["q_col_gain"] * self._phi_prime(q_col)
+        gain_grads["k_col_gain"] = gain_grads["k_col_gain"] * self._phi_prime(k_col)
+        gain_grads["v_col_gain"] = gain_grads["v_col_gain"] * self._phi_prime(v_col)
 
         # 3. Rescale p.grad by gains.
-        if row is not None:
-            p.grad.mul_(row[:, None])
+        if row_phi is not None:
+            p.grad.mul_(row_phi[:, None])
         gq, gk, gv = split_qkv(p.grad, shapes)
-        gq.mul_(q_col[None, :])
-        gk.mul_(k_col[None, :])
-        gv.mul_(v_col[None, :])
+        gq.mul_(q_col_phi[None, :])
+        gk.mul_(k_col_phi[None, :])
+        gv.mul_(v_col_phi[None, :])
         p.grad.copy_(merge_qkv((gq, gk, gv), p.grad.size(), shapes))
+
+        return gain_grads
+
+    @torch.no_grad()
+    def _gains_step(self, p, group, gain_grads: dict):
+        """Inline Adam update for all gain tensors belonging to p."""
+        if not gain_grads:
+            return
+        state = self.state[p]
+        step = group["step"]
+        beta1, beta2 = self.gains_betas
+        eps = self.gains_eps
+        wd = self.gains_weight_decay
+
+        if self.gains_lr is None:
+            lr = group["lr"]
+        else:
+            max_lr = group.get("max_lr", group["lr"])
+            schedule_mult = (group["lr"] / max_lr) if max_lr > 0 else 1.0
+            lr = self.gains_lr * schedule_mult
+
+        bias_correction1 = 1.0 - beta1 ** step
+        bias_correction2 = 1.0 - beta2 ** step
+
+        for name, grad in gain_grads.items():
+            gain = state[name]
+            m = state[f"{name}_m"]
+            v = state[f"{name}_v"]
+            if wd != 0.0:
+                gain.mul_(1.0 - lr * wd)
+            m.mul_(beta1).add_(grad, alpha=1 - beta1)
+            v.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+            denom = (v.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+            gain.addcdiv_(m, denom, value=-lr / bias_correction1)
 
     @torch.no_grad()
     def _apply_gains(self, p):
@@ -688,22 +773,22 @@ class GainsMasterOptimizer(MasterOptimizer):
             k_col = state["k_col_gain"]
             v_col = state["v_col_gain"]
             if row is not None:
-                p.mul_(row[:, None])
+                p.mul_(self._phi(row)[:, None])
             qs, ks, vs = split_qkv(p, self.qkv_split_shapes)
-            qs.mul_(q_col[None, :])
-            ks.mul_(k_col[None, :])
-            vs.mul_(v_col[None, :])
+            qs.mul_(self._phi(q_col)[None, :])
+            ks.mul_(self._phi(k_col)[None, :])
+            vs.mul_(self._phi(v_col)[None, :])
             p.copy_(merge_qkv((qs, ks, vs), p.size(), self.qkv_split_shapes))
             return
         flat = state.get("flat_gain")
         row = state.get("row_gain")
         col = state.get("col_gain")
         if flat is not None:
-            p.mul_(flat)
+            p.mul_(self._phi(flat))
         if row is not None:
-            p.mul_(row[:, None])
+            p.mul_(self._phi(row)[:, None])
         if col is not None:
-            p.mul_(col[None, :])
+            p.mul_(self._phi(col)[None, :])
 
     def _resolve_gains_mode(self, p):
         """Return the effective gains mode for a parameter, respecting per-layer overrides."""
@@ -715,140 +800,98 @@ class GainsMasterOptimizer(MasterOptimizer):
             return self.hypersphere_gains_mode_embedding
         return self.hypersphere_gains_mode
 
-    def _setup_inner_opts(self):
-        row_groups = []
-        col_groups = []
-        flat_groups = []
+    @torch.no_grad()
+    def _setup_gains(self):
+        """Initialize gain tensors and their Adam m/v buffers in self.state[p].
+
+        Only creates missing entries (idempotent).
+
+        When self.preserve_init is True, new gain tensors are initialised to the
+        current parameter norms instead of ones. p is NOT modified — the forward
+        pass continues to see the original init weights. At the first optimizer
+        step _preprocess_gains divides p by the gains, yielding a bare weight
+        that is already approximately on the hypersphere.
+
+        For rowcol: row norms are absorbed first; col norms are then computed from
+        the (virtual) row-normalised p, matching the sequential undo in _preprocess_gains.
+        """
+        eps = self.hypersphere_eps
         for group in self.param_groups:
-            row_gains = []
-            col_gains = []
-            flat_gains = []
             for p in group["params"]:
-                # Gains only make sense for 2D weight matrices (not biases / LN).
                 if p.ndim < 2:
                     continue
-                # We use self.state[p].get instead of always initializing a new gain
-                # because this function may be called inside load_state_dict(), where the
-                # states are already loaded and we only want to re-link the loaded _gain
-                # parameters to their respective inner_opts.
                 gains_mode = self._resolve_gains_mode(p)
-                if gains_mode == "none":
+                if gains_mode is None or gains_mode == "none":
                     continue
-
                 is_out_proj = getattr(p, "is_out_proj", False)
-                if ("row" in gains_mode) or (gains_mode == "embed" and not is_out_proj):
-                    gain = self.state[p].get("row_gain")
-                    if gain is None:
-                        gain = nn.Parameter(torch.ones(p.size(0), dtype=torch.float32, device=p.device))
-                    elif not isinstance(gain, nn.Parameter):
-                        gain = nn.Parameter(gain)
-                    self.state[p]["row_gain"] = gain
-                    row_gains.append(gain)
+                is_qkv = self.is_qkv_fn(p)
+                state = self.state[p]
 
-                if ("col" in gains_mode) or (gains_mode == "embed" and is_out_proj):
-                    is_qkv = self.is_qkv_fn(p)
+                wants_row = ("row" in gains_mode) or (gains_mode == "embed" and not is_out_proj)
+                wants_col = ("col" in gains_mode) or (gains_mode == "embed" and is_out_proj)
+                wants_flat = (gains_mode == "flat")
+
+                # All gain state stores raw `g`; the effective multiplier is phi(g).
+                # Initialisation maps the desired phi(g_init) (== 1.0, or the param norm
+                # for preserve_init) through phi^-1 to get the raw value to store.
+                if wants_row:
+                    if "row_gain" not in state:
+                        if self.preserve_init:
+                            target = p.detach().float().norm(dim=1).clamp_min(eps)
+                        else:
+                            target = torch.ones(p.size(0), dtype=torch.float32, device=p.device)
+                        state["row_gain"] = self._phi_inv(target)
+                    if "row_gain_m" not in state:
+                        state["row_gain_m"] = torch.zeros_like(state["row_gain"])
+                    if "row_gain_v" not in state:
+                        state["row_gain_v"] = torch.zeros_like(state["row_gain"])
+
+                if wants_col:
                     if is_qkv and self.split_qkv_gains:
+                        if self.preserve_init and not wants_row:
+                            p_f32 = p.detach().float()
+                            qs, ks, vs = split_qkv(p_f32, self.qkv_split_shapes)
+                            slice_norms = {
+                                "q": qs.norm(dim=0).clamp_min(eps),
+                                "k": ks.norm(dim=0).clamp_min(eps),
+                                "v": vs.norm(dim=0).clamp_min(eps),
+                            }
                         for prefix in ("q", "k", "v"):
                             key = f"{prefix}_col_gain"
-                            gain = self.state[p].get(key)
-                            if gain is None:
-                                gain = nn.Parameter(torch.ones(p.size(1), dtype=torch.float32, device=p.device))
-                            elif not isinstance(gain, nn.Parameter):
-                                gain = nn.Parameter(gain)
-                            self.state[p][key] = gain
-                            col_gains.append(gain)
+                            if key not in state:
+                                if self.preserve_init and not wants_row:
+                                    target = slice_norms[prefix]
+                                else:
+                                    target = torch.ones(p.size(1), dtype=torch.float32, device=p.device)
+                                state[key] = self._phi_inv(target)
+                            if f"{key}_m" not in state:
+                                state[f"{key}_m"] = torch.zeros_like(state[key])
+                            if f"{key}_v" not in state:
+                                state[f"{key}_v"] = torch.zeros_like(state[key])
                     else:
-                        gain = self.state[p].get("col_gain")
-                        if gain is None:
-                            gain = nn.Parameter(torch.ones(p.size(1), dtype=torch.float32, device=p.device))
-                        elif not isinstance(gain, nn.Parameter):
-                            gain = nn.Parameter(gain)
-                        self.state[p]["col_gain"] = gain
-                        col_gains.append(gain)
+                        if "col_gain" not in state:
+                            if self.preserve_init and not wants_row:
+                                target = p.detach().float().norm(dim=0).clamp_min(eps)
+                            else:
+                                target = torch.ones(p.size(1), dtype=torch.float32, device=p.device)
+                            state["col_gain"] = self._phi_inv(target)
+                        if "col_gain_m" not in state:
+                            state["col_gain_m"] = torch.zeros_like(state["col_gain"])
+                        if "col_gain_v" not in state:
+                            state["col_gain_v"] = torch.zeros_like(state["col_gain"])
 
-                if gains_mode == "flat":
-                    gain = self.state[p].get("flat_gain")
-                    if gain is None:
-                        gain = nn.Parameter(torch.ones((), dtype=torch.float32, device=p.device))
-                    elif not isinstance(gain, nn.Parameter):
-                        gain = nn.Parameter(gain)
-                    self.state[p]["flat_gain"] = gain
-                    flat_gains.append(gain)
-
-            # Filter keys that AdamW controls via gains_adam_kwargs to prevent
-            # the model group's values from silently overriding gains-specific settings.
-            _skip = {"params", "lr", "weight_decay", "eps"}
-            if len(row_gains) > 0:
-                row_group = {k: v for k, v in group.items() if k not in _skip}
-                row_group["params"] = row_gains
-                row_groups.append(row_group)
-            if len(col_gains) > 0:
-                col_group = {k: v for k, v in group.items() if k not in _skip}
-                col_group["params"] = col_gains
-                col_groups.append(col_group)
-            if len(flat_gains) > 0:
-                flat_group = {k: v for k, v in group.items() if k not in _skip}
-                flat_group["params"] = flat_gains
-                flat_groups.append(flat_group)
-
-        self.inner_opts = {}
-        if len(row_groups) > 0:
-            self.inner_opts["row"] = torch.optim.AdamW(row_groups, **self.gains_adam_kwargs)
-        if len(col_groups) > 0:
-            self.inner_opts["col"] = torch.optim.AdamW(col_groups, **self.gains_adam_kwargs)
-        if len(flat_groups) > 0:
-            self.inner_opts["flat"] = torch.optim.AdamW(flat_groups, **self.gains_adam_kwargs)
-
-    _GAIN_KEYS = ("row_gain", "col_gain", "flat_gain", "q_col_gain", "k_col_gain", "v_col_gain")
-
-    def state_dict(self):
-        sd = super().state_dict()
-        # Separate gains from per-param state so that dist checkpointing's
-        # optim_state_to_sharding_state does not hit a shape mismatch
-        # (gains are 1D/scalar, model params are 2D).
-        # IMPORTANT: sd["state"] values are shared references to self.state[p],
-        # so we must NOT pop/mutate them — build new dicts instead.
-        gains = {}
-        new_state = {}
-        for param_id, param_state in sd["state"].items():
-            param_gains = {k: param_state[k] for k in self._GAIN_KEYS if k in param_state}
-            if param_gains:
-                gains[param_id] = param_gains
-                new_state[param_id] = {k: v for k, v in param_state.items() if k not in self._GAIN_KEYS}
-            else:
-                new_state[param_id] = param_state
-        sd["state"] = new_state
-        if gains:
-            sd["gains"] = gains
-        if len(self.inner_opts) > 0:
-            sd["inner"] = {
-                name: inner.state_dict()
-                for name, inner in self.inner_opts.items()
-            }
-        return sd
-
-    def load_state_dict(self, state_dict):
-        sd = state_dict
-        # Merge gains back into per-param state before the base class loads.
-        if "gains" in sd:
-            gains = sd.pop("gains")
-            for param_id, param_gains in gains.items():
-                sd["state"].setdefault(param_id, {}).update(param_gains)
-
-        inner_sds = sd.pop("inner", None)
-        super().load_state_dict(sd)
-        # After loading, the object link between self.state[p][*_gain] and
-        # the inner_opt parameter is lost, so we re-link via _setup_inner_opts.
-        # Also handles migration from a non-gains checkpoint (gains will be
-        # initialized fresh as ones).
-        self._setup_inner_opts()
-        if inner_sds is not None:
-            for name, inner_sd in inner_sds.items():
-                self.inner_opts[name].load_state_dict(inner_sd)
-        # NOTE: Do NOT call _apply_gains() here. The checkpoint model weights
-        # already have gains baked in (p = normalized_w * gains at save time).
-        # Applying gains again would double-scale the parameters.
-
+                if wants_flat:
+                    if "flat_gain" not in state:
+                        if self.preserve_init:
+                            shape_max = max(p.size(-2), p.size(-1))
+                            target = (p.detach().float().norm().clamp_min(eps) / shape_max ** 0.5).reshape(())
+                        else:
+                            target = torch.ones((), dtype=torch.float32, device=p.device)
+                        state["flat_gain"] = self._phi_inv(target)
+                    if "flat_gain_m" not in state:
+                        state["flat_gain_m"] = torch.zeros_like(state["flat_gain"])
+                    if "flat_gain_v" not in state:
+                        state["flat_gain_v"] = torch.zeros_like(state["flat_gain"])
 
 def split_qkv(x, shapes: tuple[int, int, int]) -> list[torch.Tensor]:
     # split grouped attention parameters (e.g., QKV, GQA, etc.)
@@ -1062,6 +1105,7 @@ def get_megatron_master_optimizer(
 
         "qkv_split_shapes": qkv_split_shapes,
         "qkv_dim": kv_channels,  # head dim for split_heads when split_qkv_heads=True
+        "preserve_init": config.hypersphere_preserve_init,
     }
 
     # freezing nonlinear params and get param groups for muon
@@ -1070,9 +1114,27 @@ def get_megatron_master_optimizer(
 
     config_overrides_master = {**config_overrides}
 
+    # Resolve effective embedding / output LRs: absolute (--embedding-lr /
+    # --output-lr) wins, else fall back to the multiplier form.
+    if config.embedding_lr is not None:
+        effective_embedding_lr = config.embedding_lr
+    elif config.embedding_lr_multiplier is not None:
+        effective_embedding_lr = config.embedding_lr_multiplier * config.lr
+    else:
+        effective_embedding_lr = None
+
+    if config.output_lr is not None:
+        effective_output_lr = config.output_lr
+    elif config.embedding_lr_multiplier is not None or config.embedding_lr is not None:
+        # When an embedding-specific LR is set, the LM head decouples from the
+        # embedding and defaults to the base lr (historical behaviour).
+        effective_output_lr = config.lr
+    else:
+        effective_output_lr = None  # no override; stays on the matrix group
+
     embedding_override = {}
-    if config.embedding_lr_multiplier is not None:
-        embedding_override["max_lr"] = config.embedding_lr_multiplier * config.lr
+    if effective_embedding_lr is not None:
+        embedding_override["max_lr"] = effective_embedding_lr
     no_ortho_emb = config.use_orthogonal_updates and not config.use_orthogonal_embeddings
     if no_ortho_emb:
         embedding_override["use_orthogonal_updates"] = False
@@ -1097,15 +1159,16 @@ def get_megatron_master_optimizer(
         # Embedding weights get the embedding LR override.
         config_overrides_master[ParamKey(attr="is_embedding_parameter")] = ParamGroupOverride(**embedding_override)
 
-    if config.embedding_lr_multiplier is not None or no_ortho_emb:
-        # LM head (output layer) gets base LR when untied; when tied it shares the
-        # embedding tensor so is_embedding_parameter is also set and the embedding
-        # override already applies — we use a predicate to avoid a conflict.
+    if effective_output_lr is not None or no_ortho_emb:
+        # LM head (output layer) gets its own override when untied; when tied it
+        # shares the embedding tensor so is_embedding_parameter is also set and
+        # the embedding override already applies — we use a predicate to avoid
+        # a conflict.
         output_override = {}
-        if config.embedding_lr_multiplier is not None:
-            output_override["max_lr"] = config.lr
+        if effective_output_lr is not None:
+            output_override["max_lr"] = effective_output_lr
             if lr_ratio is not None:
-                output_override["min_lr"] = config.lr * lr_ratio
+                output_override["min_lr"] = effective_output_lr * lr_ratio
         if no_ortho_emb:
             output_override["use_orthogonal_updates"] = False
         only_output = ParamPredicate(
@@ -1127,10 +1190,11 @@ def get_megatron_master_optimizer(
         hypersphere_gains_mode_output=config.hypersphere_gains_mode_output,
         hypersphere_gains_mode_embedding=config.hypersphere_gains_mode_embedding,
         split_qkv_gains=config.split_qkv_gains,
-        gains_lr=config.lr,
+        gains_lr=config.gains_lr,
         gains_betas=(config.adam_beta1, config.adam_beta2),
         gains_eps=config.adam_eps,
         gains_weight_decay=config.weight_decay,
+        gain_parametrization=config.gain_parametrization,
     )
     if config.hypersphere_gains_mode:
         optimizer = GainsMasterOptimizer(
@@ -1186,7 +1250,24 @@ def get_megatron_master_optimizer(
         config_overrides_adam[ParamKey(name="*q_layernorm*")] = ParamGroupOverride(max_lr=0)
         config_overrides_adam[ParamKey(name="*k_layernorm*")] = ParamGroupOverride(max_lr=0)
 
-
+    # Propagate the embedding / output LR overrides into chained_adam. Without
+    # this, when --hs-embed is not set the embedding (and untied output) live
+    # in chained_adam and silently ignore --embedding-lr / --output-lr / --elr.
+    if effective_embedding_lr is not None:
+        adam_emb_override = {"max_lr": effective_embedding_lr}
+        if lr_ratio is not None:
+            adam_emb_override["min_lr"] = effective_embedding_lr * lr_ratio
+        config_overrides_adam[ParamKey(attr="is_embedding_parameter")] = ParamGroupOverride(**adam_emb_override)
+    if effective_output_lr is not None:
+        only_output_adam = ParamPredicate(
+            name="output_not_embedding",
+            fn=lambda p: (getattr(p, "is_output_parameter", False)
+                          and not getattr(p, "is_embedding_parameter", False)),
+        )
+        adam_out_override = {"max_lr": effective_output_lr}
+        if lr_ratio is not None:
+            adam_out_override["min_lr"] = effective_output_lr * lr_ratio
+        config_overrides_adam[ParamKey(predicate=only_output_adam)] = ParamGroupOverride(**adam_out_override)
 
     # call original get. linear params will be skipped since they're freezed
     chained_adam = get_megatron_optimizer(

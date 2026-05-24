@@ -302,6 +302,12 @@ class TransformerConfig(ModelParallelConfig):
     """Standard deviation of the zero mean normal for the default initialization method, not used if
     init_method and output_layer_init_method are provided."""
 
+    scaled_output_layer_init: bool = True
+    """If True (default), the output layers of attention and MLP blocks are initialized with
+    scaled_init_method_normal, i.e. std = init_method_std / sqrt(2 * num_layers). If False, they
+    are initialized with the same unscaled init_method_normal(init_method_std) as the other
+    weights. Only used when output_layer_init_method is not explicitly provided."""
+
     embedding_init_method: Optional[Callable] = None
     """
     Method to initialize weights of the embedding layer. If None, will be set as described 
@@ -1452,11 +1458,14 @@ class TransformerConfig(ModelParallelConfig):
             self.init_method = init_method_normal(self.init_method_std)
 
         if self.output_layer_init_method is None:
-            self.output_layer_init_method = scaled_init_method_normal(
-                self.init_method_std,
-                self.num_layers,
-                multiplier=2.0 if not self.is_hybrid_model else 1.0,
-            )
+            if self.scaled_output_layer_init:
+                self.output_layer_init_method = scaled_init_method_normal(
+                    self.init_method_std,
+                    self.num_layers,
+                    multiplier=2.0 if not self.is_hybrid_model else 1.0,
+                )
+            else:
+                self.output_layer_init_method = init_method_normal(self.init_method_std)
 
         if self.num_moe_experts is not None and self.add_bias_linear:
             assert (
