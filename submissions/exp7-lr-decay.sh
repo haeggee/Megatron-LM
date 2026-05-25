@@ -21,6 +21,7 @@ for decay in wsd; do
 			--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
 			--hs-g rowcol --hs-g-embed none \
 			--post-norm \
+			--hs-g-param softplus \
 			--fixed-layer-scale $INV_LAYERS \
 			--upscale-embedding $SQRT_MODELDIM \
 			--qk-norm RMSNorm \

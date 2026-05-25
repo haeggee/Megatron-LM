@@ -17,7 +17,7 @@ EMB_LR=0.003
 
 # matrix LR sweep: 2^(k/2) * 1e-3 for k in 3..8 (same effective range as before).
 
-# ---- adam (master, no orthogonalize, no hypersphere) ----
+---- adam (master, no orthogonalize, no hypersphere) ----
 for k in 3 4 5 6 7 8; do
 	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
@@ -91,5 +91,45 @@ for k in 3 4 5 6 7 8; do
 		--untie-embed \
 		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
 		--extra-name exp1-master-gains \
+		$*
+done
+
+# ---- master + adam + hypersphere (no orthogonalize, no gains); warmup kept ----
+for k in 3 4 5 6 7 8; do
+	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
+	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+		--eval-every 1000 --eval-iters 50 \
+		--opt master --alpha 0 \
+		--hs flat --hs-embed row --hs-embed-no-orthogonal \
+		--post-norm \
+		--fixed-layer-scale $INV_LAYERS \
+		--upscale-embedding $SQRT_MODELDIM \
+		--qk-norm RMSNorm \
+		--wd 0 --decay linear \
+		--warmup-iters 1000 \
+		--untie-embed \
+		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
+		--extra-name exp1-master-adam-nogains \
+		$*
+done
+
+# ---- master + adam + hypersphere + gains (no orthogonalize); warmup kept ----
+for k in 3 4 5 6 7 8; do
+	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
+	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+		--eval-every 1000 --eval-iters 50 \
+		--opt master --alpha 0 \
+		--hs flat --hs-embed row --hs-embed-no-orthogonal \
+		--hs-g rowcol --hs-g-embed none \
+		--post-norm \
+		--hs-g-param softplus \
+		--fixed-layer-scale $INV_LAYERS \
+		--upscale-embedding $SQRT_MODELDIM \
+		--qk-norm RMSNorm \
+		--wd 0 --decay linear \
+		--warmup-iters 1000 \
+		--untie-embed \
+		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
+		--extra-name exp1-master-adam-gains \
 		$*
 done
