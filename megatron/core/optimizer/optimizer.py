@@ -394,8 +394,12 @@ class MegatronOptimizer(ABC):
         Raises:
             ValueError: If parameter groups in state dict don't match current optimizer.
         """
-        # Some optimizers have extra keys.
-        extra_keys = "use_orthogonal_updates",
+        # Some optimizers have extra keys. max_lr/min_lr are included so that
+        # groups with the same multiplier identifier but different absolute LR
+        # overrides (e.g. embedding vs LM-head when both have
+        # use_orthogonal_updates=False via --hs-embed-no-orthogonal but distinct
+        # --embedding-lr / --output-lr) don't collapse onto a single saved group.
+        extra_keys = "use_orthogonal_updates", "max_lr", "min_lr"
         use_param_group_identifier_keys = param_group_identifier_keys
         for extra_key in extra_keys:
             if all(extra_key in g for g in current_groups):
