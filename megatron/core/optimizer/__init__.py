@@ -839,7 +839,7 @@ def _get_megatron_emerging_optimizer(
                 # the matrix LR schedule.
                 config_overrides[lr_key] = {
                     'max_lr': muon_scalar_lr,
-                    'min_lr': muon_scalar_lr,
+                    'min_lr': min(muon_scalar_lr, config.lr),
                 }
 
         if muon_scalar_wd is not None:

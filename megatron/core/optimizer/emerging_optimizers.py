@@ -534,6 +534,8 @@ def _master_config_to_kwargs(config, model_chunks, pg_collection) -> Dict[str, A
         hypersphere_router_mode=config.hypersphere_router_mode,
         hypersphere_tangential_grad=config.hypersphere_tangential_grad,
         hypersphere_preserve_init=config.hypersphere_preserve_init,
+        hypersphere_scale_out_proj_init=config.hypersphere_scale_out_proj_init,
+        num_layers=model_cfg.num_layers,
         # Muon.
         use_orthogonal_updates=config.use_orthogonal_updates,
         momentum_beta=config.muon_momentum,
@@ -559,6 +561,7 @@ def _master_config_to_kwargs(config, model_chunks, pg_collection) -> Dict[str, A
         gains_betas=(config.adam_beta1, config.adam_beta2),
         gains_eps=config.adam_eps,
         gains_weight_decay=config.weight_decay,
+        gain_parametrization=config.gain_parametrization,
     )
 
 

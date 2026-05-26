@@ -2440,6 +2440,13 @@ def _add_regularization_args(parser):
                        'magnitude survives into training. When gains are configured '
                        '(single-axis), gains absorb the per-axis init magnitude '
                        '(Muown-style g = ||W[i]||).')
+    group.add_argument('--hypersphere-scale-out-proj-init', action='store_true', default=False,
+                       help='Scale the hypersphere target radius for is_out_proj params '
+                       '(linear_proj, linear_fc2) by 1/sqrt(multiplier * num_layers), '
+                       'matching scaled_init_method_normal (multiplier=1 for hybrid '
+                       'models, 2 otherwise). Keeps the hypersphere constraint '
+                       'consistent with Megatron depth-aware init for residual-out '
+                       'projections.')
     group.add_argument('--master-router-use-orthogonal-updates',
                        type=lambda s: {'true': True, 'false': False}[s.lower()],
                        default=None, choices=[True, False],
@@ -2463,6 +2470,13 @@ def _add_regularization_args(parser):
                        'The gains LR is still multiplied each step by the '
                        'scheduler ratio (current_lr / max_lr), so it tracks '
                        'the schedule shape of the main LR.')
+    group.add_argument('--gain-parametrization', type=str, default='direct',
+                       choices=['direct', 'offset', 'softplus'],
+                       help='Reparametrize the stored gain g; effective multiplier '
+                       'is phi(g). "direct" (default) keeps phi(g)=g (legacy). '
+                       '"offset" uses phi(g)=1+g (raw gain centered at 0). '
+                       '"softplus" uses phi(g)=softplus(g) (always positive). '
+                       'Applied uniformly to row/col/flat gains.')
     group.add_argument('--use-orthogonal-updates', action='store_true', default=False,
                        help='Use Muon-style orthogonalized updates for matrix params '
                        'under --optimizer master. Embedding + LM head ALWAYS use the '

@@ -428,6 +428,13 @@ class OptimizerConfig:
     (col_gain stays at 1). Matches Muown's `g = ||W[i]||` initialization.
     Default False."""
 
+    hypersphere_scale_out_proj_init: bool = False
+    """When True, scale the hypersphere target radius for is_out_proj params
+    (linear_proj, linear_fc2) by 1/sqrt(multiplier * num_layers), matching
+    scaled_init_method_normal. multiplier=1.0 for hybrid models, 2.0 otherwise.
+    Keeps the hypersphere constraint consistent with Megatron's depth-aware
+    init for residual-out projections. Default False."""
+
     master_router_use_orthogonal_updates: Optional[bool] = None
     """Per-param-group override for use_orthogonal_updates on MoE router
     weights under --optimizer master. True → force Muon for routers.
@@ -451,6 +458,12 @@ class OptimizerConfig:
     When None, falls back to config.lr. The gains LR is still scaled each
     step by the main scheduler's (lr / max_lr) ratio so it tracks the
     schedule shape."""
+
+    gain_parametrization: str = 'direct'
+    """Reparametrize the stored gain g; the effective per-axis multiplier on
+    p is phi(g). One of 'direct' (phi(g)=g, legacy), 'offset' (phi(g)=1+g,
+    so the raw gain is centered at 0), or 'softplus' (phi(g)=softplus(g),
+    always positive). Applied uniformly to row/col/flat gains."""
 
     use_orthogonal_updates: bool = False
     """When True under --optimizer master, matrix params use Muon-style
