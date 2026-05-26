@@ -15,13 +15,14 @@ SQRT_MODELDIM=22.62
 NODES=2
 MODEL_SIZE=110
 
-# central matrix LR = 2^(5/2) * 1e-3 (=k=5 in the exp 1 sweep).
-MATRIX_LR=$(python3 -c "print(0.001 * 2**(5/2))")
+# central matrix LR = 2^(6/2) * 1e-3 = 8e-3 (=k=6 in the exp 1 sweep).
+MATRIX_LR=$(python3 -c "print(0.001 * 2**(6/2))")
 EMB_LR=0.003
 
 # ---- adam ----
 for k in -3 -2 -1 0 1 2 3; do
 	base_lr=$(python3 -c "print(0.001 * 2**($k/2))")
+	MATRIX_LR=$(python3 -c "print(0.001 * 2**(6/2))")
 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
 		--eval-every 1000 --eval-iters 50 \
 		--opt master --alpha 0 \
@@ -38,59 +39,60 @@ for k in -3 -2 -1 0 1 2 3; do
 done
 
 # ---- muon ----
-for k in -3 -2 -1 0 1 2 3; do
-	base_lr=$(python3 -c "print(0.001 * 2**($k/2))")
-	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
-		--eval-every 1000 --eval-iters 50 \
-		--opt master --master-orthogonalize --alpha 0 \
-		--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
-		--post-norm \
-		--fixed-layer-scale $INV_LAYERS \
-		--upscale-embedding $SQRT_MODELDIM \
-		--qk-norm RMSNorm \
-		--wd 0.1 --decay linear \
-		--warmup-iters 1000 \
-		--untie-embed \
-		--lr $base_lr --matrix-lr $MATRIX_LR --embedding-lr $EMB_LR \
-		--extra-name exp1b-lrsup-muon \
-		$*
-done
+# for k in -3 -2 -1 0 1 2 3; do
+# 	base_lr=$(python3 -c "print(0.001 * 2**($k/2))")
+# 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+# 		--eval-every 1000 --eval-iters 50 \
+# 		--opt master --master-orthogonalize --alpha 0 \
+# 		--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
+# 		--post-norm \
+# 		--fixed-layer-scale $INV_LAYERS \
+# 		--upscale-embedding $SQRT_MODELDIM \
+# 		--qk-norm RMSNorm \
+# 		--wd 0.1 --decay linear \
+# 		--warmup-iters 1000 \
+# 		--untie-embed \
+# 		--lr $base_lr --matrix-lr $MATRIX_LR --embedding-lr $EMB_LR \
+# 		--extra-name exp1b-lrsup-muon \
+# 		$*
+# done
 
-# ---- master-muon, no gains ----
-for k in -3 -2 -1 0 1 2 3; do
-	base_lr=$(python3 -c "print(0.001 * 2**($k/2))")
-	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
-		--eval-every 1000 --eval-iters 50 \
-		--opt master --master-orthogonalize --alpha 0 \
-		--hs flat --hs-embed row --hs-embed-no-orthogonal \
-		--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
-		--post-norm \
-		--fixed-layer-scale $INV_LAYERS \
-		--upscale-embedding $SQRT_MODELDIM \
-		--qk-norm RMSNorm \
-		--wd 0 --decay linear --no-warmup \
-		--untie-embed \
-		--lr $base_lr --matrix-lr $MATRIX_LR --embedding-lr $EMB_LR \
-		--extra-name exp1b-lrsup-master-nogains \
-		$*
-done
+# # ---- master-muon, no gains ----
+# for k in -3 -2 -1 0 1 2 3; do
+# 	base_lr=$(python3 -c "print(0.001 * 2**($k/2))")
+# 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+# 		--eval-every 1000 --eval-iters 50 \
+# 		--opt master --master-orthogonalize --alpha 0 \
+# 		--hs flat --hs-embed row --hs-embed-no-orthogonal \
+# 		--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
+# 		--post-norm \
+# 		--fixed-layer-scale $INV_LAYERS \
+# 		--upscale-embedding $SQRT_MODELDIM \
+# 		--qk-norm RMSNorm \
+# 		--wd 0 --decay linear --no-warmup \
+# 		--untie-embed \
+# 		--lr $base_lr --matrix-lr $MATRIX_LR --embedding-lr $EMB_LR \
+# 		--extra-name exp1b-lrsup-master-nogains \
+# 		$*
+# done
 
-# ---- master-muon + gains ----
-for k in -3 -2 -1 0 1 2 3; do
-	base_lr=$(python3 -c "print(0.001 * 2**($k/2))")
-	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
-		--eval-every 1000 --eval-iters 50 \
-		--opt master --master-orthogonalize --alpha 0 \
-		--hs flat --hs-embed row --hs-embed-no-orthogonal \
-		--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
-		--hs-g rowcol --hs-g-embed none \
-		--post-norm \
-		--fixed-layer-scale $INV_LAYERS \
-		--upscale-embedding $SQRT_MODELDIM \
-		--qk-norm RMSNorm \
-		--wd 0 --decay linear --no-warmup \
-		--untie-embed \
-		--lr $base_lr --matrix-lr $MATRIX_LR --embedding-lr $EMB_LR \
-		--extra-name exp1b-lrsup-master-gains \
-		$*
-done
+# # ---- master-muon + gains ----
+# for k in -3 -2 -1 0 1 2 3; do
+# 	base_lr=$(python3 -c "print(0.001 * 2**($k/2))")
+# 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+# 		--eval-every 1000 --eval-iters 50 \
+# 		--opt master --master-orthogonalize --alpha 0 \
+# 		--hs flat --hs-embed row --hs-embed-no-orthogonal \
+# 		--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
+# 		--hs-g rowcol --hs-g-embed none \
+# 		--post-norm \
+# 		--hs-g-param softplus \
+# 		--fixed-layer-scale $INV_LAYERS \
+# 		--upscale-embedding $SQRT_MODELDIM \
+# 		--qk-norm RMSNorm \
+# 		--wd 0 --decay linear --no-warmup \
+# 		--untie-embed \
+# 		--lr $base_lr --matrix-lr $MATRIX_LR --embedding-lr $EMB_LR \
+# 		--extra-name exp1b-lrsup-master-gains \
+# 		$*
+# done

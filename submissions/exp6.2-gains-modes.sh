@@ -28,31 +28,31 @@ for gainsmode in flat embed row; do
 			--wd 0 --decay linear --no-warmup \
 			--untie-embed \
 			--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
-			--extra-name exp6.2-hs-${gainsmode}-gains \
+			--extra-name exp6.2-hs-${gainsmode} \
 			$*
 	done
 done
 
 
 # with and without softplus parametrization
-for param in direct; do
-	for k in 3 4 5 6 7 8; do
-		matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
-		bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
-			--eval-every 1000 --eval-iters 50 \
-			--opt master --master-orthogonalize --alpha 0 \
-			--hs flat --hs-embed row --hs-embed-no-orthogonal \
-			--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
-			--hs-g rowcol --hs-g-embed none \
-			--hs-g-param $param \
-			--post-norm \
-			--fixed-layer-scale $INV_LAYERS \
-			--upscale-embedding $SQRT_MODELDIM \
-			--qk-norm RMSNorm \
-			--wd 0 --decay linear --no-warmup \
-			--untie-embed \
-			--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
-			--extra-name exp6.2-hs-gains-${param} \
-			$*
-	done
-done
+# for param in direct; do
+# 	for k in 3 4 5 6 7 8; do
+# 		matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
+# 		bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+# 			--eval-every 1000 --eval-iters 50 \
+# 			--opt master --master-orthogonalize --alpha 0 \
+# 			--hs flat --hs-embed row --hs-embed-no-orthogonal \
+# 			--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
+# 			--hs-g rowcol --hs-g-embed none \
+# 			--hs-g-param $param \
+# 			--post-norm \
+# 			--fixed-layer-scale $INV_LAYERS \
+# 			--upscale-embedding $SQRT_MODELDIM \
+# 			--qk-norm RMSNorm \
+# 			--wd 0 --decay linear --no-warmup \
+# 			--untie-embed \
+# 			--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
+# 			--extra-name exp6.2-hs-gains-${param} \
+# 			$*
+# 	done
+# done

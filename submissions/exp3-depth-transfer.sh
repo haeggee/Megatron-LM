@@ -7,9 +7,11 @@ SQRT_MODELDIM=22.62   # sqrt(512); constant across depth sweep.
 
 # config: NODES MODEL_SIZE INV_LAYERS
 configs=(
+	"2 90  0.167"   # 6L
 	# "2 110 0.083"   # 12L
-	"2 130 0.056"   # 18L
-	"2 150 0.042"   # 24L
+	# "2 130 0.056"   # 18L
+	# "2 150 0.042"   # 24L
+	# "4 170 0.033"   # 30L
 )
 
 BASE_LR=0.001

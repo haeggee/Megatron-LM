@@ -1,13 +1,14 @@
 source .env  # export WANDB_API_KEY and HF_TOKEN here.
 # Exp 4: combined depth + width transfer for master-muon + gains.
-# 110 (12L,512) -> 390 (16L,1024) -> 1 (16L,2048). 1B is expensive --
-# uncomment when ready.
+# Ratio-preserving sweep: hidden/layers = 512/12 = 768/18 = 1024/24 ≈ 42.67.
+# 110 (12L,512) -> 232 (18L,768) -> 430 (24L,1024).
 
 # config: NODES MODEL_SIZE INV_LAYERS SQRT_MODELDIM
 configs=(
-	"2 110 0.083 22.62"   # 12L, hidden 512
-	"2 390 0.0625 32.00"  # 16L, hidden 1024
-	# "4 1   0.0625 45.25"  # 16L, hidden 2048
+	# "2 70  0.1111 19.60"  # 9L,  hidden 384
+	# "2 110 0.0833 22.62"  # 12L, hidden 512
+	"2 232 0.0556 27.71"  # 18L, hidden 768
+	"2 430 0.0417 32.00"  # 24L, hidden 1024
 )
 
 BASE_LR=0.001
@@ -24,6 +25,7 @@ for config in "${configs[@]}"; do
 			--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
 			--hs-g rowcol --hs-g-embed none \
 			--post-norm \
+			--hs-g-param softplus \
 			--fixed-layer-scale $INV_LAYERS \
 			--upscale-embedding $SQRT_MODELDIM \
 			--qk-norm RMSNorm \

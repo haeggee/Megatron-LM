@@ -5,10 +5,11 @@ source .env  # export WANDB_API_KEY and HF_TOKEN here.
 
 # config: NODES MODEL_SIZE INV_LAYERS SQRT_MODELDIM
 configs=(
+	"2 47 0.083 16.00"
 	# "2 110 0.083 22.62"   # 12L, hidden 512
-	"2 193 0.083 27.71"   # 12L, hidden 768
-	"2 292 0.083 32.00"   # 12L, hidden 1024
-	"4 860 0.083 45.25"   # 12L, hidden 2048
+	# "2 193 0.083 27.71"   # 12L, hidden 768
+	# "2 292 0.083 32.00"   # 12L, hidden 1024
+	# "4 860 0.083 45.25"   # 12L, hidden 2048
 )
 
 BASE_LR=0.001

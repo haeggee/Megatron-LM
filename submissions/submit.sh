@@ -36,7 +36,7 @@ BETA3=0.999
 MUON_MOMENTUM=0.95
 ADAMBETA1=0.95
 ALPHA=5
-MUON_SCALE_MODE=spectral
+MUON_SCALE_MODE=none
 MUON_NUM_NS_STEPS=5
 EMBEDDING_LR_MULTIPLIER=1.0
 
@@ -181,7 +181,7 @@ if [[ $1 -eq 110 ]]; then
 	MBS="${MBS:-8}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.003
+	LR=0.001
 	SIZE=110
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
@@ -199,8 +199,44 @@ elif [[ $1 -eq 47 ]]; then # 0.5x=256 dim from 110m
 	MBS="${MBS:-8}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.002
+	LR=0.001
 	SIZE=47
+	SAVE_FREQ=10000
+	DEF_TOKENS=25
+	INTERMEDIATE_METRICS_INTERVAL=10
+	SCALE=M
+	UNTIE=false
+	LOG_FREQ=50
+elif [[ $1 -eq 70 ]]; then # 0.75x=384 dim, 9L (ratio-preserving with 110m)
+	# batch_size: ~0.52M.
+	LAYERS=9
+	HIDDEN_SIZE=384
+	FFN_SIZE=1536
+	NUM_HEADS=6
+	NUM_QUERY_GROUPS=3
+	MBS="${MBS:-8}"
+	GBS=128
+	ITERS_PER_BT=2000
+	LR=0.001
+	SIZE=70
+	SAVE_FREQ=10000
+	DEF_TOKENS=25
+	INTERMEDIATE_METRICS_INTERVAL=10
+	SCALE=M
+	UNTIE=false
+	LOG_FREQ=50
+elif [[ $1 -eq 90 ]]; then # 0.5x layers from 110m
+	# batch_size: ~0.52M.
+	LAYERS=6
+	HIDDEN_SIZE=512
+	FFN_SIZE=2048
+	NUM_HEADS=4
+	NUM_QUERY_GROUPS=2
+	MBS="${MBS:-8}"
+	GBS=128
+	ITERS_PER_BT=2000
+	LR=0.001
+	SIZE=90
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
 	INTERMEDIATE_METRICS_INTERVAL=10
@@ -217,7 +253,7 @@ elif [[ $1 -eq 130 ]]; then # 1.5x layers from 110m
 	MBS="${MBS:-8}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.002
+	LR=0.001
 	SIZE=130
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
@@ -235,8 +271,26 @@ elif [[ $1 -eq 150 ]]; then # 2x layers from 110m
 	MBS="${MBS:-8}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.002
+	LR=0.001
 	SIZE=150
+	SAVE_FREQ=10000
+	DEF_TOKENS=25
+	INTERMEDIATE_METRICS_INTERVAL=10
+	SCALE=M
+	UNTIE=false
+	LOG_FREQ=50
+elif [[ $1 -eq 170 ]]; then # 2.5x layers from 110m
+	# batch_size: ~0.52M.
+	LAYERS=30
+	HIDDEN_SIZE=512
+	FFN_SIZE=2048
+	NUM_HEADS=4
+	NUM_QUERY_GROUPS=2
+	MBS="${MBS:-4}"
+	GBS=128
+	ITERS_PER_BT=2000
+	LR=0.001
+	SIZE=170
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
 	INTERMEDIATE_METRICS_INTERVAL=10
@@ -253,7 +307,7 @@ elif [[ $1 -eq 190 ]]; then # 1.5x=768 dim, but WRONG heads/query groups
 	MBS="${MBS:-8}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.002
+	LR=0.001
 	SIZE=190
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
@@ -271,8 +325,26 @@ elif [[ $1 -eq 193 ]]; then # 1.5x=768 dim, correct heads/query groups
 	MBS="${MBS:-8}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.002
+	LR=0.001
 	SIZE=193
+	SAVE_FREQ=10000
+	DEF_TOKENS=25
+	INTERMEDIATE_METRICS_INTERVAL=10
+	SCALE=M
+	UNTIE=false
+	LOG_FREQ=50
+elif [[ $1 -eq 232 ]]; then # 1.5x=768 dim, 18L (ratio-preserving with 110m)
+	# batch_size: ~0.52M.
+	LAYERS=18
+	HIDDEN_SIZE=768
+	FFN_SIZE=3072
+	NUM_HEADS=6
+	NUM_QUERY_GROUPS=3
+	MBS="${MBS:-8}"
+	GBS=128
+	ITERS_PER_BT=2000
+	LR=0.001
+	SIZE=232
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
 	INTERMEDIATE_METRICS_INTERVAL=10
@@ -289,7 +361,7 @@ elif [[ $1 -eq 290 ]]; then # 2x=1024 dim, but wrong heads/query groups
 	MBS="${MBS:-8}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.002
+	LR=0.001
 	SIZE=290
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
@@ -307,8 +379,26 @@ elif [[ $1 -eq 292 ]]; then # 2x=1024 dim, correct heads/query groups
 	MBS="${MBS:-8}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.002
+	LR=0.001
 	SIZE=292
+	SAVE_FREQ=10000
+	DEF_TOKENS=25
+	INTERMEDIATE_METRICS_INTERVAL=10
+	SCALE=M
+	UNTIE=false
+	LOG_FREQ=50
+elif [[ $1 -eq 430 ]]; then # 2x=1024 dim, 24L (ratio-preserving with 110m)
+	# batch_size: ~0.52M.
+	LAYERS=24
+	HIDDEN_SIZE=1024
+	FFN_SIZE=4096
+	NUM_HEADS=8
+	NUM_QUERY_GROUPS=4
+	MBS="${MBS:-4}"
+	GBS=128
+	ITERS_PER_BT=2000
+	LR=0.001
+	SIZE=430
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
 	INTERMEDIATE_METRICS_INTERVAL=10
@@ -325,7 +415,7 @@ elif [[ $1 -eq 860 ]]; then # 4x=2048 dim, correct heads/query groups
 	MBS="${MBS:-4}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.002
+	LR=0.001
 	SIZE=860
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
@@ -343,7 +433,7 @@ elif [[ $1 -eq 390 ]]; then
 	MBS="${MBS:-4}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.002
+	LR=0.001
 	SIZE=390
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
@@ -405,8 +495,7 @@ while [[ $# -gt 0 ]]; do
 		--tokens)
 			TOKENS=$2; shift 2;;
 		--lr)
-			LR=$2;
-			shift 2;;
+			LR=$2; shift 2;;
 		--no-warmup)
 			NO_WARMUP=true; shift;;
 		--warmup-iters)
@@ -778,9 +867,10 @@ if [[ $HYPERBALL != false ]]; then
 	fi
 fi
 
-if [[ $CHANGED_LR = true ]]; then
+if [[ $LR != 0.001 ]]; then
 	SUFFIX=$SUFFIX-lr$(printf "%.4g" $LR)
 fi
+
 if [[ ! -z "${MATRIX_LR+xxx}" ]]; then
 	SUFFIX=${SUFFIX}-Mlr$(printf "%.4g" $MATRIX_LR)
 	OPT_ARGS+=(--matrix-lr $MATRIX_LR)
