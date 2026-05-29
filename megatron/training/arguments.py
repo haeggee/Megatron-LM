@@ -2720,6 +2720,14 @@ def _add_regularization_args(parser):
                        help='Linear warmup steps for ademamix_alpha.')
     group.add_argument('--ademamix-beta3-warmup', type=int, default=None,
                        help='Half-life-linear warmup steps for ademamix_beta3.')
+    group.add_argument('--muon-slow-orthog-mode', type=str, default='combined',
+                       choices=['combined', 'separate'],
+                       help='How AdEMAMix slow EMA is folded into the Muon branch '
+                       'under --optimizer master --use-orthogonal-updates when '
+                       '--ademamix-alpha != 0. "combined" (default): orthogonalize '
+                       'fast + alpha*slow in one NS call. "separate": orthogonalize '
+                       'each separately and sum (raw, no 1+alpha renorm); NorMuon is '
+                       'applied only to the fast branch.')
 
     group.add_argument('--no-weight-decay-cond-type', type=str, choices=['apply_wd_to_qk_layernorm'],
                        help='Type of no weight decay condition. Choices: '

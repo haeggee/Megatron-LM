@@ -491,6 +491,15 @@ class OptimizerConfig:
     ademamix_beta3_warmup: Optional[int] = None
     """Half-life-linear warmup steps for ademamix_beta3. None disables warmup."""
 
+    muon_slow_orthog_mode: str = "combined"
+    """How AdEMAMix's slow EMA is folded into the Muon (orthogonalized) branch
+    when --optimizer master --use-orthogonal-updates is set AND ademamix_alpha
+    != 0. "combined": NS(fast + alpha*slow) — one NS call, the slow signal
+    shifts the direction before orthogonalization. "separate": NS(fast) +
+    alpha*NS(slow) — two NS calls, raw sum (no 1+alpha renorm); NorMuon is
+    applied only to the fast branch since the slow EMA is meant to be smooth.
+    Ignored when ademamix_alpha == 0."""
+
     #######################
     # Distributed optimizer
     #######################

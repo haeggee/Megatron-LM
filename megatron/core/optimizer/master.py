@@ -93,6 +93,11 @@ class MasterOptimizer(torch.optim.Optimizer):
         use_normuon: bool = False,
         normuon_beta2: float = 0.95,
         normuon_eps: float = 1e-8,
+        # How AdEMAMix's slow EMA folds into the Muon branch when alpha != 0.
+        # "combined": NS(fast + alpha*slow), one NS call. "separate":
+        # NS(fast) + alpha*NS(slow), two NS calls, raw sum (no 1+alpha renorm);
+        # NorMuon (if enabled) applies only to the fast branch.
+        slow_orthog_mode: Literal["combined", "separate"] = "combined",
         pg_collection: Optional[ProcessGroupCollection] = None,
         tp_mode: Literal["blockwise", "duplicated", "distributed"] = "duplicated",
     ):
@@ -102,6 +107,7 @@ class MasterOptimizer(torch.optim.Optimizer):
         self.use_normuon = use_normuon
         self.normuon_beta2 = normuon_beta2
         self.normuon_eps = normuon_eps
+        self.slow_orthog_mode = slow_orthog_mode
 
         self.hypersphere_mode = hypersphere_mode
         self.hypersphere_embedding_mode = hypersphere_embedding_mode
@@ -211,6 +217,11 @@ class MasterOptimizer(torch.optim.Optimizer):
                     state["exp_avg_sq"] = torch.zeros_like(grad)
                 if group["alpha"] != 0:
                     state["exp_avg_slow"] = torch.zeros_like(grad)
+            else:
+                # Muon-branch AdEMAMix: slow EMA folded into the orthogonalized
+                # update direction. See `slow_orthog_mode` for combined/separate.
+                if group["alpha"] != 0:
+                    state["exp_avg_slow"] = torch.zeros_like(grad)
 
         exp_avg = state["exp_avg"]
         beta1 = group["beta1"]
@@ -235,13 +246,39 @@ class MasterOptimizer(torch.optim.Optimizer):
             self._apply_weight_decay_inplace(p, group)
             exp_avg.lerp_(grad, 1 - momentum_beta)
             if self.use_nesterov:
-                grad = grad.lerp(exp_avg, momentum_beta)
+                fast = grad.lerp(exp_avg, momentum_beta)
             else:
-                grad = exp_avg
+                fast = exp_avg
+            # AdEMAMix slow branch on the Muon path. alpha == 0 → no extra
+            # state, no slow signal, behaves bit-for-bit like the pre-existing
+            # Muon branch. The slow EMA uses the (optionally tangent-projected)
+            # raw grad — NOT the fast momentum — to match AdEMAMix semantics.
+            use_slow = group["alpha"] != 0
+            if use_slow:
+                alpha = (linear_warmup_scheduler(
+                    group["step"], group["alpha"], 0, group["alpha_warmup"])
+                    if group["alpha_warmup"] is not None else group["alpha"])
+                beta3 = (linear_hl_warmup_scheduler(
+                    group["step"], group["beta3"], group["beta1"], group["beta3_warmup"])
+                    if group["beta3_warmup"] is not None else group["beta3"])
+                exp_avg_slow = state["exp_avg_slow"]
+                exp_avg_slow.mul_(beta3).add_(grad, alpha=1 - beta3)
             with emerging_optimizers.utils.fp32_matmul_precision(self.fp32_matmul_prec):
-                update = self._orthogonalize_param(p, grad, is_qkv=is_qkv)
-            if self.use_normuon:
-                update = self._normuon_rescale(update, state)
+                if not use_slow:
+                    update = self._orthogonalize_param(p, fast, is_qkv=is_qkv)
+                    if self.use_normuon:
+                        update = self._normuon_rescale(update, state)
+                elif self.slow_orthog_mode == "combined":
+                    combined = fast.add(exp_avg_slow, alpha=alpha)
+                    update = self._orthogonalize_param(p, combined, is_qkv=is_qkv)
+                    if self.use_normuon:
+                        update = self._normuon_rescale(update, state)
+                else:  # "separate": NS(fast) + alpha*NS(slow), raw sum.
+                    fast_update = self._orthogonalize_param(p, fast, is_qkv=is_qkv)
+                    if self.use_normuon:
+                        fast_update = self._normuon_rescale(fast_update, state)
+                    slow_update = self._orthogonalize_param(p, exp_avg_slow, is_qkv=is_qkv)
+                    update = fast_update.add(slow_update, alpha=alpha)
             # Shrink Muon update for is_out_proj params to match the smaller
             # target sphere. Muon's shape_up (and spectral) scale targets the
             # natural RMS of a unit-row/col matrix; with target radius

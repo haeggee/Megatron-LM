@@ -496,6 +496,11 @@ def _master_init_state_fn(opt, config=None):
                         opt.state[p]["exp_avg_sq"] = torch.zeros_like(p.data)
                     if group.get("alpha", 0) != 0:
                         opt.state[p]["exp_avg_slow"] = torch.zeros_like(p.data)
+                else:
+                    # Muon branch: only the slow EMA exists when alpha != 0
+                    # (no exp_avg_sq). Mirrors _param_step state init.
+                    if group.get("alpha", 0) != 0:
+                        opt.state[p]["exp_avg_slow"] = torch.zeros_like(p.data)
 
 
 def _master_config_to_kwargs(config, model_chunks, pg_collection) -> Dict[str, Any]:
@@ -551,6 +556,7 @@ def _master_config_to_kwargs(config, model_chunks, pg_collection) -> Dict[str, A
         extra_scale_factor=config.muon_extra_scale_factor,
         use_normuon=config.master_use_normuon,
         normuon_beta2=config.master_normuon_beta2,
+        slow_orthog_mode=config.muon_slow_orthog_mode,
         pg_collection=pg_collection,
         tp_mode=config.muon_tp_mode,
         # Gains. None → GainsMasterOptimizer behaves like plain MasterOptimizer.
