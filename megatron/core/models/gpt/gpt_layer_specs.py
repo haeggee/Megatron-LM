@@ -203,6 +203,7 @@ def get_gpt_layer_with_transformer_engine_submodules(
     use_te_op_fuser: Optional[bool] = False,
     use_kitchen: bool = False,
     use_te_activation_func: bool = False,
+    differential_transformer: bool = False,
     use_kitchen_attention: bool = False,
     kitchen_attention_backend: str = "sdpa",
     mla_down_proj_fusion: bool = False,
@@ -404,6 +405,9 @@ def get_gpt_layer_with_transformer_engine_submodules(
                     ),
                     k_layernorm=(
                         L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
+                    ),
+                    subln=(
+                        IdentityOp if not differential_transformer else qk_norm
                     ),
                 ),
             ),

@@ -645,6 +645,41 @@ class OptimizerConfig:
             ), "exp_avg_sq_dtype can only be fp32 when not using precision-aware optimizer"
 
 
-# Backward-compatible aliases (deprecated; use OptimizerConfig directly).
-AdamOptimizerConfig = OptimizerConfig
-SGDOptimizerConfig = OptimizerConfig
+@dataclass
+class AdamOptimizerConfig(OptimizerConfig):
+    """Adam optimizer configuration object."""
+
+    optimizer: str = 'adam'
+    """Optimizer name."""
+
+    adam_beta1: float = 0.9
+    """First coefficient for computing running averages of gradient and its square in Adam
+    optimizer.
+    """
+
+    adam_beta2: float = 0.999
+    """Second coefficient for computing running averages of gradient and its square in Adam
+    optimizer.
+    """
+
+    adam_eps: float = 1e-08
+    """Term added to the denominator to improve numerical stability in Adam optimizer."""
+
+
+@dataclass
+class SGDOptimizerConfig(OptimizerConfig):
+    """SGD optimizer configuration object."""
+
+    optimizer: str = 'sgd'
+    """Optimizer name."""
+
+    sgd_momentum: float = 0.9
+    """Momentum factor for SGD optimizer."""
+
+
+@dataclass
+class AdemamixOptimizerConfig(OptimizerConfig):
+    """SGD optimizer configuration object."""
+
+    optimizer: str = 'ademamix'
+    """Optimizer name."""

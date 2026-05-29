@@ -55,6 +55,7 @@ from megatron.core.optimizer_param_scheduler import (
     param_group_override_to_tuple,
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
+from .ademamix import AdEMAMix
 from megatron.core.transformer.fsdp_dtensor_checkpoint import get_global_unique_param_name
 
 from ..distributed.param_and_grad_buffer import _ParamAndGradBuffer
@@ -85,6 +86,7 @@ from .optimizer_config import (
     ParamPredicate,
     ParamWithNamePredicate,
     SGDOptimizerConfig,
+    AdemamixOptimizerConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -348,12 +350,12 @@ def _get_param_groups(
                     if param_key.matches(param, name):
                         param_overrides_list.append(param_override)
 
+            # Default to no overrides for this parameter. Without this, parameters that
+            # do not match any key can inherit the last iterated override from
+            # config_overrides.items().
+            param_override: ParamGroupOverride | None = None
             if param_overrides_list:
-                param_override: ParamGroupOverride | None = combine_param_group_overrides(
-                    param_overrides_list
-                )
-            else:
-                param_override = None
+                param_override = combine_param_group_overrides(param_overrides_list)
 
             is_expert_parallel = not getattr(param, 'allreduce', True)
 
@@ -623,6 +625,38 @@ def _get_megatron_optimizer_based_on_param_groups(
                     for p in group['params']:
                         if len(opt.state[p]) == 0:
                             opt.state[p]['exp_avg'] = torch.zeros_like(p.data)
+
+        elif config.optimizer == 'ademamix':
+            kwargs = {
+                "params": param_groups,
+                "lr": config.lr,
+                "weight_decay": config.weight_decay,
+                "betas": (config.adam_beta1, config.adam_beta2, config.ademamix_beta3),
+                "alpha": config.ademamix_alpha,
+                "beta3_warmup": config.ademamix_beta3_warmup,
+                "alpha_warmup": config.ademamix_alpha_warmup,
+                "eps": config.adam_eps,
+            }
+
+            if config.use_precision_aware_optimizer:
+                raise NotImplementedError(
+                    "Precision-aware AdEMAMix has not been implemented yet. "
+                    "Please set `use_precision_aware_optimizer=False` or choose a different optimizer."
+                )
+
+            optimizer = AdEMAMix(**kwargs)
+
+            def init_state_fn(opt, config=None):
+                for group in opt.param_groups:
+                    for p in group['params']:
+                        if len(opt.state[p]) == 0:
+                            if config.adam_beta1 != 0:
+                                opt.state[p]['exp_avg_fast'] = torch.zeros_like(p.data)
+                            opt.state[p]['exp_avg_slow'] = torch.zeros_like(p.data)
+                            opt.state[p]['exp_avg_sq'] = torch.zeros_like(p.data)
+                        else:
+                            opt.initialize_state(p)
+
 
         elif config.optimizer == 'sgd':
             optimizer = SGD(

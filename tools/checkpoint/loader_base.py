@@ -5,7 +5,11 @@ import sys
 import types
 import torch
 
-from utils import _ConverterFakeProcessGroup, print_memory_usage
+from utils import (
+    init_converter_fake_groups,
+    print_memory_usage,
+    set_converter_fake_group_ranks,
+)
 
 class MegatronCheckpointLoaderBase:
     """Orchestrates loading a Megatron checkpoint and sending
@@ -26,6 +30,8 @@ class MegatronCheckpointLoaderBase:
         self.md = None               # Metadata sent to the saver
         self.consumed_train_samples = None
         self.consumed_valid_samples = None
+        self._converter_fake_groups = {}
+        self._use_converter_fake_groups = False
 
     def _maybe_parse_additional_megatron_args(self, margs, checkpoint_args):
         """
@@ -40,7 +46,7 @@ class MegatronCheckpointLoaderBase:
         Populates self.margs and self.checkpoint_args.
         """
         # Ensure we can import Megatron
-        sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
+        sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir, os.path.pardir)))
         if self.args.megatron_path is not None:
             sys.path.insert(0, self.args.megatron_path)
 
@@ -127,6 +133,27 @@ class MegatronCheckpointLoaderBase:
 
         self._maybe_ensure_additional_required_arguments()
 
+    def _initialize_converter_fake_groups(self, mpu):
+        """Initialize fake process groups used by checkpoint converter-only runs."""
+        self._converter_fake_groups = init_converter_fake_groups(
+            mpu,
+            tp_size=self.margs.tensor_model_parallel_size,
+            pp_size=self.margs.pipeline_model_parallel_size,
+            ep_size=self.margs.expert_model_parallel_size,
+            cp_size=getattr(self.margs, 'context_parallel_size', 1),
+        )
+
+    def _set_converter_fake_group_ranks(self, mpu, tp_rank, pp_rank):
+        """Update fake process-group ranks for the TP/PP shard being loaded."""
+        set_converter_fake_group_ranks(
+            mpu,
+            self._converter_fake_groups,
+            tp_rank=tp_rank,
+            pp_rank=pp_rank,
+            tp_size=self.margs.tensor_model_parallel_size,
+            ep_size=self.margs.expert_model_parallel_size,
+        )
+
     def initialize_megatron_env(self):
         """
         Initialize Megatron global variables and fused kernels.
@@ -144,12 +171,17 @@ class MegatronCheckpointLoaderBase:
         mpu.set_pipeline_model_parallel_world_size(self.margs.pipeline_model_parallel_size)
         mpu.set_virtual_pipeline_model_parallel_world_size(self.margs.virtual_pipeline_model_parallel_size)
         mpu.set_expert_model_parallel_world_size(self.margs.expert_model_parallel_size)
-        
-        # For backward compatibility during local parallel states refactoring
-        fake_tp_group = _ConverterFakeProcessGroup(size=self.margs.tensor_model_parallel_size)
-        fake_ep_group = _ConverterFakeProcessGroup(size=self.margs.expert_model_parallel_size)
-        mpu._TENSOR_MODEL_PARALLEL_GROUP = fake_tp_group
-        mpu._EXPERT_MODEL_PARALLEL_GROUP = fake_ep_group
+        mpu.set_expert_tensor_parallel_world_size(self.margs.tensor_model_parallel_size)
+
+        # Converter fallback: only install fake groups if model-parallel groups
+        # are missing. This avoids overriding real distributed initialization.
+        has_tp_group = mpu.get_tensor_model_parallel_group(check_initialized=False) is not None
+        has_pp_group = mpu.get_pipeline_model_parallel_group(check_initialized=False) is not None
+        self._use_converter_fake_groups = not (has_tp_group and has_pp_group)
+        if self._use_converter_fake_groups:
+            self._initialize_converter_fake_groups(mpu)
+            self._set_converter_fake_group_ranks(mpu, tp_rank=0, pp_rank=0)
+        fused_kernels.load(self.margs)
 
     def compute_true_vocab_size(self):
         """Determine the 'true' (non-padded) vocab size."""
@@ -190,20 +222,28 @@ class MegatronCheckpointLoaderBase:
 
         all_models = []  # all_models[pp_rank][vp_rank] = [list of models across TP ranks]
 
-        def get_models_for_pipeline_stage(count, dtype):
+        def get_models_for_pipeline_stage(count, dtype, pp_rank):
+            mpu.set_pipeline_model_parallel_rank(pp_rank)
             local_models_for_stage = [[] for _ in range(vp_size)]
             for tp_rank in range(count):
-                fake_tp_group = mpu.get_tensor_model_parallel_group()
-                fake_tp_group.set_rank(tp_rank)
-                mpu.set_tensor_model_parallel_rank(tp_rank)
+                if self._use_converter_fake_groups:
+                    self._set_converter_fake_group_ranks(mpu, tp_rank=tp_rank, pp_rank=pp_rank)
+                else:
+                    mpu.set_tensor_model_parallel_rank(tp_rank)
+                    mpu.set_pipeline_model_parallel_rank(pp_rank)
                 model_list = []
 
                 for i in range(vp_size):
                     mpu.set_virtual_pipeline_model_parallel_rank(i)
                     pre_process = mpu.is_pipeline_first_stage()
                     post_process = mpu.is_pipeline_last_stage()
-                    this_model = model_provider(pre_process=pre_process,
-                                                post_process=post_process).to(dtype)
+                    model_kwargs = {
+                        "pre_process": pre_process,
+                        "post_process": post_process,
+                    }
+                    if vp_size > 1:
+                        model_kwargs["vp_stage"] = i
+                    this_model = model_provider(**model_kwargs).to(dtype)
                     model_list.append(this_model)
 
                 # Each time we load, we set counters to 0, pass None for optimizer/ LR
@@ -235,8 +275,7 @@ class MegatronCheckpointLoaderBase:
         # Load shards for each pipeline rank
         mpu.set_virtual_pipeline_model_parallel_rank(0)
         for pp_rank in range(pp_size):
-            mpu.set_pipeline_model_parallel_rank(pp_rank)
-            all_models.append(get_models_for_pipeline_stage(tp_size, dtype))
+            all_models.append(get_models_for_pipeline_stage(tp_size, dtype, pp_rank))
 
         return all_models, consumed_train_samples, consumed_valid_samples
     
@@ -336,6 +375,23 @@ class MegatronCheckpointLoaderBase:
                             message["mlp l0 bias V"] = torch.cat([b[1] for b in mlp_l0_bias], dim=0)
                         else:
                             message["mlp l0 bias"] = torch.cat(mlp_l0_bias, dim=0)
+
+                    if self.md.qk_layernorm:
+                        message["q norm weight"] = layer["self_attn_q_layernorm_weight"]
+                        message["k norm weight"] = layer["self_attn_k_layernorm_weight"]
+
+                    if self.md.xielu:
+                        # there is also mlp alpha_p and alpha_n?
+                        message["mlp xielu alpha p"] = layer["mlp_xielu_alpha_p"]
+                        message["mlp xielu alpha n"] = layer["mlp_xielu_alpha_n"]
+
+                        if "mlp_xielu_beta" in layer and layer["mlp_xielu_beta"] is not None:
+                            beta = layer["mlp_xielu_beta"]
+                            message["mlp xielu beta"] = (
+                                beta if isinstance(beta, torch.Tensor) else torch.tensor(beta)
+                            )
+                        if "mlp_xielu_eps" in layer and layer["mlp_xielu_eps"] is not None:
+                            message["mlp xielu eps"] = layer["mlp_xielu_eps"]
 
                     self.queue_put(f"transformer layer {total_layer_num}", message)
                     total_layer_num += 1
@@ -448,6 +504,8 @@ class MegatronCheckpointLoaderBase:
         md.qkv_bias = self.margs.add_qkv_bias
         md.norm_has_bias = norm_has_bias
         md.swiglu = self.margs.swiglu
+        md.xielu = self.margs.xielu
+        md.qk_layernorm = self.margs.qk_layernorm
         md.previous_tensor_parallel_size = self.margs.tensor_model_parallel_size
         md.previous_pipeline_parallel_size = self.margs.pipeline_model_parallel_size
         md.true_vocab_size = true_vocab_size
@@ -487,4 +545,3 @@ class MegatronCheckpointLoaderBase:
     def send_model_over_queue(self):
         """Creates model schema and sends the model over the queue"""
         raise NotImplementedError
-

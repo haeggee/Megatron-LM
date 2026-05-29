@@ -5,7 +5,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from math import ceil
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy
 import torch
@@ -21,6 +21,9 @@ from megatron.core.utils import log_single_rank
 logger = logging.getLogger(__name__)
 
 
+_GOLDFISH_TOKEN_ID = -2
+_HASH_TABLE_SIZE = 1_000_003
+
 @dataclass
 class GPTDatasetConfig(BlendedMegatronDatasetConfig):
     """Configuration object for Megatron Core GPT datasets"""
@@ -33,6 +36,15 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
 
     eod_mask_loss: Optional[bool] = None
     """Option to enable the EOD mask loss"""
+
+    goldfish_loss: bool = None
+    """Option to enable the goldfish loss"""
+
+    goldfish_k: int = None
+    """Frequency of ignoring tokens for goldfish loss: 1 / k"""
+
+    goldfish_h: int = None
+    """Context width for hashing, everytime the same sequence of h tokens appears, the (h+1)th token is ingored"""
 
     create_attention_mask: bool = True
     """Option to enable the attention masks generation. Can be disabled if attention kernel
@@ -76,6 +88,21 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
     context_parallel_size: Optional[int] = None
     """The size of the context parallel group. Needed for padding in packed sequences."""
 
+    vision_weight: float = 1.0
+    """Loss weight for vision tokens (between img_start and img_end). Default 1.0 (no change)."""
+
+    audio_weight: float = 1.0
+    """Loss weight for audio tokens. Default 1.0 (no change)."""
+
+    modality_weights: Optional[Dict[str, float]] = None
+    """Per-modality loss weights keyed by modality name (e.g., vision/audio)."""
+
+    loss_mask_token_ids: Optional[List[int]] = None
+    """Token IDs whose predictions should be masked from the loss (loss_mask=0).
+    Useful for task-control tokens (e.g. <|stt_transcribe|>, <|tts_continue|>) that
+    should condition the model but never be predicted."""
+
+
     def __post_init__(self) -> None:
         """Do asserts and set fields post init"""
         super().__post_init__()
@@ -85,6 +112,7 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
         assert self.reset_position_ids is not None
         assert self.reset_attention_mask is not None
         assert self.eod_mask_loss is not None
+        assert self.goldfish_loss is not None
 
         self.token_dtype_code = (
             None
@@ -96,6 +124,13 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
                 self.token_dtype_code is not None
             ), "Tokenizer vocab size is not set, deactivate --per-dataset-sequences-path or \
             fix the tokenizer."
+
+        if self.modality_weights is None:
+            self.modality_weights = {}
+        if "vision" not in self.modality_weights and self.vision_weight != 1.0:
+            self.modality_weights["vision"] = self.vision_weight
+        if "audio" not in self.modality_weights and self.audio_weight != 1.0:
+            self.modality_weights["audio"] = self.audio_weight
 
 
 class GPTDataset(MegatronDataset):
@@ -128,21 +163,111 @@ class GPTDataset(MegatronDataset):
         super().__init__(
             indexed_dataset, dataset_path, indexed_indices, num_samples, index_split, config
         )
-        self.masks_and_position_ids_are_cacheable = not any(
-            [
-                self.config.reset_position_ids,
-                self.config.reset_attention_mask,
-                self.config.eod_mask_loss,
-            ]
-        )
+
         self.masks_and_position_ids_are_cached = False
         self.cached_attention_mask = None
         self.cached_loss_mask = None
         self.cached_position_ids = None
 
+        # late import to prevent circular import
+        from megatron.training import get_args
+        args = get_args()
+
+        # Build weighted modality specs as (name, start_id, end_id, weight).
+        self._weighted_modality_specs: List[Tuple[str, int, int, float]] = []
+        modality_weights = self.config.modality_weights or {}
+        used_modalities = set()
+        unresolved_weighted_modalities = []
+
+        omnimodal_config = getattr(args, "omnimodal_config", None)
+        if omnimodal_config is not None:
+            for modality in omnimodal_config.get("modalities", []):
+                name = modality.get("name")
+                if not name:
+                    continue
+                used_modalities.add(name)
+                weight = modality_weights.get(name, 1.0)
+                offset = modality.get("offset")
+                vocab_size = modality.get("vocab_size")
+                if weight == 1.0:
+                    continue
+                if offset is None or vocab_size is None:
+                    unresolved_weighted_modalities.append(name)
+                    continue
+                start = int(offset)
+                end = start + int(vocab_size)
+                self._weighted_modality_specs.append((name, start, end, float(weight)))
+
+        # Fallback for modality names not listed in omnimodal_config but exposed on args.
+        for name, weight in modality_weights.items():
+            if name in used_modalities or weight == 1.0:
+                continue
+            offset = getattr(args, f"{name}_token_offset", None)
+            vocab_size = getattr(args, f"{name}_vocab_size", None)
+            if offset is None or vocab_size is None:
+                unresolved_weighted_modalities.append(name)
+                continue
+            start = int(offset)
+            end = start + int(vocab_size)
+            self._weighted_modality_specs.append((name, start, end, float(weight)))
+
+        if unresolved_weighted_modalities:
+            missing = ", ".join(sorted(set(unresolved_weighted_modalities)))
+            raise ValueError(
+                "Configured non-default modality weights without token range metadata for: "
+                f"{missing}. Ensure tokenizer omnimodal_config (or args.*_token_offset/args.*_vocab_size) "
+                "contains these modalities."
+            )
+
+        for name, start, end, weight in self._weighted_modality_specs:
+            log_single_rank(
+                logger,
+                logging.INFO,
+                f"{name.upper()} ID RANGE: {start} {end} apply weight {weight}",
+            )
+
+        # Token IDs to mask from loss (e.g. task-control tokens like <|stt_transcribe|>).
+        self._loss_mask_token_ids = self.config.loss_mask_token_ids or []
+        if self._loss_mask_token_ids:
+            log_single_rank(
+                logger,
+                logging.INFO,
+                f"Loss-masked token IDs: {self._loss_mask_token_ids}",
+            )
+
+        self.masks_and_position_ids_are_cacheable = not any(
+            [
+                self.config.reset_position_ids,
+                self.config.reset_attention_mask,
+                self.config.eod_mask_loss,
+                self.config.goldfish_loss,
+                bool(self._weighted_modality_specs),
+                bool(self._loss_mask_token_ids),
+            ]
+        )
+
+        # Optional contiguous range of omni special tokens to skip in goldfish masking.
+        self._goldfish_exemption_start = None
+        self._goldfish_exemption_end = None
+
         (self.document_index, self.sample_index, self.shuffle_index) = (
             self._build_document_sample_shuffle_indices()
         )
+
+        if self.config.goldfish_loss:
+            self._goldfish_k = self.config.goldfish_k
+            self._goldfish_h = self.config.goldfish_h
+            self._goldfish_token_id = _GOLDFISH_TOKEN_ID
+            self._goldfish_hash_table = None
+            exempt = getattr(self.config.tokenizer, "goldfish_exemption_range", None)
+            if exempt:
+                self._goldfish_exemption_start, self._goldfish_exemption_end = exempt
+                log_single_rank(
+                    logger,
+                    logging.INFO,
+                    "Goldfish exemption range enabled: "
+                    f"[{self._goldfish_exemption_start}, {self._goldfish_exemption_end})",
+                )
 
     @staticmethod
     def numel_low_level_dataset(low_level_dataset: IndexedDataset) -> int:
@@ -274,6 +399,38 @@ class GPTDataset(MegatronDataset):
         # For padded sequences, ensure the embedding layer can map the token ID
         tokens[tokens == self._pad_token_id] = 0
         labels[labels == self._pad_token_id] = 0
+
+        # Hard-mask task-control tokens (e.g. <|stt_transcribe|>, <|tts_continue|>).
+        # Applied early: downstream steps (goldfish, modality weights, weight decay)
+        # all guard with `loss_mask > 0` so they cannot re-enable these.
+        for tid in self._loss_mask_token_ids:
+            loss_mask[labels == tid] = 0.0
+
+        # Goldfish loss masking
+        if self.config.goldfish_loss:
+
+            # Init the hash table once only
+            if self._goldfish_hash_table is None:
+                self._goldfish_hash_table = _create_hash_table(device=labels.device)
+
+            # Apply the goldfish mask
+            goldfish_labels = apply_goldfish(
+                labels,
+                goldfish_token_id=self._goldfish_token_id,
+                k=self._goldfish_k,
+                goldfish_hash_table=self._goldfish_hash_table,
+                goldfish_context_width=self._goldfish_h,
+                exemption_start=self._goldfish_exemption_start,
+                exemption_end=self._goldfish_exemption_end,
+            )
+
+            loss_mask[goldfish_labels == self._goldfish_token_id] = 0.0
+
+        # Modality token loss masking.
+        for _, start, end, weight in self._weighted_modality_specs:
+            modality_mask = (labels >= start) & (labels < end)
+            active_modality_mask = modality_mask & (loss_mask > 0)
+            loss_mask[active_modality_mask] = weight
 
         # Batch padding sequence so we mask the loss
         if idx is None:
@@ -778,6 +935,70 @@ def _get_ltor_masks_and_position_ids(
         attention_mask = attention_mask < 0.5
 
     return attention_mask, loss_mask, position_ids
+
+
+def _create_hash_table(device):
+    """Goldfish Loss Pre-computed Hash Table"""
+    rng = torch.Generator(device=device)
+    rng.manual_seed(2971215073)
+    hash_table = torch.rand(_HASH_TABLE_SIZE, device=device, generator=rng)
+
+    return hash_table
+
+
+def apply_goldfish(
+    labels: torch.Tensor,
+    goldfish_token_id: int,
+    k: int,
+    goldfish_hash_table: torch.Tensor,
+    goldfish_context_width: int=4,
+    exemption_start: Optional[int] = None,
+    exemption_end: Optional[int] = None,
+):
+    """
+    Apply a mask to a tensor to skip every k-th token, using only the 'hash-table' strategy from the original Goldfish Loss implementation.
+    This is utilized within GPTDataset.__getitem__.
+
+    Original implementation: https://github.com/ahans30/goldfish-loss
+
+
+    Args:
+        labels (torch.Tensor):          The label tensor to apply the goldfish mask to.
+        goldfish_token_id (int):        The token ID to use for the goldfish mask.
+        k (int):                        The frequency with which tokens are ignored.
+        goldfish_context_width (int):   Context width for hashing.
+    """
+    assert labels.ndim == 1, "Expected 1D tensor as used within GPTDataset.__getitem__"
+    masked_labels = labels.clone()
+
+    hashed_keys = goldfish_hash_table[
+        labels.unfold(0, goldfish_context_width, 1).prod(dim=-1) % _HASH_TABLE_SIZE
+    ]
+
+    dropped_token_indices = (hashed_keys < 1 / k)
+
+    if exemption_start is not None:
+        # Exemption is in token-id space; cancel drops where labels are in that range.
+        exempt_mask = (labels >= exemption_start) & (labels < exemption_end)
+        exempt_tail = exempt_mask[goldfish_context_width - 1 :]
+        if os.getenv("GOLDFISH_EXEMPT_LOG") == "1":
+            exempt_dropped = (dropped_token_indices & exempt_tail).nonzero(as_tuple=True)[0]
+            if exempt_dropped.numel() > 0:
+                label_idx = exempt_dropped + (goldfish_context_width - 1)
+                sample = torch.stack(
+                    (label_idx[:5], labels[label_idx[:5]]), dim=1
+                ).cpu().tolist()
+                log_single_rank(
+                    logger,
+                    logging.INFO,
+                    f"Goldfish exemption cancels {exempt_dropped.numel()} drops; "
+                    f"sample (idx, token_id){sample}",
+                )
+        dropped_token_indices &= ~exempt_tail
+
+    masked_labels[goldfish_context_width-1:][dropped_token_indices] = goldfish_token_id
+
+    return masked_labels
 
 
 class MockGPTLowLevelDataset:

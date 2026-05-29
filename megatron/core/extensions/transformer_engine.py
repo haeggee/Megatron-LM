@@ -664,6 +664,11 @@ class TENorm:
                 norm_module = TEFusedResidualRMSNorm
             else:
                 norm_module = te.pytorch.RMSNorm
+        elif config.normalization == "SeeDNorm":
+            raise NotImplementedError(
+                "Transformer-Engine backend does not support SeeDNorm. "
+                "Use --transformer-impl local to enable SeeDNorm."
+            )
         else:
             raise Exception("Only LayerNorm and RMSNorm are currently supported")
 

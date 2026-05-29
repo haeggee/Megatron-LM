@@ -218,11 +218,18 @@ class TransformerConfig(ModelParallelConfig):
     - An integer N: Represents a (N-1):1 ratio, one full attention layer after (N-1) SWA layers.
     - A list that defines a custom pattern, e.g.: [1,1,1,1,0,0,0,0], where 1 represents SWA. """
 
-    normalization: Literal['LayerNorm', 'RMSNorm', 'DyT', 'Derf'] = "LayerNorm"
+    normalization: Literal['LayerNorm', 'RMSNorm', 'DyT', 'Derf', 'SeeDNorm'] = "LayerNorm"
     """Which norm to use for normalization layers. `LayerNorm` / `RMSNorm` are the standard
     reduction-based norms; `DyT` (Dynamic Tanh, Zhu et al. 2025) and `Derf` (Dynamic erf,
     Chen et al. 2025) are element-wise drop-in replacements (no reduction). DyT/Derf force
-    the TE attention QKV and dense MLP fc1 to unfuse from their layer-norm-linear path."""
+    the TE attention QKV and dense MLP fc1 to unfuse from their layer-norm-linear path.
+    `SeeDNorm` is a scaled-norm variant supported on the torch (local) backend only."""
+
+    seednorm_init: Optional[float] = 1.0
+    """Initialization value for SeeDNorm normalization layers."""
+
+    seednorm_activation: Optional[str] = "tanh"
+    """Activation function for SeeDNorm normalization layers."""
 
     qk_layernorm: bool = False
     """Whether to apply `normalization` type of normalization to the query and key embeddings."""
@@ -1099,6 +1106,9 @@ class TransformerConfig(ModelParallelConfig):
 
     hetereogenous_dist_checkpoint: bool = False
     """Whether to use heterogenous layers in distributed checkpoint."""
+
+    differential_attention: bool = False
+    """Whether to use differential attention."""
 
     ####################
     # Quantization
@@ -2212,8 +2222,7 @@ class TransformerConfig(ModelParallelConfig):
                         ) or "moe" not in self.recompute_modules, (
                             "moe_input_jitter_eps is not supported with graphed moe recomputation."
                         )
-
-        if self.moe_token_dispatcher_type in ["allgather"]:
+        if self.moe_token_dispatcher_type in ["allgather"] and self.num_moe_experts != None:
             if self.variable_seq_lengths is True:
                 raise ValueError(
                     f"Token dispatcher type: {self.moe_token_dispatcher_type} does not support "

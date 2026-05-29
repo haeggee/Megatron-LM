@@ -52,10 +52,7 @@ class DistributedSignalHandler:
         self.sig = sig
 
     def signals_received(self):
-        all_received = all_gather_item(
-            self._signal_received, dtype=torch.int32
-        )
-        return all_received
+        return self._signal_received
 
     def __enter__(self):
         self._signal_received = False

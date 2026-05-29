@@ -514,6 +514,9 @@ def round_up_to_nearest_multiple(value: int, multiple: int) -> int:
 def get_tensor_model_parallel_group_if_none(tp_group, is_expert=False, check_initialized=True):
     """Issue a deprecation warning if tp_group is None and return the default tp group."""
     # TODO(zijiey): remove this function later.
+    if tp_group is not None:
+        return tp_group
+
     if not torch.distributed.is_initialized():
         return None
 
@@ -549,8 +552,11 @@ def get_pg_size(group=None):
     Returns:
         int: World size (1 if distributed not initialized or group is None, else group.size())
     """
-    if not torch.distributed.is_initialized() or group is None:
-        return 1
+    if group is None:
+        if not torch.distributed.is_initialized():
+            return 1
+        return torch.distributed.get_world_size()
+
     return group.size()
 
 
@@ -563,8 +569,10 @@ def get_pg_rank(group=None):
     Returns:
         int: Rank (0 if distributed not initialized or group is None, else group.rank())
     """
-    if not torch.distributed.is_initialized() or group is None:
-        return 0
+    if group is None:
+        if not torch.distributed.is_initialized():
+            return 0
+        return torch.distributed.get_rank()
     return group.rank()
 
 

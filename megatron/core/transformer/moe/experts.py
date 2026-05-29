@@ -11,9 +11,15 @@ from typing import Optional, Protocol, Tuple
 import torch
 import torch.nn.functional as F
 
-from megatron.core import tensor_parallel
-from megatron.core.activations import squared_relu
-from megatron.core.dist_checkpointing.mapping import ShardedStateDict
+from megatron.core import parallel_state, tensor_parallel
+from megatron.core.activations import squared_relu, XIELU, XSSSLUR2
+from megatron.core.dist_checkpointing import ShardedTensor
+from megatron.core.dist_checkpointing.mapping import (
+    LocalNonpersistentObject,
+    ReplicaId,
+    ShardedStateDict,
+    ShardedTensorFactory,
+)
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
 from megatron.core.extensions.transformer_engine import HAVE_TE
 from megatron.core.fusions.fused_bias_geglu import quick_gelu, weighted_bias_quick_geglu_impl
@@ -198,7 +204,12 @@ class TEGroupedMLP(MegatronModule):
         if self.config.use_te_activation_func and not (submodules.activation_func is None):
             self.activation_func = apply_module(submodules.activation_func(config=self.config))
         else:
-            self.activation_func = self.config.activation_func
+            if self.config.activation_func == XIELU:
+                self.activation_func = XIELU(config=self.config)
+            elif self.config.activation_func == XSSSLUR2:
+                self.activation_func = XSSSLUR2(config=self.config)
+            else:
+                self.activation_func = self.config.activation_func
 
         self.linear_fc2 = submodules.linear_fc2(
             self.num_local_experts,

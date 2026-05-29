@@ -36,6 +36,8 @@ except ImportError:
 
 from megatron.core.optimizer.cpu_offloading import HybridDeviceOptimizer
 
+from .ademamix import AdEMAMix
+
 from .. import tensor_parallel
 from ..config_logger import has_config_logger_enabled, log_config_to_disk
 from ..dist_checkpointing import ShardedTensor
@@ -686,13 +688,17 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             assert self.ddp_config == model_chunk.ddp_config
         self.distributed_optimizer_instance_id = distributed_optimizer_instance_id
 
-        assert (
-            isinstance(optimizer, (Adam, torch.optim.AdamW, HybridDeviceOptimizer))
-            or optimizer is None
-        ), (
-            "Only Adam and HybridDeviceOptimizer currently supported, "
-            "due to checkpointing requirements."
-        )
+        if isinstance(optimizer, (Adam, torch.optim.AdamW, HybridDeviceOptimizer)):
+            self.optimizer_name = 'adam'
+            self.optimizer_keys = ("param", "exp_avg", "exp_avg_sq")
+        elif isinstance(optimizer, AdEMAMix):
+            HAVE_APEX_OR_TE = True # NOTE(tj.solergibert) AdEMAMix has the same signature as Apex & TE Fused Adam optimizer
+            self.optimizer_name = 'ademamix'
+            self.optimizer_keys = ("param", "exp_avg_slow", "exp_avg_sq")
+            if config.adam_beta1 != 0.0:
+                self.optimizer_keys = ("param", "exp_avg_slow", "exp_avg_fast", "exp_avg_sq")
+        else:
+            raise Exception(f"Unrecognized optimizer {type(optimizer)}, only Adam, AdEMAMix and HybridDeviceOptimizer are supported for now.")
 
         # when freezing sub-models we have no real optimizer
         # but still need a stub DistributedOptimizer class
@@ -969,12 +975,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                                 (numel,), dtype=dtype, device=torch.cuda.current_device()
                             )
 
-                            # For precision_aware_optimizer, the empty tensors should also be
-                            #  initialized with the correct dtype.
-                            tensors = {
-                                "exp_avg": init_shard(self.config.exp_avg_dtype),
-                                "exp_avg_sq": init_shard(self.config.exp_avg_sq_dtype),
-                            }
+                            if self.optimizer_name == 'adam':
+                                tensors = {"exp_avg": init_shard(self.config.exp_avg_dtype), "exp_avg_sq": init_shard(self.config.exp_avg_sq_dtype)}
+                            elif self.optimizer_name == 'ademamix':
+                                tensors = {"exp_avg_slow": init_shard(self.config.exp_avg_dtype), "exp_avg_sq": init_shard(self.config.exp_avg_sq_dtype)}
+                                if "exp_avg_fast" in self.optimizer_keys:
+                                    tensors["exp_avg_fast"] =  init_shard(self.config.exp_avg_dtype)
                             if self.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8:
                                 if self.config.store_param_remainders and self.config.bf16:
                                     tensors["master_param"] = init_shard(torch.int16)
@@ -1222,7 +1228,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         key: torch.zeros(
                             (buffer_numel_unpadded,), dtype=torch.float32, device="cpu"
                         )
-                        for key in ("param", "exp_avg", "exp_avg_sq")
+                        for key in self.optimizer_keys
                     }
                     world_tensors["numel_unpadded"] = buffer_numel_unpadded
 
@@ -1242,70 +1248,70 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         )
                         assert gbuf_world_numel_unpadded <= gbuf_world_numel
 
-                        local_shards = {
-                            key: torch.zeros((gbuf_local_numel,), dtype=torch.float32, device="cpu")
-                            for key in ("param", "exp_avg", "exp_avg_sq")
-                        }
+                    local_shards = {
+                        key: torch.zeros((gbuf_local_numel,), dtype=torch.float32, device="cpu")
+                        for key in self.optimizer_keys
+                    }
 
-                        # Build contiguous DP rank shards (for param + optim states).
-                        for model_param, param_range_map in gbuf_range_map["param_map"].items():
-                            tensors = self._get_main_param_and_optimizer_states(model_param)
+                    # Build contiguous DP rank shards (for param + optim states).
+                    for model_param, param_range_map in gbuf_range_map["param_map"].items():
+                        tensors = self._get_main_param_and_optimizer_states(model_param)
 
-                            # Copy states into contiguous shard.
-                            gbuf_local_start = param_range_map["gbuf_local"].start
-                            gbuf_local_end = param_range_map["gbuf_local"].end
-                            for key in local_shards:
-                                local_shards[key][gbuf_local_start:gbuf_local_end].data.copy_(
-                                    tensors[key].detach().cpu()
+                        # Copy states into contiguous shard.
+                        gbuf_local_start = param_range_map["gbuf_local"].start
+                        gbuf_local_end = param_range_map["gbuf_local"].end
+                        for key in local_shards:
+                            local_shards[key][gbuf_local_start:gbuf_local_end].data.copy_(
+                                tensors[key].detach().cpu()
+                            )
+
+                    # Gather contiguous shards on DP rank 0.
+                    for key, send_tensor in local_shards.items():
+
+                        # Gather tensor list.
+                        if data_parallel_rank == 0 or return_on_all_ranks:
+                            device = "cpu" if use_gloo_comm else torch.cuda.current_device()
+                            recv_tensors = [
+                                torch.zeros(
+                                    (gbuf_local_numel,), dtype=torch.float32, device=device
                                 )
+                                for _ in range(data_parallel_world_size)
+                            ]
+                        else:
+                            recv_tensors = None
 
-                        # Gather contiguous shards on DP rank 0.
-                        for key, send_tensor in local_shards.items():
+                        # Gather.
+                        if not use_gloo_comm:
+                            send_tensor = send_tensor.cuda()
+                        if return_on_all_ranks:
+                            torch.distributed.all_gather(
+                                recv_tensors, send_tensor, data_parallel_group
+                            )
+                        else:
+                            torch.distributed.gather(
+                                send_tensor,
+                                recv_tensors,
+                                data_parallel_global_ranks[0],
+                                data_parallel_group,
+                            )
 
-                            # Gather tensor list.
-                            if data_parallel_rank == 0 or return_on_all_ranks:
-                                device = "cpu" if use_gloo_comm else torch.cuda.current_device()
-                                recv_tensors = [
-                                    torch.zeros(
-                                        (gbuf_local_numel,), dtype=torch.float32, device=device
-                                    )
-                                    for _ in range(data_parallel_world_size)
-                                ]
-                            else:
-                                recv_tensors = None
+                        send_tensor = None  # allow mem deallocation
 
-                            # Gather.
+                        # Concatenate.
+                        if data_parallel_rank == 0 or return_on_all_ranks:
                             if not use_gloo_comm:
-                                send_tensor = send_tensor.cuda()
-                            if return_on_all_ranks:
-                                torch.distributed.all_gather(
-                                    recv_tensors, send_tensor, data_parallel_group
-                                )
-                            else:
-                                torch.distributed.gather(
-                                    send_tensor,
-                                    recv_tensors,
-                                    data_parallel_global_ranks[0],
-                                    data_parallel_group,
-                                )
+                                recv_tensors = [t.cpu() for t in recv_tensors]
+                            recv_tensors_concatenated = torch.cat(recv_tensors)
+                            # Copy this bucket's collected all-gather tensors into the right
+                            # place in the tensor for the buffer. The tensor for the buffer
+                            # gets rid of the padding between buckets.
+                            start = offset_in_world_tensors
+                            end = offset_in_world_tensors + gbuf_world_numel_unpadded
+                            world_tensors[key][start:end].copy_(
+                                recv_tensors_concatenated[:gbuf_world_numel_unpadded]
+                            )
 
-                            send_tensor = None  # allow mem deallocation
-
-                            # Concatenate.
-                            if data_parallel_rank == 0 or return_on_all_ranks:
-                                if not use_gloo_comm:
-                                    recv_tensors = [t.cpu() for t in recv_tensors]
-                                recv_tensors_concatenated = torch.cat(recv_tensors)
-                                # Copy this bucket's collected all-gather tensors into the right
-                                # place in the tensor for the buffer. The tensor for the buffer
-                                # gets rid of the padding between buckets.
-                                start = offset_in_world_tensors
-                                end = offset_in_world_tensors + gbuf_world_numel_unpadded
-                                world_tensors[key][start:end].copy_(
-                                    recv_tensors_concatenated[:gbuf_world_numel_unpadded]
-                                )
-
-                        offset_in_world_tensors += gbuf_world_numel_unpadded
+                    offset_in_world_tensors += gbuf_world_numel_unpadded
 
                 # Collect world state.
                 dtype_state[dtype] = world_tensors
@@ -1994,6 +2000,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     for src_tensors, (model_param, param_range_map) in zip(
                         bucket_state, gbuf_range_map["param_map"].items()
                     ):
+                        # Remove non-tensor metadata before restoring optimizer states.
+                        src_tensors.pop('padding', None)
                         # Main param & optimizer states.
                         self._set_main_param_and_optimizer_states(model_param, src_tensors)
 
@@ -2076,7 +2084,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         t.numel() for t in state_dict[gbuf_idx][torch.float32]["param"]
                     ]
                     assert sum(model_numels) == sum(checkpoint_numels)
-                for key in ("param", "exp_avg", "exp_avg_sq"):
+                for key in self.optimizer_keys:
                     legacy_world_tensors = self._update_legacy_world_tensors(
                         state_dict[gbuf_idx][torch.float32][key],
                         [
@@ -2197,7 +2205,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         f"({buffer_numel_unpadded}) and checkpoint ({checkpoint_numel_unpadded})"
                     )
                 recv_tensors = {}
-                for key in ("param", "exp_avg", "exp_avg_sq"):
+                for key in self.optimizer_keys:
                     offset_in_world_tensors = 0
                     for bucket_idx, gbuf_range_map in enumerate(gbuf_range_map_for_all_buckets):
                         # Compute local DP contiguous shard's size.
@@ -2410,7 +2418,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
             # Split the target buffer into two separate buffers.
             fp8_state_dict, non_fp8_state_dict = {}, {}
-            for key in ['param', 'exp_avg', 'exp_avg_sq']:
+            for key in self.optimizer_keys:
                 tensor = state_dict[non_fp8_gbuf_idx][non_fp8_param_and_grad_dtype][key]
                 fp8_tensor = torch.empty([fp8_offsets[-1]], dtype=tensor.dtype)
                 non_fp8_tensor = torch.empty([non_fp8_offsets[-1]], dtype=tensor.dtype)

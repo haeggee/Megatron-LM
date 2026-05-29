@@ -30,6 +30,7 @@ from megatron.core.dist_checkpointing.strategies.fully_parallel import (
     FullyParallelLoadStrategyWrapper,
     FullyParallelSaveStrategyWrapper,
 )
+from megatron.core.dist_checkpointing.core import OldXieluException
 from megatron.core.dist_checkpointing.strategies.torch import (
     TorchDistLoadShardedStrategy,
     TorchDistSaveShardedStrategy,
@@ -37,7 +38,8 @@ from megatron.core.dist_checkpointing.strategies.torch import (
 )
 from megatron.core.msc_utils import MultiStorageClientFeature, open_file
 from megatron.core.num_microbatches_calculator import update_num_microbatches
-from megatron.core.optimizer import DistributedOptimizer
+from megatron.core.utils import get_pg_rank, get_pg_size
+from megatron.core.optimizer import DistributedOptimizer, get_megatron_optimizer
 from megatron.core.rerun_state_machine import get_rerun_state_machine
 from megatron.core.utils import get_pg_rank, get_pg_size
 
@@ -619,6 +621,7 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floati
         )
 
         state_dict['num_floating_point_operations_so_far'] = num_floating_point_operations_so_far
+        state_dict['tokens_so_far'] = args.consumed_train_samples * args.seq_length
         if ckpt_type == CheckpointType.GLOBAL and ckpt_format == "torch_dist":
             if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
                 # TODO Handle non-empty directories (e.g., after a crash during saving).
@@ -1294,15 +1297,31 @@ def _load_base_checkpoint(
     non_persistent_iteration = _get_non_persistent_iteration(
         non_persistent_global_dir, args, checkpointing_context
     )
-    iteration, release = -1, False
-    tracker_filename = 'because load directory is not defined'
-    if load_dir is not None:
-        tracker_filename = get_checkpoint_tracker_filename(load_dir)
-        if isfile(tracker_filename):
-            iteration, release = read_metadata(tracker_filename)
+    if args.ckpt_step is None:
+        iteration, release = -1, False
+        tracker_filename = 'because load directory is not defined'
+        if load_dir is not None:
+            tracker_filename = get_checkpoint_tracker_filename(load_dir)
+            if isfile(tracker_filename):
+                iteration, release = read_metadata(tracker_filename)
 
-    # Allow user to specify the loaded iteration.
-    if getattr(args, "ckpt_step", None):
+        # Allow user to specify the loaded iteration.
+        if getattr(args, "ckpt_step", None):
+            iteration = args.ckpt_step
+
+        if non_persistent_iteration != -1:  # there is a non-persistent checkpoint
+            if non_persistent_iteration >= iteration:
+                return _load_non_persistent_base_checkpoint(
+                    non_persistent_global_dir,
+                    args,
+                    rank0,
+                    sharded_state_dict,
+                    non_persistent_iteration,
+                    checkpointing_context,
+                )
+            else:
+                print_rank_0('WARNING: non-persistent checkpoints are older than persistent checkpoint')
+    else:
         iteration = args.ckpt_step
 
     # Record the iteration loaded (stored separately from args to avoid
@@ -1365,7 +1384,7 @@ def _load_base_checkpoint(
         else:
             checkpoint_name = get_checkpoint_name(load_dir, iteration, release, return_base_dir=False)
         try:
-            state_dict = torch.load(checkpoint_name, map_location='cpu')
+            state_dict = torch.load(checkpoint_name, map_location='cpu', weights_only=False)
         except ModuleNotFoundError:
             from megatron.legacy.fp16_deprecated import loss_scaler
 
@@ -1522,7 +1541,7 @@ def load_args_from_checkpoint(
     # Model args.
     _set_arg('num_layers')
     _set_arg('hidden_size')
-    _set_arg('ffn_hidden_size')
+    _set_arg('ffn_hidden_size', force=True)
     _set_arg('seq_length')
     _set_arg('num_attention_heads')
     _set_arg('num_query_groups', force=True)
@@ -1535,10 +1554,14 @@ def load_args_from_checkpoint(
     _set_arg('rotary_base', force=True)
     _set_arg('rotary_percent', force=True)
     _set_arg('rotary_interleaved', force=True)
+    _set_arg('use_rope_scaling', force=True)
+    _set_arg('rope_scaling_factor', force=True)
     _set_arg('add_bias_linear', force=True)
     _set_arg('add_qkv_bias', force=True)
     _set_arg('squared_relu', force=True)
     _set_arg('swiglu', force=True)
+    _set_arg('xielu', force=True)
+    _set_arg('qk_layernorm', force=True)
     _set_arg('untie_embeddings_and_output_weights', force=True)
     _set_arg('apply_layernorm_1p', force=True)
     _set_arg('normalization', force=True)
@@ -1551,6 +1574,9 @@ def load_args_from_checkpoint(
     _set_arg('mtp_num_layers', force=True)
     _set_arg('mtp_use_repeated_layer', force=True)
 
+    _set_arg('norm_epsilon', force=True)
+
+    _set_arg('hybrid_override_pattern', force=True)
     _set_arg('spec', force=True)
 
     _set_arg('num_experts', force=True)
@@ -1843,15 +1869,28 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
         state_dict["_model"] = model
         load_kwargs["sharded_state_dict"] = state_dict
 
-    state_dict, checkpoint_name, release, ckpt_type = _load_base_checkpoint(
-        load_dir, args, rank0=False, checkpointing_context=checkpointing_context,
-        **load_kwargs
-    )
+    if args.fix_old_xielu:
+       fix_xielu_weights(load_kwargs["sharded_state_dict"])
+
+    try:
+        state_dict, checkpoint_name, release, ckpt_type = _load_base_checkpoint(
+            load_dir, args, rank0=False, checkpointing_context=checkpointing_context,
+            **load_kwargs
+        )
+    except BaseException as ex:
+        if len(ex.args) < 2 or len(ex.args[1]) == 0 or len(ex.args[1][0]) == 0 or not isinstance(ex.args[1][0][0], OldXieluException):
+            # We only want to handle OldXieluException here so we just raise any other exception directly.
+            raise ex
+        fix_xielu_weights(load_kwargs["sharded_state_dict"])
+        state_dict, checkpoint_name, release, ckpt_type = _load_base_checkpoint(
+            load_dir, args, rank0=False, checkpointing_context=checkpointing_context,
+            **load_kwargs
+        )
 
     # Checkpoint not loaded.
     if state_dict is None:
-        # Iteration and num_floating_point_operations_so_far default to 0.
-        return 0, 0
+        # Iteration, num_floating_point_operations_so_far and tokens_so_far default to 0.
+        return 0, 0, 0
 
     # Set checkpoint version.
     set_checkpoint_version(state_dict.get('checkpoint_version', 0))
@@ -1875,6 +1914,7 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
                              'iteration from checkpoint {}, exiting'.format(checkpoint_name))
                 sys.exit()
     num_floating_point_operations_so_far = state_dict.get('num_floating_point_operations_so_far', 0)
+    tokens_so_far = state_dict.get('tokens_so_far', 0)
 
     # Check arguments.
     if 'args' in state_dict and not args.finetune:
@@ -1890,26 +1930,63 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
     else:
         print_rank_0('could not find arguments in the checkpoint ...')
 
-    def load_model_state_dict(module, state_dict, strict: bool):
+    def _report_load_mismatches(model_name, load_return):
+        if load_return is None:
+            return
+        missing_keys = getattr(load_return, "missing_keys", ())
+        unexpected_keys = getattr(load_return, "unexpected_keys", ())
+        if not missing_keys and not unexpected_keys:
+            return
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        logger.warning(
+            "Checkpoint load mismatch on rank %s %s: missing_keys=%d %s; "
+            "unexpected_keys=%d %s. Missing keys remain initialized.",
+            rank,
+            model_name,
+            len(missing_keys),
+            list(missing_keys)[:20],
+            len(unexpected_keys),
+            list(unexpected_keys)[:20],
+        )
+
+    def load_model_state_dict(module, state_dict, strict: bool, model_name: str):
         """Helper function to load state dict with fallback for missing extra states."""
         try:
-            module.load_state_dict(state_dict, strict=strict)
+            load_return = module.load_state_dict(state_dict, strict=strict)
+            _report_load_mismatches(model_name, load_return)
         except Exception as e:
             if strict:
                 # Fallback support for backward compatibility breaking changes in TransformerEngine
                 load_return = module.load_state_dict(state_dict, strict=False)
                 print(f"load_return: {load_return}")
+                _report_load_mismatches(model_name, load_return)
     # Model.
     if not skip_load_to_model_and_opt:
         if len(ddp_model) == 1:
-            load_model_state_dict(ddp_model[0], state_dict['model'], strict)
+            load_model_state_dict(ddp_model[0], state_dict['model'], strict, 'model')
         else:
+            has_vpp_model_keys = any('model%d' % i in state_dict for i in range(len(ddp_model)))
+            if 'model' in state_dict and not has_vpp_model_keys:
+                raise RuntimeError(
+                    "Checkpoint contains a single non-VPP 'model' state, but this run built "
+                    f"{len(ddp_model)} virtual pipeline model chunks. Convert or resave the "
+                    "checkpoint with the same --num-layers-per-virtual-pipeline-stage setting "
+                    "instead of loading it into a VPP run."
+                )
             for i in range(len(ddp_model)):
                 # If there is no corresponding model in the state_dict, it will be ignored.
                 # It means that this is an empty stage.
                 if 'model%d' % i not in state_dict:
+                    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+                    logger.warning(
+                        "Checkpoint load mismatch on rank %s model%d: checkpoint key missing; "
+                        "this model chunk remains initialized.",
+                        rank,
+                        i,
+                    )
                     continue
-                load_model_state_dict(ddp_model[i], state_dict['model%d' % i], strict)
+                load_model_state_dict(ddp_model[i], state_dict['model%d' % i], strict, f'model{i}')
+
     # Fix up query/key/value matrix ordering if needed.
     checkpoint_version = get_checkpoint_version()
     print_rank_0(f' checkpoint version {checkpoint_version}')
@@ -2137,3 +2214,32 @@ def load_biencoder_checkpoint(model, only_query_model=False,
         print(' successfully loaded {}'.format(checkpoint_name))
 
     return model
+
+
+def fix_xielu_weights(state_dict: dict[str, torch.Tensor]):
+    def filterfn(key: str) -> bool:
+            return "mlp.activation_func.alpha" in key
+
+    print("Old xielu weights detected" + " with optimizer!" if "optimizer" in state_dict else "!")
+    shape = state_dict["model"]["decoder.layers.0.mlp.activation_func.alpha_p"].global_shape
+    assert len(shape) == 2 and shape[1] == 1
+    new_shape = (shape[0],)
+    for key in filter(filterfn, state_dict["model"]):
+        print(f"Updating model/{key}")
+        sh_ten = state_dict["model"][key]
+        sh_ten.global_shape = (sh_ten.global_shape[0],)
+        sh_ten.global_offset = (sh_ten.global_offset[0],)
+        sh_ten.prepend_axis_num = 0
+        sh_ten.axis_fragmentations = (sh_ten.axis_fragmentations[0],)
+
+    if "optimizer" in state_dict:
+        for i in state_dict["optimizer"]["param_state"]:
+            for k in state_dict["optimizer"]["param_state"][i]:
+                sh_ten = state_dict["optimizer"]["param_state"][i][k]
+                if filterfn(sh_ten.key):
+                    print(f"Updating optimizer/{i}/{k}/{sh_ten.key}")
+                    sh_ten.global_shape = (sh_ten.global_shape[0],)
+                    sh_ten.global_offset = (sh_ten.global_offset[0],)
+                    sh_ten.prepend_axis_num = 0
+                    sh_ten.axis_fragmentations = (sh_ten.axis_fragmentations[0],)
+    print("Done updating!")

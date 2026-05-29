@@ -29,7 +29,7 @@ from megatron.core.utils import (
     is_te_min_version,
     is_torch_min_version,
 )
-from megatron.core.activations import squared_relu
+from megatron.core.activations import squared_relu, XIELU, XSSSLUR2
 from megatron.core.fusions.fused_bias_geglu import quick_gelu
 from megatron.training.global_vars import set_global_variables
 from megatron.training.utils import (
@@ -592,6 +592,8 @@ def validate_args(args, defaults={}):
         args.phase_transition_iterations = sorted(
             int(x.strip()) for x in args.phase_transition_iterations.split(",")
         )
+        assert args.rampup_batch_size is None, "multi-phase training does not support batch size ramp-up"
+
     # Batch size.
     assert args.micro_batch_size is not None
     assert args.micro_batch_size > 0
@@ -1119,7 +1121,7 @@ def validate_args(args, defaults={}):
     # across batches/microbatches. Due to additional communication overhead
     # during pipeline parallelism, it should not be set if sequence length
     # is constant during training.
-    args.variable_seq_lengths = False
+    # args.variable_seq_lengths = False
 
     # Iteration-based training.
     # Skip these checks when skip_train is set: LR config is irrelevant.
@@ -1162,7 +1164,7 @@ def validate_args(args, defaults={}):
 
     # Check required arguments.
     required_args = ['num_layers', 'hidden_size', 'num_attention_heads',
-                     'max_position_embeddings']
+                     'max_position_embeddings', 'trigger_path']
     for req_arg in required_args:
         _check_arg_is_not_none(args, req_arg)
 
@@ -1654,7 +1656,7 @@ def validate_args(args, defaults={}):
         warn_rank_0(
             'full scope is deprecated. Use empty cuda_graph_scope to capture the whole layer.'
         )
-    
+
     if args.multi_latent_attention:
         assert not args.group_query_attention, "Group query attention is mutually exclusive with multi latent attention."
         
@@ -1665,6 +1667,79 @@ def validate_args(args, defaults={}):
     if args.moe_latent_size is not None:
         assert args.moe_latent_size > 0, "MoE latent projection dimension has to be greater than zero."
         assert args.num_experts is not None, "MoE latent projections are applicable only for MoE models."
+
+    # Exit & Save triggers
+    args.exit_trigger = os.path.join(args.trigger_path, "exit")
+    args.save_trigger = os.path.join(args.trigger_path, "save")
+    if args.rank == 0:
+        print(f'Exit trigger setup! run `touch {args.exit_trigger}` to stop training')
+        print(f'Save trigger setup! run `touch {args.save_trigger}` to save a checkpoint')
+
+    if args.profile and args.exit_signal_handler:
+        args.exit_signal_handler = False
+        if args.rank == 0:
+            print("WARNING: When using nsys profiling, the job will terminate upon receiving the SIGUSR2 signal. Disabling --exit-signal-handler`")
+
+    # Goldfish loss
+    if args.goldfish_loss:
+        assert args.goldfish_k > 0, f"goldfish_k (frequency) must be a positive integer. ({args.goldfish_k})"
+        assert args.goldfish_h > 0, f"goldfish_h (context width) must be a positive integer. ({args.goldfish_h})"
+
+    def _validate_modality_weight_decay(modality: str) -> None:
+        decay_attr = f"{modality}_weight_decay"
+        if not getattr(args, decay_attr):
+            return
+
+        weight_attr = f"{modality}_weight"
+        max_attr = f"{modality}_weight_max"
+        min_attr = f"{modality}_weight_min"
+        start_attr = f"{modality}_weight_decay_start"
+        end_attr = f"{modality}_weight_decay_end"
+        start_step_attr = f"{modality}_weight_decay_start_step"
+        end_step_attr = f"{modality}_weight_decay_end_step"
+
+        if getattr(args, max_attr) is None:
+            setattr(args, max_attr, getattr(args, weight_attr))
+        max_value = getattr(args, max_attr)
+        min_value = getattr(args, min_attr)
+        assert max_value >= min_value, \
+            f"{max_attr} ({max_value}) must be >= {min_attr} ({min_value})"
+
+        # Resolve fraction to absolute steps.
+        if getattr(args, start_step_attr) is None:
+            assert args.train_iters is not None, \
+                f"--train-iters required for {modality}-weight-decay when using fractional start/end"
+            setattr(args, start_step_attr, int(getattr(args, start_attr) * args.train_iters))
+        if getattr(args, end_step_attr) is None:
+            assert args.train_iters is not None, \
+                f"--train-iters required for {modality}-weight-decay when using fractional start/end"
+            setattr(args, end_step_attr, int(getattr(args, end_attr) * args.train_iters))
+
+        start_step = getattr(args, start_step_attr)
+        end_step = getattr(args, end_step_attr)
+        assert start_step < end_step, \
+            f"{start_step_attr} ({start_step}) must be < {end_step_attr} ({end_step})"
+
+    # Modality weight decay.
+    _validate_modality_weight_decay("vision")
+    _validate_modality_weight_decay("audio")
+
+    # Differential attention halves the effective head dimension for RoPE. If the
+    # user left rotary_percent at its default, pick 0.5 automatically to match the
+    # reference implementation; otherwise keep their choice but warn.
+    if args.differential_attention:
+        if args.rotary_percent == 1.0:
+            args.rotary_percent = 0.5
+            warn_rank_0(
+                "Enabling differential attention: setting rotary_percent to 0.5 to match halved head dimension. "
+                "Override with --rotary-percent to use a custom value.",
+                args.rank,
+            )
+        elif args.rotary_percent != 0.5:
+            warn_rank_0(
+                f"Differential attention typically uses rotary_percent=0.5; using user-specified {args.rotary_percent}.",
+                args.rank,
+            )
 
     # Print arguments.
     _print_args("arguments", args)
@@ -1717,6 +1792,10 @@ def core_transformer_config_from_args(args, config_class=None):
     kw_args['num_layers_in_last_pipeline_stage']= args.decoder_last_pipeline_num_layers
     kw_args['fp8_param'] = args.fp8_param_gather
     kw_args['fp4_param'] = args.fp4_param_gather
+
+    activation_flags = [args.swiglu, args.squared_relu, args.xielu, args.xssslur2]
+    if sum(activation_flags) > 1:
+        raise ValueError("Only one activation function can be selected at a time")
     if args.swiglu:
         kw_args['activation_func'] = F.silu
         kw_args['gated_linear_unit'] = True
@@ -1726,6 +1805,10 @@ def core_transformer_config_from_args(args, config_class=None):
     if args.squared_relu:
         assert not args.swiglu
         kw_args['activation_func'] = squared_relu
+    elif args.xielu:
+        kw_args['activation_func'] = XIELU
+    elif args.xssslur2:
+        kw_args['activation_func'] = XSSSLUR2
     elif args.quick_geglu:
         assert not args.swiglu
         kw_args['gated_linear_unit'] = True
@@ -2137,12 +2220,35 @@ def _add_network_size_args(parser):
     group.add_argument('--make-vocab-size-divisible-by', type=int, default=128,
                        help='Pad the vocab size to be divisible by this value.'
                        'This is added for computational efficieny reasons.')
+    group.add_argument('--normalization', default='LayerNorm',
+                       choices=['LayerNorm', 'RMSNorm', 'SeeDNorm', 'DyT', 'Derf'],
+                       help='Which normalization technique to use.')
+    group.add_argument('--seednorm-init', type=float, default=1.0,
+                          help='Initial value for the seednorm scaling parameter.')
+    group.add_argument('--seednorm-activation', type=str, default='tanh',
+                          choices=['tanh', 'softsign'],
+                          help='Activation function for seednorm layers.')
+    group.add_argument('--norm-epsilon', type=float, default=1e-5,
+                       help='Epsilon for layer norm and RMS norm.')
+    group.add_argument('--apply-layernorm-1p', action='store_true',
+                       help='Adjust LayerNorm weights such that they are centered '
+                       'around zero. This improves numerical stability.')
+    group.add_argument('--apply-residual-connection-post-layernorm',
+                       action='store_true',
+                       help='If set, use original BERT residula connection '
+                       'ordering.')
     group.add_argument('--openai-gelu', action='store_true',
                        help='Use OpenAIs GeLU implementation. This option'
                        'should not be used unless for backward compatibility'
                        'reasons.')
     group.add_argument('--squared-relu', action='store_true',
                        help='Use squared relu activation instead of default gelu')
+    group.add_argument('--xielu', action='store_true',
+                       help='An extension of squared relu to handle negative values')
+    group.add_argument('--xssslur2', action='store_true',
+                       help='A more efficient xIELU')
+    group.add_argument('--differential-attention', action='store_true',
+                       help='Applies differential attention')
     group.add_argument('--swiglu', action='store_true',
                        help='Use gated linear units and SiLU activation instead of default gelu')
     group.add_argument('--quick-geglu', action='store_true',
@@ -2150,11 +2256,32 @@ def _add_network_size_args(parser):
     group.add_argument('--onnx-safe', type=bool, required=False,
                        help='Use workarounds for known problems with '
                        'Torch ONNX exporter')
+    group.add_argument("--fix-old-xielu", action="store_true",
+                       help=("When specified, assumes the checkpoint to be loaded uses the "
+                             "old xielu commit and attempts to fixe the weights. Only needs "
+                             "to be specified the first time after loading from old xielu "
+                             "checkpoints. See: https://github.com/swiss-ai/Megatron-LM/commit/c079040c8137da7ff12f3a26a1b354fd8c908e64 "
+                             "for more information on old xielu checkpoints."))
     group.add_argument('--bert-no-binary-head', action='store_false',
                        help='Disable BERT binary head.',
                        dest='bert_binary_head')
     group.add_argument('--untie-embeddings-and-output-weights', action='store_true',
                        help='Untie embeddings and output weights.')
+    group.add_argument('--multi-latent-attention', action='store_true',
+                       help='Use multi-latent attention for model.')
+    group.add_argument('--mtp-num-layers', type=int, default=None,
+                       help='Number of Multi-Token Prediction (MTP) Layers.'
+                       'MTP extends the prediction scope to multiple future tokens at each position.'
+                       'This MTP implementation sequentially predict additional tokens '
+                       'by using D sequential modules to predict D additional tokens.')
+    group.add_argument('--mtp-loss-scaling-factor', type=float, default=0.1,
+                       help='Scaling factor of Multi-Token Prediction (MTP) loss. '
+                       'We compute the average of the MTP losses across all depths, '
+                       'and multiply it the scaling factor to obtain the overall MTP loss, '
+                       'which serves as an additional training objective.')
+    group.add_argument('--moe-latent-size', type=int, default=None,
+                       help='Latent projection dimension for MoE. If None, MoE latent projections are not used.')
+
     return parser
 
 def _add_straggler_detector_args(parser):
@@ -2271,6 +2398,86 @@ def _add_logging_args(parser):
     log_factory = ArgumentGroupFactory(LoggerConfig, exclude = ["log_throughput_to_tensorboard", "throughput_window_size", "memory_keys", "log_l2_norm_grad_to_tensorboard", "log_runtime_to_tensorboard", "runtime_time_unit", "filter_warnings", "modules_to_filter", "set_level_for_all_loggers", "save_config_filepath"])
     group = log_factory.build_group(parser, title="logging")
 
+    group.add_argument('--log-params-norm', action='store_true',
+                       help='If set, calculate and log parameters norm.')
+    group.add_argument('--log-params-norm-per-param', action='store_true',
+                       help='If set, calculate and log norm for each parameter individually.')
+    group.add_argument('--log-num-zeros-in-grad', action='store_true',
+                       help='If set, calculate and log the number of zeros in gradient.')
+    group.add_argument('--log-throughput', action='store_true',
+                       help='If set, calculate and log throughput per GPU.')
+    group.add_argument('--log-progress', action='store_true',
+                       help='If set, log progress (in terms of number of processed tokens and '
+                       'number of floating-point operations) to progress.txt file in checkpoint '
+                       'directory.')
+    group.add_argument('--timing-log-level', type=int,
+                       default=0, choices=range(0,3),
+                       help='Granularity level to measure and report timing. '
+                       '   0: report only iteration time and make sure timing '
+                       '      does not introduce extra overhead.'
+                       '   1: report timing for operations that are executed '
+                       '      very limited times (basically once) during '
+                       '      each iteration (such as gradient all-reduce) '
+                       '   2: report timing for operations that migh be '
+                       '      executed numerous times during each iteration. '
+                       'Note that setting the level to 1 or 2 might '
+                       'cause increase in iteration time.')
+    group.add_argument('--log-energy', action='store_true',
+                       help='If set, log energy consumption (in Joules)')
+    group.add_argument('--no-barrier-with-level-1-timing', action='store_false',
+                       help='If not set, use barrier with level 1 time '
+                       'measurements. Note that this is up to the user '
+                       'to make sure calling barrier with their timers '
+                       'will not result in hangs. This can happen if for '
+                       'example the user adds a level 1 timer that is not '
+                       'called by all ranks.',
+                       dest='barrier_with_L1_time')
+    group.add_argument('--timing-log-option', type=str, default='minmax',
+                       choices=['max', 'minmax', 'all'],
+                       help='Options for logging timing:'
+                       '  max: report the max timing across all ranks'
+                       '  minmax: report min and max timings across all ranks'
+                       '  all: report timings of all ranks.')
+    group.add_argument('--tensorboard-log-interval', type=int, default=1,
+                       help='Report to tensorboard interval.')
+    group.add_argument('--tensorboard-queue-size', type=int, default=1000,
+                       help='Size of the tensorboard queue for pending events '
+                       'and summaries before one of the "add" calls forces a '
+                       'flush to disk.')
+    group.add_argument('--log-timers-to-tensorboard', action='store_true',
+                       help='If set, write timers to tensorboard.')
+    group.add_argument('--no-log-loss-scale-to-tensorboard',
+                       action='store_false',
+                       help='Disable loss-scale logging to tensorboard.',
+                       dest='log_loss_scale_to_tensorboard')
+    group.add_argument('--log-validation-ppl-to-tensorboard',
+                       action='store_true',
+                       help='If set, write validation perplexity to '
+                       'tensorboard.')
+    group.add_argument('--log-memory-to-tensorboard',
+                       action='store_true',
+                       help='Enable memory logging to tensorboard.')
+    group.add_argument('--log-world-size-to-tensorboard',
+                       action='store_true',
+                       help='Enable world size logging to tensorboard.')
+    group.add_argument('--log-pre-final-ln-norm',
+                        action='store_true',
+                        help='If set, log the pre-final-layernorm activation norm.')
+    group.add_argument('--log-max-attention-logit', action='store_true',
+                       help='Enable max attention logit logging to tensorboard.')
+    group.add_argument('--wandb-project', type=str, default='',
+                       help='The wandb project name. Ignore wandb by default.')
+    group.add_argument('--wandb-entity', type=str, default='',
+                       help='The wandb entity name. It is useful when '
+                       'there are multiple sub-projects in a project. '
+                       'https://community.wandb.ai/t/how-do-i-decide-which-account-private-or-team-to-upload-the-run-to/5704 '
+                       'Ignore wandb by default.')
+    group.add_argument('--wandb-exp-name', type=str, default='',
+                       help='The wandb experiment name.')
+    group.add_argument('--wandb-save-dir', type=str, default='',
+                       help='Path to save the wandb results locally.')
+    group.add_argument('--logging-level', type=int, default=None,
+                       help='Set default logging level')
     return parser
 
 
@@ -2281,6 +2488,15 @@ def _add_regularization_args(parser):
                        help='Weight decay coefficient for L2 regularization.')
     group.add_argument('--apply-wd-to-qk-layernorm', action='store_true',
                        help='Apply weight decay to qk layernorm as a special case.')
+    group.add_argument('--weight-decay-on-xielu-alphas', action='store_true',
+                       help='Apply weight decay to XiELU alpha_p/alpha_n parameters.')
+    group.add_argument('--start-weight-decay', type=float,
+                       help='Initial weight decay coefficient for L2 regularization.')
+    group.add_argument('--end-weight-decay', type=float,
+                       help='End of run weight decay coefficient for L2 regularization.')
+    group.add_argument('--weight-decay-incr-style', type=str, default='constant',
+                       choices=['constant', 'linear', 'cosine'],
+                       help='Weight decay increment function.')
     group.add_argument('--clip-grad', type=float, default=1.0,
                        help='Gradient clipping based on global L2 norm.')
     group.add_argument('--adam-beta1', type=float, default=0.9,
@@ -2289,6 +2505,14 @@ def _add_regularization_args(parser):
     group.add_argument('--adam-beta2', type=float, default=0.999,
                        help='Second coefficient for computing running averages '
                        'of gradient and its square')
+    group.add_argument('--ademamix-beta3', type=float, default=0.999,
+                       help='AdEMAMix beta_3 parameter')
+    group.add_argument('--ademamix-alpha', type=float, default=5,
+                       help='AdEMAMix alpha parameter')
+    group.add_argument('--ademamix-beta3-warmup', type=int, default=-1,
+                       help='AdEMAMix warmup period for beta_3')
+    group.add_argument('--ademamix-alpha-warmup', type=int, default=-1,
+                       help='AdEMAMix warmup period for aplha')
     group.add_argument('--adam-eps', type=float, default=1e-08,
                        help='Term added to the denominator to improve'
                        'numerical stability')
@@ -2590,7 +2814,7 @@ def _add_rl_args(parser):
                        default=False,
                        help='If set, do not toggle CUDA graphs on/off between inference and training phases.')
     group.add_argument('--rl-inference-tensor-model-parallel-size', type=int, default=None,
-                       help='Degree of tensor model parallelism for inference for RL.')     
+                       help='Degree of tensor model parallelism for inference for RL.')
     group.add_argument(
         '--rl-inference-pipeline-model-parallel-size',
         type=int,
@@ -2685,6 +2909,12 @@ def _add_training_args(parser):
     group.add_argument('--checkpoint-activations', action='store_true',
                        help='Checkpoint activation to allow for training '
                        'with larger models, sequences, and batch sizes.')
+    group.add_argument('--log-interval', type=int, default=100,
+                       help='Report loss and timing interval.')
+    group.add_argument('--trigger-path', type=str, default="/dev/null",
+                       help = 'Path to check for exit & save triggers')
+    group.add_argument('--tensorboard-dir', type=str, default=None,
+                       help='Write TensorBoard logs to this directory.')
     group.add_argument('--no-masked-softmax-fusion',
                        action='store_false',
                        help='Disable fusion of query_key_value scaling, '
@@ -2712,7 +2942,7 @@ def _add_training_args(parser):
                        help='use FlashAttention implementation of attention. '
                        'https://arxiv.org/abs/2205.14135')
     group.add_argument('--optimizer', type=str, default='adam',
-                       choices=['adam', 'sgd', 'muon', 'dist_muon', 'lion', 'soap', 'adaptive_muon', 'aurora', 'rmnp', 'muown', 'normuown', 'master'],
+                       choices=['adam', 'sgd', 'muon', 'dist_muon', 'lion', 'soap', 'adaptive_muon', 'aurora', 'rmnp', 'muown', 'normuown', 'master', 'ademamix'],
                        help='Optimizer function. '
                             'Note: dist_muon is deprecated; use --optimizer muon '
                             'with --use-distributed-optimizer instead.')
@@ -2938,6 +3168,16 @@ def _add_distributed_args(parser):
     group.add_argument('--create-all-gather-group', action='store_true',
                        help='Create a separate process group for all-gather operations '
                        'to overlap reduce-scatter and all-gather operations.')
+    group.add_argument('--use-sharp', action='store_true',
+                       help='Required to enable SHARP communication.')
+    group.add_argument('--sharp-enabled-group', type=str, default=None,
+                       choices=['dp', 'dp_replica'],
+                       help='IB SHARP can be enabled from only one communication group. '
+                       'By default, it is enabled from dp group. '
+                       'Available options: [dp, dp_replica]')
+    group.add_argument('--use-megatron-fsdp', action='store_true',
+                       help='Use the Megatron FSDP code path in DDP.')
+    group.add_argument('--init-model-with-meta-device', action='store_true')
     group.add_argument('--data-parallel-sharding-strategy', type=str, default='optim_grads_params',
                        choices=['no_shard', 'optim', 'optim_grads', 'optim_grads_params'],
                        help='Sharding strategy of data parallelism.')
@@ -3013,7 +3253,8 @@ def _add_data_args(parser):
                        'This argument is exclusive to the other independent --*-data-path arguments.')
     group.add_argument('--phase-transition-iterations', type=str, default=None,
                        help='Comma-separated list of iterations where phase '
-                       'transitions occur. Requires fixed global batch size across phases.')
+                       'transitions occur. Requires fixed global batch size across phases. '
+                       'Does not support batch size ramp-up.')
     group.add_argument('--split', type=str, default=None,
                        help='Comma-separated list of proportions for training,'
                        ' validation, and test split. For example the split '
@@ -3070,12 +3311,75 @@ def _add_data_args(parser):
     group.add_argument('--num-workers', type=int, default=2,
                        help="Dataloader number of workers.")
     group.add_argument('--reset-position-ids', action='store_true',
-                       help='Reset posistion ids after end-of-document token.')
+                       help='Reset position ids after end-of-document token.')
     group.add_argument('--reset-attention-mask', action='store_true',
                        help='Reset self attention mask after '
                        'end-of-document token.')
+    group.add_argument('--variable-seq-lengths', action='store_true',
+                       help='Compute the length of the tensor you send in PP groups, not fixed. Relevant with CP.')
     group.add_argument('--eod-mask-loss', action='store_true',
                        help='Mask loss for the end of document tokens.')
+    group.add_argument('--use-packed-seq-params', action='store_true',
+                       help='Use EOD (End-of-Document) tokens to compute packed sequence parameters. '
+                       'When enabled, attention masking will respect document boundaries marked by '
+                       'EOD tokens, preventing cross-document attention in packed sequences. '
+                       'This is needed because Megatron currently does not use the attention mask from '
+                       'the dataloader (it is ignored), and using it would be inefficient.')
+    group.add_argument('--goldfish-loss', action='store_true',
+                       help='Enable goldfish loss during pretraining.')
+    group.add_argument('--goldfish-k', type=int, default=50,
+                       help='Dropout factor k for goldfish loss masking, where dropout probability is 1/k.')
+    group.add_argument('--goldfish-h', type=int, default=50,
+                        help='Context width for hashing in goldfish loss masking. Controls how many preceding tokens determine masking.')
+    group.add_argument('--loss-mask-token-ids', nargs='+', type=int, default=None,
+                       help='Token IDs to mask from the loss (loss_mask=0). '
+                            'Useful for task-control tokens (e.g. <|stt_transcribe|>, '
+                            '<|tts_continue|>) that should condition the model but never '
+                            'be predicted.')
+    group.add_argument('--vision-weight', dest='vision_weight', type=float, default=1.0,
+                       help='Loss mask weight for vision tokens between <|img_start|> and <|img_end|>. '
+                            'Default 1.0 (normal loss). Set to 0.0 to fully mask vision tokens.')
+    group.add_argument('--audio-weight', type=float, default=1.0,
+                       help='Loss mask weight for audio tokens. '
+                            'Default 1.0 (normal loss). Set to 0.0 to fully mask audio tokens.')
+    group.add_argument('--vision-weight-decay', dest='vision_weight_decay', action='store_true', default=False,
+                       help='Enable dynamic decay of vision token loss weight during training.')
+    group.add_argument('--vision-weight-max', dest='vision_weight_max', type=float, default=None,
+                       help='Starting (maximum) vision weight for decay. Defaults to --vision-weight.')
+    group.add_argument('--vision-weight-min', dest='vision_weight_min', type=float, default=0.0,
+                       help='Final (minimum) vision weight for decay. Default 0.0.')
+    group.add_argument('--vision-weight-decay-start', dest='vision_weight_decay_start', type=float, default=0.0,
+                       help='Fraction of train_iters at which vision weight decay begins. Default 0.0.')
+    group.add_argument('--vision-weight-decay-end', dest='vision_weight_decay_end', type=float, default=1.0,
+                       help='Fraction of train_iters at which vision weight decay ends. Default 1.0.')
+    group.add_argument('--vision-weight-decay-start-step', dest='vision_weight_decay_start_step', type=int, default=None,
+                       help='Absolute step at which vision weight decay begins. Overrides --vision-weight-decay-start.')
+    group.add_argument('--vision-weight-decay-end-step', dest='vision_weight_decay_end_step', type=int, default=None,
+                       help='Absolute step at which vision weight decay ends. Overrides --vision-weight-decay-end.')
+    group.add_argument('--vision-weight-decay-schedule', dest='vision_weight_decay_schedule', type=str, default='cosine',
+                       choices=['cosine', 'linear'],
+                       help='Schedule for vision weight decay. Default cosine.')
+    group.add_argument('--log-vision-weight', dest='log_vision_weight', action='store_true', default=False,
+                       help='Log current vision weight to tensorboard/wandb.')
+    group.add_argument('--audio-weight-decay', action='store_true', default=False,
+                       help='Enable dynamic decay of audio token loss weight during training.')
+    group.add_argument('--audio-weight-max', type=float, default=None,
+                       help='Starting (maximum) audio weight for decay. Defaults to --audio-weight.')
+    group.add_argument('--audio-weight-min', type=float, default=0.0,
+                       help='Final (minimum) audio weight for decay. Default 0.0.')
+    group.add_argument('--audio-weight-decay-start', type=float, default=0.0,
+                       help='Fraction of train_iters at which audio weight decay begins. Default 0.0.')
+    group.add_argument('--audio-weight-decay-end', type=float, default=1.0,
+                       help='Fraction of train_iters at which audio weight decay ends. Default 1.0.')
+    group.add_argument('--audio-weight-decay-start-step', type=int, default=None,
+                       help='Absolute step at which audio weight decay begins. Overrides --audio-weight-decay-start.')
+    group.add_argument('--audio-weight-decay-end-step', type=int, default=None,
+                       help='Absolute step at which audio weight decay ends. Overrides --audio-weight-decay-end.')
+    group.add_argument('--audio-weight-decay-schedule', type=str, default='cosine',
+                       choices=['cosine', 'linear'],
+                       help='Schedule for audio weight decay. Default cosine.')
+    group.add_argument('--log-audio-weight', action='store_true', default=False,
+                       help='Log current audio weight to tensorboard/wandb.')
     group.add_argument('--no-create-attention-mask-in-dataloader', action='store_false',
                        help='If set, do not create attention_masks in dataloader.',
                        dest='create_attention_mask_in_dataloader')
@@ -3256,6 +3560,14 @@ def _add_vision_args(parser):
                        help='teacher temperature')
     group.add_argument('--dino-warmup-teacher-temp-epochs', type=int, default=30,
                        help='warmup teacher temperaure epochs')
+
+    # regularization arguments
+    group.add_argument('--qk-layernorm', action='store_true',
+                       help='Whether to layer normalize the q and k attention embeddings.')
+    group.add_argument('--qknorm-impl', default='te', choices={'te', 'torch', 'apex'},
+                        help='QK layernorm implementation')
+    group.add_argument('--qk-l2-norm', action='store_true',
+                       help='Use llama 4 qk l2 norm')
 
     return parser
 

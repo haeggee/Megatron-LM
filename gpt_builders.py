@@ -115,6 +115,11 @@ def _get_transformer_layer_spec(use_te, config):
         # path for the matching fused implementation under _research/derf_optim/.
         import os
         derf_optim = os.environ.get("APERTUS_DERF_OPTIM") if config.normalization in ("DyT", "Derf") else None
+        if config.normalization == "SeeDNorm":
+            raise ValueError(
+                "SeeDNorm is not supported with Transformer Engine backend. "
+                "Set --transformer-impl local to use SeeDNorm."
+            )
         return get_gpt_layer_with_transformer_engine_spec(
             config.num_moe_experts,
             config.moe_grouped_gemm,
@@ -124,6 +129,7 @@ def _get_transformer_layer_spec(use_te, config):
             qk_l2_norm=config.qk_l2_norm,
             use_kitchen=config.use_kitchen,
             use_te_activation_func=config.use_te_activation_func,
+            differential_transformer=config.differential_attention,
             use_kitchen_attention=config.use_kitchen_attention,
             kitchen_attention_backend=config.kitchen_attention_backend,
             mla_down_proj_fusion=getattr(config, "mla_down_proj_fusion", False),

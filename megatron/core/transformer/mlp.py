@@ -1,6 +1,7 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 from __future__ import annotations
 
+import logging
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from megatron.core.fusions.fused_bias_gelu import bias_gelu_impl
 from megatron.core.fusions.fused_bias_swiglu import bias_swiglu_impl, weighted_bias_swiglu_impl
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.activations import XIELU, XSSSLUR2
 from megatron.core.transformer.utils import cat_with_oom_fallback
 from megatron.core.typed_torch import apply_module, not_none
 from megatron.core.utils import (
@@ -126,6 +128,9 @@ class LinearFc2Builder(Protocol):
         ...
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass
 class MLPSubmodules:
     """
@@ -222,7 +227,12 @@ class MLP(MegatronModule):
         if self.config.use_te_activation_func and not (submodules.activation_func is None):
             self.activation_func = apply_module(submodules.activation_func(config=self.config))
         else:
-            self.activation_func = self.config.activation_func
+            if self.config.activation_func == XIELU:
+                self.activation_func = XIELU(config=self.config)
+            elif self.config.activation_func == XSSSLUR2:
+                self.activation_func = XSSSLUR2(config=self.config)
+            else:
+                self.activation_func = self.config.activation_func
 
         self.linear_fc2 = submodules.linear_fc2(
             not_none(self.config.ffn_hidden_size),
