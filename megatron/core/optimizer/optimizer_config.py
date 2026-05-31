@@ -378,12 +378,18 @@ class OptimizerConfig:
     --optimizer master. When None, falls back to ``muon_lr_factor * lr``."""
 
     embedding_lr_multiplier: Optional[float] = None
-    """LR multiplier for embedding/LM-head params under --optimizer master.
-    Final max_lr for those params = embedding_lr_multiplier * lr. When None,
-    those params use ``lr`` directly."""
+    """LR multiplier for embedding (and tied LM-head) params under --optimizer
+    master. Final max_lr for those params = embedding_lr_multiplier * lr. When
+    None, those params use ``lr`` directly."""
 
-    master_min_lr_mode: str = 'relative'
-    """How per-group min_lr is set under --optimizer master.
+    output_lr: Optional[float] = None
+    """Absolute LR for the (untied) output LM-head params under --optimizer
+    master. When None, the output layer uses ``lr`` directly. Independent of
+    embedding_lr_multiplier and muon_scalar_lr."""
+
+    min_lr_mode: str = 'relative'
+    """How per-group min_lr is set for any param group with a custom max_lr
+    (master matrix/embedding/output groups and the Muon-family scalar group).
     'relative' (default): each group decays by the same fraction
     (config.min_lr / config.lr), so min_lr = max_lr * ratio per group — the
     schedule shape is preserved across groups, floors differ.

@@ -60,8 +60,24 @@ When a run wins (or is otherwise worth tracking), add it as an entry:
 
 ## Related folders
 
-- `_research/launch/` — launchable sbatches: baseline full-runs
-  (`transformer-pp-<size>-<adamw|muon>.sbatch`) plus a 1B-token quick
-  reference (`-ablation.sbatch`). All hparams pinned. To try a variant,
-  copy an existing file and edit; once it wins, snapshot it into the
-  matching leaderboard under `leaderboards/<size>/runs/`.
+- `_research/launch/framework/` — the **authoring** surface. Compose a run as
+  one `--size` × one `--recipe` instead of copying a 300-line sbatch; add a new
+  optimizer/baseline idea as a ~15-line recipe file. See its `README.md`.
+- `_research/launch/*.sbatch` — the older hand-written, fully-pinned launch
+  files (being superseded by the framework). Still valid to run directly.
+
+### Promoting from the framework
+
+When a framework run wins, `freeze.sh` bakes it into a frozen, self-contained
+entry here (all hparams pinned inline, no framework dependency — so `git
+checkout <sha> && sbatch` still reproduces it bitwise):
+
+```bash
+bash _research/launch/framework/freeze.sh \
+    --size 350m-moe --recipe <recipe> --slug <slug> --board <size> --out auto
+```
+
+Then fill in the run's loss / W&B / rank in the generated header and add a table
+row per the "Promoting a run" steps above. A frozen entry never sources the
+framework, by design — that is what keeps old entries reproducible after the
+framework changes.

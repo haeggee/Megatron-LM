@@ -731,17 +731,25 @@ def check_config_overrides_consistency(
     return True
 
 
-def _master_min_lr(config: OptimizerConfig, max_lr: float) -> float:
-    """Per-group min_lr policy under --optimizer master.
+def _group_min_lr(config: OptimizerConfig, max_lr: float) -> float:
+    """Per-group min_lr policy for any param group with a custom max_lr.
 
-    'relative': proportional decay — min_lr = max_lr * (config.min_lr / config.lr).
-    Every group decays by the same fraction; floors differ across groups.
+    The LR scheduler decays every group from its own max_lr to its own min_lr
+    along the same schedule shape (warmup/decay steps, decay style). To keep the
+    decay curve well-formed, a group's min_lr must be derived from its max_lr —
+    not left at the global config.min_lr, which would invert the schedule when
+    max_lr < config.min_lr. Policy is shared across optimizers (Muon family,
+    master, ...) and controlled by config.min_lr_mode:
+
+    'relative' (default): proportional decay — min_lr = max_lr * (config.min_lr /
+    config.lr). Every group decays by the same fraction; floors differ across
+    groups, so the per-group curve is a constant rescaling of the base schedule.
 
     'absolute': shared floor — min_lr = config.min_lr (clamped to <= max_lr to
-    avoid an inverted schedule when matrix_lr < config.min_lr).
+    avoid an inverted schedule when max_lr < config.min_lr).
     """
     floor = config.min_lr if config.min_lr is not None else 0.0
-    if config.master_min_lr_mode == 'absolute':
+    if config.min_lr_mode == 'absolute':
         return min(floor, max_lr)
     ratio = (floor / config.lr) if (config.lr and config.lr > 0) else 0.0
     return max_lr * ratio
@@ -813,34 +821,37 @@ def _get_megatron_emerging_optimizer(
     # (Adam/Lion) group when --muon-scalar-lr / --muon-scalar-weight-decay are
     # set. combine_param_group_overrides merges the {optimizer: adam} route
     # registered above with these lr/wd fields into a single override.
-    # Master shares this lever: --muon-scalar-lr / --muon-scalar-weight-decay
-    # control the external-Adam group (1D biases/norms, and 2D embedding/output
-    # when no hypersphere_embedding_mode is set).
+    # NOTE: --muon-scalar-lr does NOT apply to master. Master sets its LR groups
+    # (matrix / embedding / output / base) independently below; the scalar group
+    # (1D biases/norms) keeps the base config.lr schedule. --muon-scalar-weight-decay
+    # still applies to master's external-Adam group.
     if eopt_name in ('muon', 'adaptive_muon', 'aurora', 'rmnp', 'muown', 'normuown', 'master'):
         muon_scalar_lr = getattr(config, 'muon_scalar_lr', None)
         muon_scalar_wd = getattr(config, 'muon_scalar_weight_decay', None)
 
-        if muon_scalar_lr is not None:
+        if muon_scalar_lr is not None and eopt_name == 'master':
+            log_single_rank(
+                logger,
+                logging.WARNING,
+                "--muon-scalar-lr is ignored under --optimizer master. Use --matrix-lr, "
+                "--embedding-lr-multiplier and --output-lr to set the matrix / embedding / "
+                "output LR groups; 1D scalar params use the base --lr schedule.",
+            )
+        elif muon_scalar_lr is not None:
             lr_key = ParamKey(
                 predicate=ParamPredicate(
                     name="muon_scalar_group_lr", fn=_is_nonlinear_or_embedding
                 )
             )
-            if eopt_name == 'master':
-                # Master: min_lr is per-group, controlled by master_min_lr_mode.
-                # 'relative' → proportional decay; 'absolute' → shared floor.
-                config_overrides[lr_key] = {
-                    'max_lr': muon_scalar_lr,
-                    'min_lr': _master_min_lr(config, muon_scalar_lr),
-                }
-            else:
-                # Muon family: frozen scalar LR (max_lr == min_lr), historical
-                # behavior — the scalar group is intentionally decoupled from
-                # the matrix LR schedule.
-                config_overrides[lr_key] = {
-                    'max_lr': muon_scalar_lr,
-                    'min_lr': min(muon_scalar_lr, config.lr),
-                }
+            # Muon family: the scalar group has its own max_lr (muon_scalar_lr)
+            # but decays along the base schedule shape. min_lr is derived from
+            # max_lr by the shared per-group policy so the curve stays well-formed
+            # (the old min(muon_scalar_lr, config.lr) either froze the group or
+            # floored it at config.lr regardless of config.min_lr).
+            config_overrides[lr_key] = {
+                'max_lr': muon_scalar_lr,
+                'min_lr': _group_min_lr(config, muon_scalar_lr),
+            }
 
         if muon_scalar_wd is not None:
             base_wd = config.weight_decay or 0.0
@@ -900,7 +911,7 @@ def _get_megatron_emerging_optimizer(
         if router_uses_adam:
             # Adam routers use base lr (matrix_lr is Muon-tuned; doesn't fit Adam).
             router_override['max_lr'] = config.lr
-            router_override['min_lr'] = _master_min_lr(config, config.lr)
+            router_override['min_lr'] = _group_min_lr(config, config.lr)
         if router_override:
             config_overrides[ParamKey(attr='is_router')] = router_override
 
@@ -914,26 +925,32 @@ def _get_megatron_emerging_optimizer(
         )
         config_overrides[ParamKey(predicate=non_emb_2d)] = {
             'max_lr': matrix_lr,
-            'min_lr': _master_min_lr(config, matrix_lr),
+            'min_lr': _group_min_lr(config, matrix_lr),
         }
 
-        # Embedding LR multiplier (embedding + tied LM head share is_embedding_parameter).
+        # Embedding LR (embedding + tied LM head share is_embedding_parameter).
+        # Independent of muon_scalar_lr / output_lr. When the multiplier is unset
+        # these params keep the base config.lr (no override registered).
         if config.embedding_lr_multiplier is not None:
             emb_lr = config.embedding_lr_multiplier * config.lr
             config_overrides[ParamKey(attr='is_embedding_parameter')] = {
                 'max_lr': emb_lr,
-                'min_lr': _master_min_lr(config, emb_lr),
+                'min_lr': _group_min_lr(config, emb_lr),
             }
-            # Untied LM head: is_output_parameter and NOT is_embedding_parameter
-            # (the latter is only added to the LM head under MuP). Gets base lr.
+
+        # Output (untied LM head) LR: absolute, independent of embedding/scalar
+        # knobs. is_output_parameter and NOT is_embedding_parameter (the latter is
+        # only added to the LM head under MuP, where it follows the embedding LR).
+        # When --output-lr is unset, the head keeps the base config.lr.
+        if config.output_lr is not None:
             output_only = ParamPredicate(
                 name="master_output_not_embedding",
                 fn=lambda p: (getattr(p, "is_output_parameter", False)
                               and not getattr(p, "is_embedding_parameter", False)),
             )
             config_overrides[ParamKey(predicate=output_only)] = {
-                'max_lr': config.lr,
-                'min_lr': _master_min_lr(config, config.lr),
+                'max_lr': config.output_lr,
+                'min_lr': _group_min_lr(config, config.output_lr),
             }
 
     # Build param groups and bucket by (optimizer_name, is_expert_parallel).

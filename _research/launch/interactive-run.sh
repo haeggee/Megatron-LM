@@ -89,7 +89,7 @@ NPROC=${NPROC_PER_NODE:-4}
 cd $WORKDIR
 
 echo ">>> WORKDIR=$WORKDIR"
-echo ">>> torchrun --nproc-per-node=$NPROC --nnodes=1 pretrain_gpt.py [MEGATRON_ARGS] $*"
+echo ">>> torchrun --nproc-per-node=$NPROC --nnodes=$SLURM_NNODES pretrain_gpt.py [MEGATRON_ARGS] $*"
 echo
-exec torchrun --nproc-per-node=$NPROC --nnodes=1 \
+exec torchrun --nproc-per-node=$NPROC --nnodes=$SLURM_NNODES \
     pretrain_gpt.py "${MEGATRON_ARGS[@]}" "$@"

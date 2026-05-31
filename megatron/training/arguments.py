@@ -2396,21 +2396,30 @@ def _add_regularization_args(parser):
     # unaffected. Reuses --adam-beta1/--adam-beta2/--adam-eps/--muon-momentum/
     # --muon-nesterov/--muon-no-split-qkv/--muon-scale-mode (incl. shape_up)/
     # --muon-num-ns-steps/--muon-tp-mode/--muon-extra-scale-factor/
-    # --muon-coefficient-type/--muon-fp32-matmul-prec/--muon-scalar-lr/
-    # --muon-scalar-weight-decay/--weight-decay.
+    # --muon-coefficient-type/--muon-fp32-matmul-prec/
+    # --muon-scalar-weight-decay/--weight-decay. NOTE: --muon-scalar-lr does not
+    # apply to master (use --matrix-lr/--embedding-lr-multiplier/--output-lr).
     group.add_argument('--matrix-lr', type=float, default=None,
                        help='Absolute LR for matrix (2D non-embedding/output) params '
                        'under --optimizer master. Overrides muon_lr_factor * lr.')
     group.add_argument('--embedding-lr-multiplier', type=float, default=None,
-                       help='LR multiplier for embedding/LM-head params under '
-                       '--optimizer master. Final max_lr = embedding_lr_multiplier * lr.')
-    group.add_argument('--master-min-lr-mode', type=str, default='relative',
+                       help='LR multiplier for embedding (and tied LM-head) params under '
+                       '--optimizer master. Final max_lr = embedding_lr_multiplier * lr. '
+                       'When unset, those params use the base --lr.')
+    group.add_argument('--output-lr', type=float, default=None,
+                       help='Absolute LR for the (untied) output LM-head params under '
+                       '--optimizer master. Independent of --embedding-lr-multiplier and '
+                       '--muon-scalar-lr. When unset, the output layer uses the base --lr.')
+    group.add_argument('--min-lr-mode', '--master-min-lr-mode', dest='min_lr_mode',
+                       type=str, default='relative',
                        choices=['relative', 'absolute'],
-                       help='Under --optimizer master, how per-group min_lr is set. '
-                       '"relative" (default): every group decays by the same fraction '
-                       '(config.min_lr / config.lr), so min_lr = max_lr * ratio per '
-                       'group — schedule shape preserved, floors differ. '
-                       '"absolute": every group decays to the same floor (config.min_lr).')
+                       help='How per-group min_lr is set for any group with a custom '
+                       'max_lr (master matrix/embedding/output groups and the Muon-family '
+                       'scalar group). "relative" (default): every group decays by the '
+                       'same fraction (config.min_lr / config.lr), so min_lr = max_lr * '
+                       'ratio per group — schedule shape preserved, floors differ. '
+                       '"absolute": every group decays to the same floor (config.min_lr). '
+                       '(--master-min-lr-mode is a deprecated alias.)')
     group.add_argument('--muon-lr-factor', type=float, default=1.0,
                        help='When --matrix-lr is unset, matrix-param LR for master is '
                        'muon_lr_factor * lr. Default 1.0.')
