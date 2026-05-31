@@ -1,0 +1,51 @@
+#!/bin/bash
+#
+# train.sbatch — the single entrypoint for every run.
+#
+# It does almost nothing itself: pick a SIZE and a RECIPE, source them, then
+# hand off to lib/common.sh which assembles the args and launches.
+#
+#   SIZE=350m-moe RECIPE=master sbatch \
+#       --nodes=2 --time=10:00:00 _research/launch/framework/train.sbatch
+#
+# Prefer submit.sh, which fills --nodes/--time from the size file for you:
+#   bash _research/launch/framework/submit.sh --size 350m-moe --recipe master
+#
+# The #SBATCH lines below are DEFAULTS; submit.sh (or your own `sbatch` flags)
+# override --nodes/--time/--job-name per run.
+#
+#SBATCH --job-name=train
+#SBATCH --time=10:00:00
+#SBATCH --output=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline/_research/results/runs/%x-%j.log
+#SBATCH --error=/iopsstor/scratch/cscs/%u/megatron-lm-research-baseline/_research/results/runs/%x-%j.log
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=4
+#SBATCH --gpus-per-node=4
+#SBATCH --cpus-per-task=72
+#SBATCH --mem=460000
+#SBATCH --no-requeue
+#SBATCH --reservation=SD-69241-apertus-1-5-0
+
+set -euo pipefail
+
+: "${SIZE:?set SIZE, e.g. SIZE=350m-moe (see framework/sizes/)}"
+: "${RECIPE:?set RECIPE, e.g. RECIPE=master (see framework/recipes/)}"
+
+# Locate the framework dir. Under `sbatch`, SLURM copies this script to a
+# private spool dir (/var/spool/slurmd/...), so BASH_SOURCE no longer points at
+# the framework. submit.sh exports FRAMEWORK_DIR; otherwise fall back to
+# BASH_SOURCE (direct `bash`/interactive-run sourcing), then to the canonical
+# repo layout on shared storage.
+FRAMEWORK_DIR=${FRAMEWORK_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)}
+if [ ! -d "$FRAMEWORK_DIR/sizes" ]; then
+    FRAMEWORK_DIR=/iopsstor/scratch/cscs/$USER/megatron-lm-research-baseline/_research/launch/framework
+fi
+
+[ -f "$FRAMEWORK_DIR/sizes/$SIZE.sh" ]   || { echo "no such size:   $SIZE   (see $FRAMEWORK_DIR/sizes/)"   >&2; exit 1; }
+[ -f "$FRAMEWORK_DIR/recipes/$RECIPE.sh" ] || { echo "no such recipe: $RECIPE (see $FRAMEWORK_DIR/recipes/)" >&2; exit 1; }
+
+# Order matters: size sets model+data scale, recipe sets the optimizer/idea
+# (and may override regularization/LR), common fills defaults and launches.
+source "$FRAMEWORK_DIR/sizes/$SIZE.sh"
+source "$FRAMEWORK_DIR/recipes/$RECIPE.sh"
+source "$FRAMEWORK_DIR/lib/common.sh"
