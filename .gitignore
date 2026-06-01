@@ -22,3 +22,5 @@ core_nid*
 # Sphinx documentation
 docs/_build
 docs/apidocs
+
+.env
