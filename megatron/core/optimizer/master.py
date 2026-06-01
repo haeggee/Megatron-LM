@@ -538,7 +538,7 @@ class GainsMasterOptimizer(MasterOptimizer):
         gains_betas: tuple[float, float] = (0.9, 0.999),
         gains_eps: float = 1e-8,
         gains_weight_decay: float = 0.0,
-        gain_parametrization: Literal["direct", "offset", "softplus"] = "direct",
+        gain_parametrization: Literal["direct", "offset", "softplus", "exp"] = "direct",
         **kwargs,
     ):
         assert hypersphere_gains_mode is not None
@@ -563,6 +563,8 @@ class GainsMasterOptimizer(MasterOptimizer):
             return 1.0 + g
         if mode == "softplus":
             return torch.nn.functional.softplus(g)
+        if mode == "exp":
+            return torch.exp(g)
         raise ValueError(f"Unknown gain_parametrization {mode}")
 
     def _phi_prime(self, g: torch.Tensor) -> torch.Tensor | float:
@@ -572,6 +574,8 @@ class GainsMasterOptimizer(MasterOptimizer):
             return 1.0
         if mode == "softplus":
             return torch.sigmoid(g)
+        if mode == "exp":
+            return torch.exp(g)
         raise ValueError(f"Unknown gain_parametrization {mode}")
 
     def _phi_inv(self, x: torch.Tensor) -> torch.Tensor:
@@ -585,6 +589,9 @@ class GainsMasterOptimizer(MasterOptimizer):
             # Stable softplus_inv for x > 0: g = x + log1p(-exp(-x)).
             # As x -> inf, g -> x. As x -> 0+, g -> -inf.
             return x + torch.log1p(-torch.exp(-x))
+        if mode == "exp":
+            # phi(g) = exp(g) > 0; g = log(x) for target x > 0.
+            return torch.log(x)
         raise ValueError(f"Unknown gain_parametrization {mode}")
 
     @torch.no_grad()  # type: ignore[misc]

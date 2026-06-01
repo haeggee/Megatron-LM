@@ -2242,12 +2242,14 @@ def _add_regularization_args(parser):
     group.add_argument('--gains-lr', type=float, default=None,
                        help='Absolute learning rate for gain parameters. '
                             'When None, gains follow the param group LR (same schedule as the weights).')
-    group.add_argument('--gain-parametrization', choices=["direct", "offset", "softplus"], default="direct",
+    group.add_argument('--gain-parametrization', choices=["direct", "offset", "softplus", "exp"], default="direct",
                        help='How the learned gain g maps to the effective multiplier phi(g) '
                             'applied to W_bare. "direct": phi(g)=g (current). "offset": '
                             'phi(g)=1+g (init g=0, wd attracts to identity). "softplus": '
                             'phi(g)=softplus(g) (init g=ln(e-1); phi prime=sigmoid caps the '
-                            'per-step change in phi(g) to ~lr, mitigating gain-grad spikes).')
+                            'per-step change in phi(g) to ~lr, mitigating gain-grad spikes). '
+                            '"exp": phi(g)=exp(g) (init g=0, strictly positive multiplicative '
+                            'gain; phi prime=exp(g)=phi, so updates scale with the current gain).')
     group.add_argument('--hypersphere-preserve-init', action='store_true', default=False,
                        help='Skip init-time projection onto the hypersphere; preserve the model '
                             'init magnitude. With gains, the init norms are absorbed into the '
