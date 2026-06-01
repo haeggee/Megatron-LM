@@ -76,6 +76,7 @@ usage () {
 	echo " --time (default=$TIME): Change the sbatch time limit"
 	echo " --no-extra-logs: Disable costly logging"
 	echo " --no-save: Disable saving checkpoint"
+	echo " --apertus-reservation: Add #SBATCH --reservation=SD-69241-apertus-1-5-0"
 	# FP8 settings.
 	echo " --fp8: Enables fp8"
 	echo " --fp8dpa: Enables fp8dpa"
@@ -86,6 +87,8 @@ usage () {
 	echo " --warmup-iters <int> (default=$WARMUP_ITERS): LR warmup steps (\`--lr-warmup-iters\`)"
 	echo " --decay <wsd/cos/linear/inverse-square-root/isrwsd>"
 	echo " --cooldown <float>: Fraction to do cooldown"
+	echo " --branch-from <dir>: Seed run from another run's checkpoint (its root or checkpoints/ dir); for cooldown-shape experiments from a fixed ckpt"
+	echo " --branch-iter <int>: Iteration to branch from (default: that run's latest checkpoint)"
 	echo " --clip-grad <float>: Gradient clipping"
 	# Architecture settings.
 	echo " --init <float>: Change init std."
@@ -149,7 +152,7 @@ usage () {
 	echo " --glr <float>: absolute gains LR (default: follows param group LR)"
 	echo " --hs-preserve-init: skip init projection; absorb init norms into gains"
 	echo " --split-qkv-gains: separate column gains for Q, K, V"
-	echo " --hs-g-param <direct/offset/softplus>: gain parametrization (phi). direct=g, offset=1+g, softplus=softplus(g)."
+	echo " --hs-g-param <direct/offset/softplus/exp>: gain parametrization (phi). direct=g, offset=1+g, softplus=softplus(g), exp=exp(g)."
 	echo " --hs-p: project gradient to tangent space"
 	echo " --hs-s: soft hyperball norm clipping."
 	# Validation.
@@ -387,6 +390,24 @@ elif [[ $1 -eq 292 ]]; then # 2x=1024 dim, correct heads/query groups
 	SCALE=M
 	UNTIE=false
 	LOG_FREQ=50
+elif [[ $1 -eq 543 ]]; then # 3x=1536 dim, correct heads/query groups
+	# batch_size: ~0.52M.
+	LAYERS=12
+	HIDDEN_SIZE=1536
+	FFN_SIZE=6144
+	NUM_HEADS=12
+	NUM_QUERY_GROUPS=6
+	MBS="${MBS:-4}"
+	GBS=128
+	ITERS_PER_BT=2000
+	LR=0.001
+	SIZE=543
+	SAVE_FREQ=10000
+	DEF_TOKENS=25
+	INTERMEDIATE_METRICS_INTERVAL=10
+	SCALE=M
+	UNTIE=false
+	LOG_FREQ=50
 elif [[ $1 -eq 430 ]]; then # 2x=1024 dim, 24L (ratio-preserving with 110m)
 	# batch_size: ~0.52M.
 	LAYERS=24
@@ -486,6 +507,8 @@ while [[ $# -gt 0 ]]; do
 			EXTRA_LOG=false; shift;;
 		--no-save)
 			NO_SAVE=true; shift;;
+		--apertus-reservation)
+			APERTUS_RESERVATION=true; shift;;
 		# FP8 settings.
 		--fp8)
 			FP8=true; shift;;
@@ -504,6 +527,10 @@ while [[ $# -gt 0 ]]; do
 			DECAY=$2; shift 2;;
 		--cooldown)
 			COOLDOWN=$2; shift 2;;
+		--branch-from)
+			BRANCH_FROM=$2; shift 2;;
+		--branch-iter)
+			BRANCH_ITER=$2; shift 2;;
 		--clip-grad)
 			CLIP_GRAD=$2; shift 2;;
 		# Architecture settings.
@@ -661,6 +688,22 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+# Resolve branch checkpoint (cooldown-shape experiments from a fixed ckpt).
+if [[ ! -z "${BRANCH_FROM+xxx}" ]]; then
+	BRANCH_FROM=${BRANCH_FROM%/}
+	if [[ -d "$BRANCH_FROM/checkpoints" ]]; then
+		BRANCH_FROM=$BRANCH_FROM/checkpoints
+	fi
+	if [[ -z "${BRANCH_ITER+xxx}" ]]; then
+		BRANCH_ITER=$(cat "$BRANCH_FROM/latest_checkpointed_iteration.txt")
+	fi
+	BRANCH_ITER_DIR=$(printf "iter_%07d" "$BRANCH_ITER")
+	if [[ ! -d "$BRANCH_FROM/$BRANCH_ITER_DIR" ]]; then
+		>&2 echo "Branch checkpoint not found: $BRANCH_FROM/$BRANCH_ITER_DIR"
+		exit 1
+	fi
+fi
+
 #= MIDDLE: Set up arguments. =#
 # Opt settings.
 OPT_ARGS=()
@@ -692,8 +735,8 @@ elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
 			SUFFIX=${SUFFIX}_urm
 		elif [[ $MUON_SCALE_MODE = shape_scaling ]]; then
 			SUFFIX=${SUFFIX}_shsc
-		# elif [[ $MUON_SCALE_MODE = shape_up ]]; then
-		# 	SUFFIX=${SUFFIX}_shup
+		elif [[ $MUON_SCALE_MODE = shape_up ]]; then
+			SUFFIX=${SUFFIX}_shup
 		else
 			SUFFIX=${SUFFIX}_$MUON_SCALE_MODE
 		fi
@@ -736,7 +779,7 @@ elif [[ $OPT = dmaster ]] || [[ $OPT = master ]]; then
 			elif [[ $MUON_SCALE_MODE = shape_scaling ]]; then
 				SUFFIX=${SUFFIX}_shsc
 			elif [[ $MUON_SCALE_MODE = shape_up ]]; then
-				SUFFIX=${SUFFIX}_shup
+				SUFFIX=${SUFFIX}
 			else
 				SUFFIX=${SUFFIX}_$MUON_SCALE_MODE
 			fi
@@ -847,7 +890,7 @@ if [[ $HYPERBALL != false ]]; then
 			OPT_ARGS+=(--split-qkv-gains)
 		fi
 		if [[ ! -z "${GAINS_LR+xxx}" ]]; then
-			SUFFIX=${SUFFIX}_glr$GAINS_LR
+			SUFFIX=${SUFFIX}_glr$(printf "%.1e" $GAINS_LR)
 			OPT_ARGS+=(--gains-lr $GAINS_LR)
 		fi
 		if [[ ! -z "${HS_GAINS_PARAM+xxx}" ]] && [[ $HS_GAINS_PARAM != direct ]]; then
@@ -868,11 +911,11 @@ if [[ $HYPERBALL != false ]]; then
 fi
 
 if [[ $LR != 0.001 ]]; then
-	SUFFIX=$SUFFIX-lr$(printf "%.4g" $LR)
+	SUFFIX=$SUFFIX-lr$(printf "%.1e" $LR)
 fi
 
 if [[ ! -z "${MATRIX_LR+xxx}" ]]; then
-	SUFFIX=${SUFFIX}-Mlr$(printf "%.4g" $MATRIX_LR)
+	SUFFIX=${SUFFIX}-Mlr$(printf "%.1e" $MATRIX_LR)
 	OPT_ARGS+=(--matrix-lr $MATRIX_LR)
 fi
 if [[ $SCALE_MIN_LR = true ]]; then
@@ -887,11 +930,13 @@ if [[ ! -z "${EMBEDDING_LR_MULTIPLIER+xxx}" ]]; then
 	OPT_ARGS+=(--embedding-lr-multiplier $EMBEDDING_LR_MULTIPLIER)
 fi
 if [[ ! -z "${EMBEDDING_LR+xxx}" ]]; then
-	SUFFIX=${SUFFIX}-Elr$(printf "%.4g" $EMBEDDING_LR)
+	# if [[ $EMBEDDING_LR != 0.003 ]]; then
+	SUFFIX=${SUFFIX}-Elr$(printf "%.1e" $EMBEDDING_LR)
+	# fi
 	OPT_ARGS+=(--embedding-lr $EMBEDDING_LR)
 fi
 if [[ ! -z "${OUTPUT_LR+xxx}" ]]; then
-	SUFFIX=${SUFFIX}-Olr$(printf "%.4g" $OUTPUT_LR)
+	SUFFIX=${SUFFIX}-Olr$(printf "%.1e" $OUTPUT_LR)
 	OPT_ARGS+=(--output-lr $OUTPUT_LR)
 fi
 
@@ -1071,7 +1116,7 @@ if [[ ! -z "${LOGITS_LAYER_SCALE+xxx}" ]]; then
 	fi
 fi
 if [[ ! -z "${UPSCALE_EMBEDDING+xxx}" ]]; then
-	SUFFIX=$SUFFIX-ue
+	# SUFFIX=$SUFFIX-ue
 	LONG_SUFFIX=$LONG_SUFFIX-up$UPSCALE_EMBEDDING
 	ARCH_ARGS+=(--upscale-embedding $UPSCALE_EMBEDDING)
 fi
@@ -1079,7 +1124,7 @@ fi
 
 # Training settings.
 if [[ $NO_WARMUP = true ]]; then
-	SUFFIX=$SUFFIX-nw
+	# SUFFIX=$SUFFIX-nw
 	LONG_SUFFIX=$LONG_SUFFIX-nw
 	WARMUP=0
 else
@@ -1093,7 +1138,7 @@ if [[ $TOKENS != $DEF_TOKENS ]]; then
 	SUFFIX=$SUFFIX-${TOKENS}BT
 	LONG_SUFFIX=$LONG_SUFFIX-${TOKENS}BT
 fi
-ITERS=$((ITERS_PER_BT*TOKENS))
+ITERS=$(python3 -c "print(int($ITERS_PER_BT*$TOKENS))")  # python so --tokens can be fractional (e.g. 37.5 -> 75k iters)
 
 DECAY_ARGS=()
 if [[ $DECAY = wsd ]]; then
@@ -1198,6 +1243,18 @@ TRIGGER_LOCK=$TRIGGER_DIR/training_lock
 mkdir -p $SAVE_PATH
 mkdir -p $DIFFS_PATH
 mkdir -p $TRIGGER_DIR
+
+# For branch runs: seed the (new) save dir once with the source checkpoint, then
+# load/save from this dir as usual so the run stays preemption-safe.
+if [[ ! -z "${BRANCH_FROM+xxx}" ]]; then
+	if [[ ! -f $SAVE_PATH/latest_checkpointed_iteration.txt ]]; then
+		ln -s "$BRANCH_FROM/$BRANCH_ITER_DIR" "$SAVE_PATH/$BRANCH_ITER_DIR"
+		echo "$BRANCH_ITER" > "$SAVE_PATH/latest_checkpointed_iteration.txt"
+		echo "Seeded $SAVE_PATH <- $BRANCH_FROM/$BRANCH_ITER_DIR (iter $BRANCH_ITER)"
+	else
+		echo "$SAVE_PATH already has checkpoints; not re-seeding (resume-safe)."
+	fi
+fi
 
 if [[ -z ${WANDB_NAME+x} ]]; then
 	WANDB_NAME=$EXP_NAME
@@ -1313,11 +1370,20 @@ SCHEDULER_ARGS=(
 EXTRA_ARGS+=(
 	--ckpt-format torch
 )
+if [[ ! -z "${BRANCH_FROM+xxx}" ]]; then
+	# Apply the new (cooldown) schedule from CLI args instead of the checkpoint's.
+	EXTRA_ARGS+=(--override-opt_param-scheduler)
+fi
 
 ARGS="${LLAMA_ARGS[@]} ${TRAINING_ARGS[@]} ${SCHEDULER_ARGS[@]} ${DATA_ARGS[@]} ${LOGGING[@]} ${EXTRA_ARGS[@]} ${FP8_ARGS[@]} ${ARCH_ARGS[@]} ${OPT_ARGS[@]} ${DECAY_ARGS[@]}"
 
 #= RUNNING: Prepare and launch a slurm script =#
 CMD="numactl --membind=0-3 env python3 pretrain_gpt.py $ARGS"
+
+RESERVATION_DIRECTIVE=""
+if [[ $APERTUS_RESERVATION = true ]]; then
+	RESERVATION_DIRECTIVE="#SBATCH --reservation=SD-69241-apertus-1-5-0"
+fi
 
 mkdir -p $ROOT_PATH
 cat > $ROOT_PATH/submission.sbatch <<- EOM
@@ -1336,6 +1402,7 @@ cat > $ROOT_PATH/submission.sbatch <<- EOM
 #SBATCH --partition=${PARTITION:-normal}
 #SBATCH --signal=SIGTERM@180
 #SBATCH --dependency=singleton
+$RESERVATION_DIRECTIVE
 
 
 # Wake up.

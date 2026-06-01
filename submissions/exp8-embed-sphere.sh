@@ -36,22 +36,47 @@ EMB_LR=0.003
 # done
 
 # ---- embeddings off sphere (unconstrained adam) ----
-for k in 3 4 5 6 7 8; do
-	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
-	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
-		--eval-every 1000 --eval-iters 50 \
-		--opt master --master-orthogonalize --alpha 0 \
-		--hs flat \
-		--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
-		--hs-g rowcol \
-		--hs-g-param softplus \
-		--post-norm \
-		--fixed-layer-scale $INV_LAYERS \
-		--upscale-embedding $SQRT_MODELDIM \
-		--qk-norm RMSNorm \
-		--wd 0 --decay linear --no-warmup \
-		--untie-embed \
-		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
-		--extra-name exp8-embed-free \
-		$*
+# for k in 3 4 5 6 7 8; do
+# 	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
+# 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+# 		--eval-every 1000 --eval-iters 50 \
+# 		--opt master --master-orthogonalize --alpha 0 \
+# 		--hs flat \
+# 		--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
+# 		--hs-g rowcol \
+# 		--hs-g-param softplus \
+# 		--post-norm \
+# 		--fixed-layer-scale $INV_LAYERS \
+# 		--upscale-embedding $SQRT_MODELDIM \
+# 		--qk-norm RMSNorm \
+# 		--wd 0 --decay linear --no-warmup \
+# 		--untie-embed \
+# 		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
+# 		--extra-name exp8-embed-free \
+# 		$*
+# done
+
+
+# ---- embeddings off sphere, sweeping embedding LR ----
+matrix_lr=0.008
+for ke in 2 3 4 5; do
+	emb_lr=$(python3 -c "print(0.001 * 2**($ke/2))")
+		bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+			--eval-every 1000 --eval-iters 50 \
+			--opt master --master-orthogonalize --alpha 0 \
+			--hs flat \
+			--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
+			--hs-g rowcol --hs-g-embed none \
+			--post-norm \
+			--hs-g-param softplus \
+			--fixed-layer-scale $INV_LAYERS \
+			--upscale-embedding $SQRT_MODELDIM \
+			--qk-norm RMSNorm \
+			--wd 0 --decay linear --no-warmup \
+			--untie-embed \
+			--lr $BASE_LR \
+			--matrix-lr $matrix_lr \
+			--embedding-lr $emb_lr \
+			--extra-name exp8-embed-free-elr-grid \
+			$*
 done
