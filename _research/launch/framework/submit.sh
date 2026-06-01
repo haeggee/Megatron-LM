@@ -51,7 +51,7 @@ if [ -n "$DRY" ]; then
     exit 0
 fi
 
-JOB_NAME=${JOB_NAME:-${SIZE}-${RECIPE}}
+JOB_NAME=${JOB_NAME:-${SIZE}-${RECIPE//\//-}}   # subfolder recipes (wsd/muon) -> no slash in job name
 
 # --auto-requeue: chain dependent jobs (same CKPT_DIR -> resume) until the run
 # reaches TRAIN_SAMPLES. REQUEUE_TIME carries this run's --time so each chained

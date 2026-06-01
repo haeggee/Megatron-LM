@@ -43,7 +43,7 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 export SLURM_SUBMIT_DIR=$REPO_ROOT
 cd $REPO_ROOT
 
-DEFAULT_SBATCH=_research/launch/transformer-pp-350m-ablation-master-fp8.sbatch
+DEFAULT_SBATCH=_research/legacy/transformer-pp-350m-ablation-master-fp8.sbatch
 SBATCH=${1:-$DEFAULT_SBATCH}
 [ $# -gt 0 ] && shift
 
@@ -56,6 +56,11 @@ fi
 srun() { :; }
 scontrol() { hostname; }
 export -f srun scontrol
+
+# Tell common.sh to populate MEGATRON_ARGS/WORKDIR/PACKAGE_DIR and then `return`
+# instead of running srun + the auto-requeue tail (which ends in `exit`, and
+# would otherwise kill this wrapper before torchrun launches).
+export COMMON_NO_LAUNCH=1
 
 # Fallback defaults for SLURM vars the sbatch references directly. Inside an
 # interactive allocation these are normally set; the defaults let the wrapper

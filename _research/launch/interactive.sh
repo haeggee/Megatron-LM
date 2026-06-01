@@ -33,7 +33,7 @@
 #   #   MEGATRON_DATA_PATH must be set first.
 #   export MEGATRON_DATA_PATH=...
 #   torchrun --nproc-per-node=4 --nnodes=1 pretrain_gpt.py \
-#       $(grep -E '^\s+--' _research/launch/transformer-pp-350m-ablation-master-fp8.sbatch \
+#       $(grep -E '^\s+--' _research/legacy/transformer-pp-350m-ablation-master-fp8.sbatch \
 #           | sed 's/#.*//' | tr -d '\\') \
 #       --train-iters 20 --exit-duration-in-mins 10 --log-interval 1
 #

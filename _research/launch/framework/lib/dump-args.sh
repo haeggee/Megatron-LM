@@ -13,8 +13,8 @@ FRAMEWORK_DIR=$(cd "$LIB_DIR/.." && pwd)
 
 : "${SIZE:?set SIZE}"
 : "${RECIPE:?set RECIPE}"
-: "${MEGATRON_DATA_PATH:=/tmp/DUMMY_DATA_PREFIX}"   # placeholder for dry inspection
-export MEGATRON_DATA_PATH
+# MEGATRON_DATA_PATH falls through to common.sh's default (ClimbMix-small) for
+# dry inspection unless the env overrides it.
 
 # Stub SLURM + git so sourcing works anywhere.
 srun() { :; }

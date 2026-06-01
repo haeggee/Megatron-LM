@@ -5,8 +5,9 @@
 # interactive-run.sh (torchrun, no SLURM srun wrapper) with short-run defaults.
 #
 # Pre-req: you're already inside an interactive allocation on a GH200 node,
-# inside the alps3 container, with MEGATRON_DATA_PATH set. (See the header of
-# ../interactive-run.sh for how to grab one.)
+# inside the alps3 container. Data defaults to the swissai blend under DATA_ROOT;
+# set MEGATRON_DATA_PATH to a single prefix to override. (See the header of
+# ../interactive-run.sh for how to grab an allocation.)
 #
 #   bash debug.sh --size 350m-moe --recipe my-idea
 #   bash debug.sh --size 175m-moe --recipe my-idea --nproc 2 --iters 10
@@ -36,18 +37,32 @@ done
 : "${SIZE:?usage: debug.sh --size <size> --recipe <recipe> [--nproc N] [--iters N] [--dry-run] [-- extra flags]}"
 : "${RECIPE:?usage: debug.sh --size <size> --recipe <recipe> [--nproc N] [--iters N] [--dry-run] [-- extra flags]}"
 
-export SIZE RECIPE
+# The framework trains in SAMPLES (--train-samples), and Megatron forbids mixing
+# that with --train-iters. So a short debug run is just a small TRAIN_SAMPLES
+# override (iters * GBS), keeping the run sample-based and identical in shape to
+# a real launch — only shorter (LR also decays over this short budget).
+SIZE_FILE="$FRAMEWORK_DIR/sizes/$SIZE.sh"
+[ -f "$SIZE_FILE" ] || { echo "no such size: $SIZE (see $FRAMEWORK_DIR/sizes/)" >&2; exit 1; }
+GBS=$(grep -E '^GBS=' "$SIZE_FILE" | head -1 | cut -d= -f2)
+: "${GBS:?could not read GBS from $SIZE_FILE}"
+TRAIN_SAMPLES=$(( ITERS * GBS ))
+
+export SIZE RECIPE TRAIN_SAMPLES
+# Debug runs land in a separate wandb board ("debug-<base>") so they don't
+# clutter the real one. Override: WANDB_PROJECT_PREFIX= (empty) for the base
+# board, or WANDB_PROJECT=... for an explicit name.
+export WANDB_PROJECT_PREFIX="${WANDB_PROJECT_PREFIX:-debug-}"
 
 if [ -n "$DRY" ]; then
-    echo ">>> DRY RUN: SIZE=$SIZE RECIPE=$RECIPE  (composed args below; not launching)"
+    echo ">>> DRY RUN: SIZE=$SIZE RECIPE=$RECIPE  wandb-project=${WANDB_PROJECT:-${WANDB_PROJECT_PREFIX}megatron-lm-research-baseline}  (composed args below; not launching)"
     bash "$FRAMEWORK_DIR/lib/dump-args.sh" | sed 's/^/  /'
-    echo ">>> would run: NPROC_PER_NODE=$NPROC interactive-run.sh framework/train.sbatch --train-iters $ITERS --exit-duration-in-mins 5 ${EXTRA[*]}"
+    echo ">>> would run: NPROC_PER_NODE=$NPROC TRAIN_SAMPLES=$TRAIN_SAMPLES ($ITERS iters * GBS $GBS) interactive-run.sh framework/train.sbatch --exit-duration-in-mins 5 ${EXTRA[*]}"
     exit 0
 fi
 
+echo ">>> debug: $ITERS iters -> TRAIN_SAMPLES=$TRAIN_SAMPLES (GBS=$GBS)"
 # Short-run debug overrides go LAST so they win (argparse last-value-wins).
-exec env NPROC_PER_NODE="$NPROC" SIZE="$SIZE" RECIPE="$RECIPE" \
+exec env NPROC_PER_NODE="$NPROC" SIZE="$SIZE" RECIPE="$RECIPE" TRAIN_SAMPLES="$TRAIN_SAMPLES" \
     bash "$INTERACTIVE_RUN" "$FRAMEWORK_DIR/train.sbatch" \
-        --train-iters "$ITERS" \
         --exit-duration-in-mins 5 \
         "${EXTRA[@]}"

@@ -19,7 +19,7 @@ MIN_LR=${MIN_LR:-1e-5}
 ELR=${ELR:-3}
 KNOB_STR=lr${LR}-mlr${MLR}-elr${ELR}
 
-# master's canonical regularization (note beta2=0.99, not the 0.95 default).
+# master's canonical regularization
 WEIGHT_DECAY=0.0
 ADAM_BETA1=0.9
 ADAM_BETA2=0.95
@@ -45,7 +45,7 @@ RECIPE_ARGS=(
     # router: use adam branch, normalize row-wise.
     --master-router-use-orthogonal-updates false
     --hypersphere-router-mode row
-    --master-min-lr-mode absolute
+    --min-lr-mode absolute
     --hypersphere-scale-out-proj-init
     # gains
     --gain-parametrization softplus

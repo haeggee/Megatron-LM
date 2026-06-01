@@ -1,5 +1,9 @@
 # Launch framework
 
+> Detail reference for the authoring system. New here? Start at the repo
+> [README](../../../README.md) for the big picture; this page is the day-to-day
+> how-to. Result tracking lives in the [leaderboards README](../../leaderboards/README.md).
+
 A run is **one model size × one recipe**. You compose them instead of copying a
 300-line sbatch. You only ever write the recipe file.
 
@@ -19,7 +23,7 @@ bash submit.sh --size 1.5b-moe --recipe my-idea --nodes 4
 ### TL;DR — debug a recipe interactively
 
 ```bash
-# inside an alps3 interactive allocation, with MEGATRON_DATA_PATH set:
+# inside an alps3 interactive allocation (data defaults to the swissai blend):
 bash debug.sh --size 175m-moe --recipe my-idea --nproc 2 --iters 10   # fast inline run
 bash debug.sh --size 350m-moe --recipe my-idea -- --lr 1e-4           # flags after -- override
 bash debug.sh --size 350m-moe --recipe my-idea --dry-run              # show args, don't launch
@@ -58,8 +62,21 @@ bash submit.sh --size 350m-moe --recipe my-idea             # launch
 
 A recipe is usually 10–20 lines. The only required fields are `OPTIMIZER`,
 `EXP_TAG`, and `RECIPE_ARGS=(...)`. Everything else (`LR`, `WEIGHT_DECAY`,
-`ADAM_BETA1/2`, `CLIP_GRAD`, the WSD schedule, init std, embedding multiplier)
+`ADAM_BETA1/2`, `CLIP_GRAD`, the LR schedule, init std, embedding multiplier)
 has a default in `common.sh` you override only when your idea needs it.
+
+The default LR schedule is **linear** decay to `MIN_LR` over all of
+`TRAIN_SAMPLES` — it auto-scales with run length and has no cooldown to tune.
+For the warmup-stable-decay schedule instead, use the WSD variants in
+`recipes/wsd/` (`wsd/muon`, `wsd/muown`, `wsd/master`, `wsd/normuon`) — each just
+sources its base recipe and flips `LR_DECAY_STYLE=WSD`; the cooldown/warmup fall
+to `common.sh`'s WSD defaults (`minus_sqrt`, ~20% of the run, warmup 0):
+
+```bash
+bash submit.sh --size 350m-moe --recipe wsd/muon   # -> 350m-moe-muon-wsd-lr1e-2
+```
+
+(Ad-hoc, no recipe: `LR_DECAY_STYLE=WSD bash submit.sh --recipe muon`.)
 
 ### Inherit when your idea is "X but with one tweak"
 
@@ -207,7 +224,7 @@ The framework reproduces the old hand-written files exactly. To prove it for any
 legacy file:
 
 ```bash
-bash verify-equivalence.sh 350m-moe master ../transformer-pp-350m-master.sbatch
+bash verify-equivalence.sh 350m-moe master ../../legacy/transformer-pp-350m-master.sbatch
 # ✓ EQUIVALENT: 350m-moe/master matches transformer-pp-350m-master.sbatch
 ```
 
@@ -218,7 +235,8 @@ delete the old file.
 
 `debug.sh` is the interactive twin of `submit.sh`: same `--size`/`--recipe`, but
 it runs inline via `interactive-run.sh` (torchrun, no SLURM) for a few iters.
-Run it from inside an interactive allocation with `MEGATRON_DATA_PATH` set:
+Run it from inside an interactive allocation (data defaults to the swissai blend;
+set `MEGATRON_DATA_PATH` to a single prefix to override):
 
 ```bash
 bash debug.sh --size 350m-moe --recipe my-idea               # 4 ranks, 20 iters

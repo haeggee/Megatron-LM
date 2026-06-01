@@ -35,7 +35,6 @@ set -euo pipefail
 
 : "${SIZE:?set SIZE (see _research/launch/framework/sizes/)}"
 : "${RECIPE:?set RECIPE (see _research/launch/framework/recipes/)}"
-: "${MEGATRON_DATA_PATH:?please set MEGATRON_DATA_PATH to the Megatron-binary dataset prefix (without .bin/.idx), e.g. /path/to/climbmix_small}"
 
 [ -z "${DRY_RUN:-}" ] && echo "START TIME: $(date)"
 export APERTUS_PHASE_SBATCH_START=$(date +%s.%N)
@@ -78,7 +77,10 @@ MIN_LR=${MIN_LR:-1e-5}
 WEIGHT_DECAY=${WEIGHT_DECAY:-0.0}
 ADAM_BETA1=${ADAM_BETA1:-0.9}
 ADAM_BETA2=${ADAM_BETA2:-0.95}
-LR_DECAY_STYLE=${LR_DECAY_STYLE:-WSD}
+# Linear decay to MIN_LR over all of TRAIN_SAMPLES is the default: it auto-scales
+# with run length and has no cooldown to tune. The WSD knobs below only take
+# effect when a recipe (see recipes/wsd/) or the env sets LR_DECAY_STYLE=WSD.
+LR_DECAY_STYLE=${LR_DECAY_STYLE:-linear}
 LR_WARMUP_SAMPLES=${LR_WARMUP_SAMPLES:-0}
 LR_WSD_DECAY_STYLE=${LR_WSD_DECAY_STYLE:-minus_sqrt}
 LR_WSD_DECAY_SAMPLES=${LR_WSD_DECAY_SAMPLES:-732422}
@@ -91,7 +93,10 @@ declare -p MOE_ARGS       >/dev/null 2>&1 || MOE_ARGS=()
 declare -p EXTRA_REG_ARGS >/dev/null 2>&1 || EXTRA_REG_ARGS=()
 
 # ── run identity ─────────────────────────────────────────────────────────────
-PROJECT=${WANDB_PROJECT:-megatron-lm-research-baseline}
+# wandb project: WANDB_PROJECT overrides outright; otherwise WANDB_PROJECT_PREFIX
+# (debug.sh sets "debug-") is prepended to the base name so debug runs land in a
+# separate board.
+PROJECT=${WANDB_PROJECT:-${WANDB_PROJECT_PREFIX:-}megatron-lm-research-baseline}
 # Run name = size + recipe tag + swept knobs (+ optional RUN_TAG to disambiguate
 # any axis KNOB_STR doesn't already cover, e.g. token budget in a length sweep).
 EXP_NAME=${EXP_NAME:-${SIZE}-${EXP_TAG}-${KNOB_STR}${RUN_TAG:+-${RUN_TAG}}}
@@ -212,16 +217,43 @@ LOGGING_ARGS=(
 )
 
 TOKENIZER_ARGS=(
-    --tokenizer-type GPT2BPETokenizer
-    --vocab-file "$WORKDIR/_research/data/gpt2-vocab.json"
-    --merge-file "$WORKDIR/_research/data/gpt2-merges.txt"
+    --tokenizer-type HuggingFaceTokenizer
+    --tokenizer-model "${TOKENIZER_MODEL:-alehc/swissai-tokenizer}"
 )
 
-DATA_ARGS=(
-    --data-path "$MEGATRON_DATA_PATH"
+# Dataset: a blend of swissai sources under DATA_ROOT. Each source dir holds many
+# dump-N-merged.{bin,idx} shards; we glob every shard prefix and hand the flat
+# list to --train-data-path, letting Megatron infer blend weights from the shard
+# lengths (so the mixture is token-proportional across sources). Override the
+# mixture with DATA_ROOT / DATA_SOURCES, or set MEGATRON_DATA_PATH to fall back
+# to a single --data-path prefix (used by verify-equivalence.sh / freeze.sh).
+DATA_ROOT=${DATA_ROOT:-/iopsstor/scratch/cscs/jpcoles/a06}
+DATA_SOURCES=${DATA_SOURCES:-"
+    swissai-dclm-edu-filterrobots_fine-merge
+    swissai-fineweb-2-quality_10-filterrobots-merge/euro-high
+    swissai-fineweb-2-quality_10-filterrobots-merge/euro-mid
+    swissai-fineweb-2-quality_10-filterrobots-merge/other-high
+"}
+
+if [ -n "${MEGATRON_DATA_PATH:-}" ]; then
+    # Single-prefix escape hatch (quick overrides, dry-diff tooling).
+    DATA_ARGS=(--data-path "$MEGATRON_DATA_PATH" --split 99,1,0)
+else
+    TRAIN_DATA_PATHS=()
+    for src in $DATA_SOURCES; do
+        d="$DATA_ROOT/$src"
+        [ -d "$d" ] || { echo "data source not found: $d" >&2; exit 1; }
+        while IFS= read -r p; do
+            TRAIN_DATA_PATHS+=("$p")
+        done < <(find "$d" -type f \( -name '*.bin' -o -name '*.idx' \) \
+                     | sed -E 's/\.[^.]+$//' | sort -u)
+    done
+    [ "${#TRAIN_DATA_PATHS[@]}" -gt 0 ] || { echo "no .bin/.idx shards found under $DATA_ROOT" >&2; exit 1; }
+    DATA_ARGS=(--train-data-path "${TRAIN_DATA_PATHS[@]}")
+fi
+DATA_ARGS+=(
     --data-cache-path "$DATASET_CACHE_DIR"
-    --split 99,1,0
-    --num-workers 4
+    --num-workers 32
 )
 
 # Flat array — order matches the legacy hand-written sbatch files so that the
