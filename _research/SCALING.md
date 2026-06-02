@@ -5,6 +5,13 @@ sizes without burning the cluster on uninformative runs. Pedagogic on purpose:
 this doc assumes you have trained a transformer, but does not assume you have
 read the scaling-laws literature.
 
+> **Status (2026-06).** The MoE entry proposed in §7 has since been built out
+> as the primary ladder: `270m-moe` / `420m-moe` (main baseline) / `810m-moe`
+> / `1.5b-moe`, all 64 routed experts top-2 + 1 shared at ~6% non-embedding
+> sparsity (see [`launch/framework/README.md`](launch/framework/README.md)).
+> Size names like "350M"/"760M" below refer to the older dense ladder; the
+> D/N reasoning carries over to the MoE rungs with N = active params.
+
 ## 1. What "scaling laws" actually are
 
 Throughout this doc:
