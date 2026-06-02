@@ -14,12 +14,13 @@ and MoE transformers. Upstream is untouched except flag-gated edits in
 
 | path | contents |
 | --- | --- |
-| `_research/launch/` | launchable sbatches: baselines (`transformer-pp-<size>-<adamw\|muon>.sbatch`) and a 1B-token quick reference (`-ablation.sbatch`). All hparams pinned; no env-var branching |
+| `_research/launch/framework/` | the authoring surface: a run = one `sizes/<size>.sh` × one `recipes/<name>.sh`, composed by `submit.sh` (see its README). Sizes are the MoE ladder (`270m-moe`, `420m-moe` = main baseline, `810m-moe`, `1.5b-moe`) + dense `1.3b`/`2.7b` |
 | `_research/launch/alps3.toml` | CSCS Container Engine EDF (loaded via absolute path from the sbatches) |
+| `_research/legacy/` | retired hand-written sbatches (pre-framework); reproducible but not the authoring path |
 | `_research/leaderboards/<size>/README.md` | ranked result table + W&B links for that size |
 | `_research/leaderboards/<size>/runs/NN-*.sbatch` | frozen, self-contained sbatches (no env vars, hparams pinned) |
 | `_research/logging_patch/` | JSONL + wandb telemetry, activated by a two-line hook in `pretrain_gpt.py` |
-| `_research/data/` | tokenizer files (GPT-2 BPE) |
+| `_research/data/` | legacy GPT-2 BPE tokenizer files (only the frozen 350m-ablation entries use them; current runs use the HF `alehc/swissai-tokenizer`) |
 | `_research/results/` | gitignored run outputs (logs, tensorboard, wandb) |
 | `megatron/core/optimizer/emerging_optimizers.py` | Muon / AdaMuon / NorMuon glue |
 | `megatron/core/optimizer/ademamix.py` | AdEMAMix port |
@@ -34,10 +35,13 @@ you're adding a flag-gated code path.
 ## How experiments flow
 
 ```
-copy an existing sbatch in launch/, edit the optimizer/LR/schedule block
+write a ~15-line recipe in launch/framework/recipes/
+        ↓
+bash launch/framework/submit.sh --size 420m-moe --recipe <name>
         ↓  a config wins
-snapshot a self-contained sbatch into
-leaderboards/<size>/runs/NN-*.sbatch  +  add a row to that README.md
+bash launch/framework/freeze.sh --size <size> --recipe <name> --board <board> --out auto
+(bakes a frozen sbatch into leaderboards/<board>/runs/NN-*.sbatch)
+        +  add a row to that board's README.md
 ```
 
 Every leaderboard sbatch header carries the git sha, W&B URL, and final +

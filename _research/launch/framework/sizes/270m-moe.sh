@@ -1,10 +1,10 @@
 # shellcheck shell=bash
 #
 # 270m-moe — smallest rung of the MoE ladder. Cheapest sanity / LR-probe point
-# before spending on 420m. 20L / 768H / 12h / 4kv. 1 node.
+# before spending on 420m. 14L / 768H / 12h / 4kv. 2 nodes.
 # MoE: 64 routed experts top-2 + 1 shared (half a routed expert's width), first
-# layer dense then 14 MoE (~5% dense). moe_ffn = hidden/1.5. ~0.29B active /
-# ~1.68B total; ~6.3% active/total (non-embedding) — iso-sparsity proxy for
+# layer dense then 13 MoE (~5% dense). moe_ffn = hidden/1.5. ~0.27B active /
+# ~1.22B total; ~6.4% active/total (non-embedding) — iso-sparsity proxy for
 # 670B-A40B. DeepSeek-V3-style routing (sigmoid + aux-loss-free bias) is
 # invariant and lives in lib/common.sh; this file sets only expert geometry.
 

@@ -1,9 +1,12 @@
 # 2.7b Leaderboard
 
-No runs yet. See [`../350m-ablation/README.md`](../350m-ablation/README.md)
-for the leaderboard format; once a full-size run completes, snapshot a
-self-contained sbatch into `runs/` and add a row to the table here.
+Best runs at **2.7B params (dense), ~300B tokens, 16 nodes** (`--size 2.7b`).
+No entries yet.
 
-The current recommended launch scripts live in
-`_research/launch/transformer-pp-2.7b-adamw.sbatch` and (for 350m)
-`_research/launch/transformer-pp-350m-muon.sbatch`.
+- **Format & how to submit:** see the [leaderboards README](../README.md); the
+  [350m-ablation board](../350m-ablation/README.md) is the worked example.
+- **Produce a candidate:**
+  `bash ../../launch/framework/submit.sh --size 2.7b --recipe <recipe> --auto-requeue`
+  (long run — `--auto-requeue` chains allocations), then freeze the winner with
+  `../../launch/framework/freeze.sh --size 2.7b --recipe <recipe> --board 2.7b --out auto`
+  and add a row here (promotion steps in the leaderboards README).

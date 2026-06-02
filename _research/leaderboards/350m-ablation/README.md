@@ -1,7 +1,14 @@
-# 350M Ablation Leaderboard
+# 350M Ablation Leaderboard (legacy dense track)
+
+> **Legacy track.** These entries predate the MoE ladder and ran on the old
+> dense setup (ClimbMix data, GPT-2 tokenizer). The current baselines are the
+> MoE boards ([`420m-moe`](../420m-moe/README.md) and up) on the swissai
+> blend — see the [leaderboards README](../README.md). This board is kept as
+> the worked example of the table format, and its frozen sbatches still
+> reproduce bitwise at their recorded shas.
 
 Fast optimizer-ablation track on 350M dense Transformer++ (24L / 1024H /
-2560F / 16h / 4kv GQA), 1B tokens on ClimbMix, GBS=128 (524K tokens/step),
+2560F / 16h / 4kv GQA), 1B tokens, GBS=128 (524K tokens/step),
 seq_len=4096, 1 GH200 node, ~30 min/run, WSD schedule.
 
 All entries share data, schedule, seed (42), and **active param count

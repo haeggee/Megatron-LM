@@ -1,5 +1,9 @@
 # Leaderboards
 
+> Detail reference for result tracking. The repo [README](../../README.md) has
+> the big picture; runs are authored with the
+> [launch framework](../launch/framework/README.md) and promoted here.
+
 Per-size ranked lists of training runs on this fork of Megatron-LM. Each
 entry points to a self-contained, re-runnable `.sbatch` and a W&B run.
 
@@ -50,13 +54,21 @@ When a run wins (or is otherwise worth tracking), add it as an entry:
 
 ## Sizes
 
-| leaderboard | tokens | nodes | purpose |
-| --- | ---: | ---: | --- |
-| [`350m-ablation`](350m-ablation/README.md) | 1B | 1 | quick sweeps, optimizer ablations (~30 min/run) |
-| [`350m`](350m/README.md) | 15B | 1 | 350M full baseline (~8 h/run) |
-| [`760m`](760m/README.md) | 30B | 4 | 760M full baseline (~7 h/run) |
-| [`1.3b`](1.3b/README.md) | 100B | 8 | 1.3B full baseline (~19 h/run) |
-| [`2.7b`](2.7b/README.md) | 300B | 16 | 2.7B full baseline (~60 h/run) |
+The active boards mirror the MoE ladder in
+[`launch/framework/sizes/`](../launch/framework/sizes/): 64 routed experts
+top-2 + 1 shared, ~6% non-embedding sparsity at every rung (see the
+[framework README](../launch/framework/README.md)).
+
+| leaderboard | params (active / total) | tokens | nodes | purpose |
+| --- | --- | ---: | ---: | --- |
+| [`420m-moe`](420m-moe/README.md) | 0.42B / 2.5B | 15B | 2 | **the main baseline** |
+| [`810m-moe`](810m-moe/README.md) | 0.81B / 6.7B | 30B | 4 | scale-up rung |
+| [`1.5b-moe`](1.5b-moe/README.md) | 1.5B / 14.6B | 30B | 4 | promotion-confirm rung |
+| [`1.3b`](1.3b/README.md) | 1.3B (dense) | 100B | 8 | dense baseline |
+| [`2.7b`](2.7b/README.md) | 2.7B (dense) | 300B | 16 | dense baseline |
+| [`350m-ablation`](350m-ablation/README.md) | 0.36B (dense) | 1B | 1 | legacy dense ablation track (~30 min/run), the worked example |
+
+(`270m-moe` is an LR-probe rung, not a board — probe results stay in W&B.)
 
 ## Related folders
 
@@ -74,7 +86,7 @@ checkout <sha> && sbatch` still reproduces it bitwise):
 
 ```bash
 bash _research/launch/framework/freeze.sh \
-    --size 350m-moe --recipe <recipe> --slug <slug> --board <size> --out auto
+    --size 420m-moe --recipe <recipe> --slug <slug> --board 420m-moe --out auto
 ```
 
 Then fill in the run's loss / W&B / rank in the generated header and add a table

@@ -10,7 +10,8 @@
 #        --cpus-per-task=72 --mem=460000 --mpi=pmix \
 #        --environment=_research/launch/alps3.toml --pty bash
 #   # ... now inside the alps3 container ...
-#   export MEGATRON_DATA_PATH=/path/to/climbmix_prefix
+#   # data defaults to the swissai blend; or point at a single binary prefix:
+#   export MEGATRON_DATA_PATH=/path/to/megatron_binary_prefix   # optional
 #   bash _research/launch/interactive-run.sh
 #
 # Usage:

@@ -93,7 +93,7 @@ RECIPE_ARGS+=(--linear-attention-allow-neg-eigval --linear-attention-freq 4)
 
 | size | params | MoE | tokens (default) | nodes | role |
 | --- | --- | --- | ---: | ---: | --- |
-| `270m-moe` | 270m active | 64e-tk2-sh1 | ~12B | 1 | cheap LR probe |
+| `270m-moe` | 270m active | 64e-tk2-sh1 | 15B | 2 | cheap LR probe |
 | `420m-moe` | 420m active | 64e-tk2-sh1 | 15B | 2 | **the main baseline** |
 | `810m-moe` | 810M active | 64e-tk2-sh1 | 30B | 4 | scale-up rung |
 | `1.5b-moe` | 1.5B active | 64e-tk2-sh1 | 30B | 4 | promotion-confirm rung |
@@ -123,9 +123,9 @@ entry (all args pinned inline, framework no longer required to run it).
 
 ```bash
 # when a run is worth tracking, freeze it into the board (next free NN- prefix):
-bash freeze.sh --size 420m-moe --recipe master --slug master --board 350m --out auto
+bash freeze.sh --size 420m-moe --recipe master --slug master --board 420m-moe --out auto
 # then: run it, fill in the <FILL IN> loss/W&B/rank header fields, and add a
-# row to leaderboards/350m/README.md (entry / parent / change — see that file).
+# row to leaderboards/420m-moe/README.md (entry / parent / change — see that file).
 ```
 
 The frozen file's scientific args are verified identical to the live

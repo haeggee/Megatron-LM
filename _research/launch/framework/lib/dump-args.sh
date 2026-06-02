@@ -13,8 +13,8 @@ FRAMEWORK_DIR=$(cd "$LIB_DIR/.." && pwd)
 
 : "${SIZE:?set SIZE}"
 : "${RECIPE:?set RECIPE}"
-# MEGATRON_DATA_PATH falls through to common.sh's default (ClimbMix-small) for
-# dry inspection unless the env overrides it.
+# Data falls through to common.sh's default (the swissai blend) for dry
+# inspection unless MEGATRON_DATA_PATH / DATA_ROOT override it.
 
 # Stub SLURM + git so sourcing works anywhere.
 srun() { :; }
