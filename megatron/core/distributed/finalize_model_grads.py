@@ -21,7 +21,7 @@ from megatron.core.pipeline_parallel.utils import (
 from megatron.core.process_groups_config import ProcessGroupCollection
 
 from .. import parallel_state
-from ..transformer.moe.moe_utils import get_updated_expert_bias
+from ..transformer.moe.moe_utils import get_updated_expert_bias, save_to_aux_losses_tracker
 from ..transformer.transformer_config import TransformerConfig
 from ..utils import (
     get_attr_wrapped_model,
@@ -335,6 +335,7 @@ def _update_router_expert_bias(model: List[torch.nn.Module], config: Transformer
     """
     tokens_per_expert_list = []
     expert_bias_list = []
+    layer_number_list = []
     for model_chunk in model:
         for module in get_attr_wrapped_model(model_chunk, 'modules')():
             # Only update expert_bias if this module is in the training mode. There are special
@@ -344,6 +345,7 @@ def _update_router_expert_bias(model: List[torch.nn.Module], config: Transformer
             if hasattr(module, 'expert_bias') and module.training:
                 tokens_per_expert_list.append(module.local_tokens_per_expert)
                 expert_bias_list.append(module.expert_bias)
+                layer_number_list.append(getattr(module, 'layer_number', None))
     # For hybrid models with both MoE and Dense layers, this list can be empty.
     if len(expert_bias_list) == 0:
         return
@@ -355,6 +357,51 @@ def _update_router_expert_bias(model: List[torch.nn.Module], config: Transformer
 
     for expert_bias, updated_expert_bias in zip(expert_bias_list, stacked_updated_expert_bias):
         expert_bias.copy_(updated_expert_bias)
+
+    # Log the expert load imbalance for wandb/tensorboard. With aux-loss-free balancing the
+    # (optional, tiny) seq aux loss is no longer the primary balancing signal -- the expert
+    # bias is -- so we surface how unevenly tokens are actually spread across routed experts.
+    # get_updated_expert_bias() all-reduced stacked_tokens_per_expert in place across
+    # TPxCPxDP, so it now holds the global per-expert token counts for the whole global batch.
+    # We report DeepSeek-V3's "MaxVio" = max_load / mean_load - 1 (0.0 == perfectly balanced).
+    _log_router_load_imbalance(stacked_tokens_per_expert, layer_number_list, config)
+
+
+def _log_router_load_imbalance(
+    tokens_per_expert: torch.Tensor, layer_numbers: List[Optional[int]], config: TransformerConfig
+):
+    """Save per-layer expert load imbalance (MaxVio) to the MoE logging tracker.
+
+    Args:
+        tokens_per_expert (torch.Tensor): Globally-reduced token counts per expert, stacked over
+            the local MoE layers with shape [num_local_moe_layers, num_experts].
+        layer_numbers (List[Optional[int]]): 1-indexed global layer number for each stacked layer.
+        config (TransformerConfig): The transformer config.
+    """
+    # Lazily imported to avoid a heavy import at module load time and a potential import cycle.
+    from megatron.core.num_microbatches_calculator import get_num_microbatches
+
+    with torch.no_grad():
+        mean_load = tokens_per_expert.mean(dim=-1)
+        max_load = tokens_per_expert.amax(dim=-1)
+        # max_vio is 0 for a layer that saw no tokens (e.g. on a step with empty input).
+        max_vio = torch.where(
+            mean_load > 0, max_load / mean_load - 1.0, torch.zeros_like(mean_load)
+        )
+
+    num_layers = config.num_layers
+    if config.mtp_num_layers is not None:
+        num_layers += config.mtp_num_layers
+    # track_moe_metrics() scales every tracker entry by 1/num_microbatches -- correct for the aux
+    # losses, which accumulate once per microbatch forward. We accumulate once per global step, so
+    # pre-multiply by num_microbatches here to cancel that scaling and report the raw MaxVio.
+    num_microbatches = get_num_microbatches()
+    for i, layer_number in enumerate(layer_numbers):
+        # tokens_per_expert is already globally reduced, so reduce_group=None leaves only the
+        # cross-PP sum in reduce_aux_losses_tracker_across_ranks (each layer lives on one PP rank).
+        save_to_aux_losses_tracker(
+            "router_max_vio", max_vio[i] * num_microbatches, layer_number, num_layers
+        )
 
 
 def _allreduce_non_tensor_model_parallel_grads(

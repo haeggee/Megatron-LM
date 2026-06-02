@@ -2238,6 +2238,10 @@ def training_log(
             track_names.append("global_load_balancing_loss")
         if args.moe_z_loss_coeff is not None:
             track_names.append("z_loss")
+        # Aux-loss-free (expert-bias) balancing logs the actual expert load imbalance
+        # ("MaxVio") from finalize_model_grads instead of relying on an aux loss.
+        if args.moe_router_enable_expert_bias:
+            track_names.append("router_max_vio")
 
         if is_hybrid_model(args):
             from operator import itemgetter
@@ -2326,6 +2330,17 @@ def training_log(
                     writer.add_scalar('throughput', throughput, iteration)
                 if wandb_writer:
                     wandb_writer.log({'throughput': throughput}, iteration)
+        # Token throughput per GPU: more directly interpretable than TFLOP/s/GPU
+        # (which depends on model FLOPs). batch_size is the global batch in samples.
+        tokens_per_sec_per_gpu = (
+            batch_size * args.seq_length / (elapsed_time_per_iteration * args.world_size)
+        )
+        log_string += f' tokens/s/GPU: {tokens_per_sec_per_gpu:.1f} |'
+        if args.log_timers_to_tensorboard and not is_first_iteration:
+            if writer:
+                writer.add_scalar('tokens-per-sec-per-gpu', tokens_per_sec_per_gpu, iteration)
+            if wandb_writer:
+                wandb_writer.log({'tokens-per-sec-per-gpu': tokens_per_sec_per_gpu}, iteration)
         if args.log_energy:
             energy = (energy_monitor.lap() / total_iterations) / args.world_size
             power = energy / elapsed_time_per_iteration
