@@ -146,22 +146,13 @@ class MasterOptimizer(torch.optim.Optimizer):
         )
         super().__init__(params, defaults)
 
-        # Ckpt-resume workaround: Megatron's _filter_and_reorder_param_groups
-        # (optimizer.py) keys saved groups by (wd_mult, lr_mult,
-        # is_expert_parallel, is_decoupled_lr). Master's overrides differ only
-        # in max_lr / min_lr / use_orthogonal_updates / optimizer, so multiple
-        # groups (matrix, embedding, LM-head, router, ...) collide on that
-        # tuple. The loader's dict-based map then silently overwrites colliding
-        # entries and reassigns the surviving group's `params` repeatedly,
-        # which trips torch.optim.Optimizer.load_state_dict's per-group size
-        # check ("loaded state dict contains a parameter group that doesn't
-        # match the size of optimizer's group"). lr_mult is unused at runtime
-        # (OptimizerParamScheduler reads max_lr/min_lr), so a unique tag per
-        # group disambiguates the loader without touching training math.
-        # Save/load round-trip works because both jobs run this same code in
-        # the same param-group order.
-        for _i, _g in enumerate(self.param_groups):
-            _g['lr_mult'] = float(_i + 1)
+        # NOTE: param groups that differ only in max_lr / min_lr /
+        # use_orthogonal_updates used to collide in Megatron's checkpoint
+        # group matching (keyed by wd_mult/lr_mult/is_expert_parallel/
+        # is_decoupled_lr), which required a per-group lr_mult tagging hack
+        # here. Groups now carry a unique content-derived 'group_key' (see
+        # _get_param_groups in megatron/core/optimizer/__init__.py) that the
+        # loaders match on, so no per-optimizer workaround is needed.
 
         # Normalize parameters at init so the first forward sees on-sphere weights.
         # When hypersphere_preserve_init=True we skip this so the model's init
@@ -500,6 +491,7 @@ class GainsMasterOptimizer(MasterOptimizer):
         hypersphere_gains_mode_output: Optional[Literal["row", "col", "rowcol", "flat", "none"]] = None,
         hypersphere_gains_mode_embedding: Optional[Literal["row", "col", "rowcol", "flat", "none"]] = None,
         gains_lr: Optional[float] = None,
+        gains_min_lr: Optional[float] = None,
         gains_betas: tuple[float, float] = (0.9, 0.999),
         gains_eps: float = 1e-8,
         gains_weight_decay: float = 0.0,
@@ -513,6 +505,7 @@ class GainsMasterOptimizer(MasterOptimizer):
         self.hypersphere_gains_mode_output = hypersphere_gains_mode_output
         self.hypersphere_gains_mode_embedding = hypersphere_gains_mode_embedding
         self.gains_lr = gains_lr  # None → follow group["lr"] verbatim
+        self.gains_min_lr = gains_min_lr  # floor of the gains' own schedule
         self.gains_betas = gains_betas
         self.gains_eps = gains_eps
         self.gains_weight_decay = gains_weight_decay
@@ -728,15 +721,25 @@ class GainsMasterOptimizer(MasterOptimizer):
         eps = self.gains_eps
         wd = self.gains_weight_decay
 
-        # Gains follow the param-group LR. If gains_lr is unset, use group["lr"]
-        # verbatim (so the param scheduler drives gains too). Otherwise treat
-        # gains_lr as a base LR and apply the param schedule shape on top.
+        # Gains have their OWN schedule with peak gains_lr and floor
+        # gains_min_lr, following the host group's schedule shape: map the
+        # host group's normalized position t = (lr - min) / (max - min) onto
+        # the gains' [gains_min_lr, gains_lr] interval. With min_lr_mode
+        # 'relative' this reduces exactly to gains_lr * (lr / max_lr); with
+        # 'absolute' the gains floor at gains_min_lr (= config.min_lr) instead
+        # of inheriting the host group's fraction. During warmup the affine
+        # map can extrapolate below the floor (host lr starts at init_lr,
+        # often 0), so clamp at 0 — gains warm up alongside everything else.
+        # If gains_lr is unset, use group["lr"] verbatim.
         if self.gains_lr is None:
             lr = group["lr"]
         else:
             max_lr = group.get("max_lr", group["lr"])
-            schedule_mult = (group["lr"] / max_lr) if max_lr > 0 else 1.0
-            lr = self.gains_lr * schedule_mult
+            min_lr = group.get("min_lr", 0.0)
+            gains_min = self.gains_min_lr if self.gains_min_lr is not None else 0.0
+            denom = max_lr - min_lr
+            t = ((group["lr"] - min_lr) / denom) if denom > 0 else 1.0
+            lr = max(gains_min + t * (self.gains_lr - gains_min), 0.0)
 
         bias_correction1 = 1.0 - beta1 ** step
         bias_correction2 = 1.0 - beta2 ** step

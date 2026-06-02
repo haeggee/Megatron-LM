@@ -118,7 +118,7 @@ if [ "${#MOE_ARGS[@]}" -gt 0 ]; then
         --moe-aux-loss-coeff "${MOE_AUX_LOSS_COEFF:-1e-3}"
         --moe-grouped-gemm
         --moe-permute-fusion
-        --moe-token-dispatcher-type alltoall
+        --moe-token-dispatcher-type allgather
         --moe-per-layer-logging
     )
 fi

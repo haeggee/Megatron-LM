@@ -2328,9 +2328,11 @@ def _add_regularization_args(parser):
                        help='Optimizer for scalar parameters (embeddings, biases, norms) '
                        'when using muon. Defaults to adam.')
     group.add_argument('--muon-scalar-lr', type=float, default=None,
-                       help='Learning rate for the scalar-optimizer param group (non-2D / '
-                       'embedding / output params) when using muon. When unset, inherits '
-                       '--lr.')
+                       help='Legacy alias for --gains-lr: peak LR for 1D vector params '
+                       '(biases, norm gains) under the Muon family and master. NOTE: no '
+                       'longer covers embedding / LM-head params — set those with '
+                       '--embedding-lr / --output-lr. Mutually exclusive with --gains-lr. '
+                       'When unset, 1D params inherit --lr.')
     group.add_argument('--muon-scalar-weight-decay', type=float, default=None,
                        help='Weight decay for the scalar-optimizer param group when using '
                        'muon. When unset, inherits --weight-decay. Set to 0 to disable '
@@ -2390,6 +2392,12 @@ def _add_regularization_args(parser):
                        help='Second beta coefficient for Lion optimizer '
                        '(used in momentum EMA update). Default: 0.98.')
 
+    # Per-parameter-class LR knobs (--matrix-lr / --embedding-lr / --output-lr /
+    # --gains-lr), shared by ALL optimizers (adam, muon family, muown, master).
+    # Each is an absolute peak LR; the scheduler warms the group up to that
+    # peak and decays it to a per-group min derived via --min-lr-mode. Unset
+    # knobs leave those params on the base --lr schedule.
+    #
     # Master optimizer (Adam/AdEMAMix + optional Muon orthogonalized updates +
     # L2 hypersphere weight clipping + learnable per-axis gains). Flag-gated
     # via --optimizer master. All defaults are off; existing runs are
@@ -2397,32 +2405,36 @@ def _add_regularization_args(parser):
     # --muon-nesterov/--muon-no-split-qkv/--muon-scale-mode (incl. shape_up)/
     # --muon-num-ns-steps/--muon-tp-mode/--muon-extra-scale-factor/
     # --muon-coefficient-type/--muon-fp32-matmul-prec/
-    # --muon-scalar-weight-decay/--weight-decay. NOTE: --muon-scalar-lr does not
-    # apply to master (use --matrix-lr/--embedding-lr-multiplier/--output-lr).
+    # --muon-scalar-weight-decay/--weight-decay.
     group.add_argument('--matrix-lr', type=float, default=None,
-                       help='Absolute LR for matrix (2D non-embedding/output) params '
-                       'under --optimizer master. Overrides muon_lr_factor * lr.')
-    group.add_argument('--embedding-lr-multiplier', type=float, default=None,
-                       help='LR multiplier for embedding (and tied LM-head) params under '
-                       '--optimizer master. Final max_lr = embedding_lr_multiplier * lr. '
+                       help='Absolute peak LR for matrix (2D non-embedding/output) params, '
+                       'for all optimizers. Overrides muon_lr_factor * lr. When unset, '
+                       'matrix params use the base --lr.')
+    group.add_argument('--embedding-lr', type=float, default=None,
+                       help='Absolute peak LR for embedding (and tied LM-head) params, for '
+                       'all optimizers. Mutually exclusive with --embedding-lr-multiplier. '
                        'When unset, those params use the base --lr.')
+    group.add_argument('--embedding-lr-multiplier', type=float, default=None,
+                       help='DEPRECATED: use --embedding-lr (absolute). LR multiplier for '
+                       'embedding (and tied LM-head) params; final max_lr = '
+                       'embedding_lr_multiplier * lr.')
     group.add_argument('--output-lr', type=float, default=None,
-                       help='Absolute LR for the (untied) output LM-head params under '
-                       '--optimizer master. Independent of --embedding-lr-multiplier and '
-                       '--muon-scalar-lr. When unset, the output layer uses the base --lr.')
+                       help='Absolute peak LR for the (untied) output LM-head params, for '
+                       'all optimizers. Independent of --embedding-lr and --gains-lr. '
+                       'When unset, the output layer uses the base --lr.')
     group.add_argument('--min-lr-mode', '--master-min-lr-mode', dest='min_lr_mode',
                        type=str, default='relative',
                        choices=['relative', 'absolute'],
                        help='How per-group min_lr is set for any group with a custom '
-                       'max_lr (master matrix/embedding/output groups and the Muon-family '
-                       'scalar group). "relative" (default): every group decays by the '
+                       'max_lr (matrix / embedding / output / gains groups). '
+                       '"relative" (default): every group decays by the '
                        'same fraction (config.min_lr / config.lr), so min_lr = max_lr * '
                        'ratio per group — schedule shape preserved, floors differ. '
                        '"absolute": every group decays to the same floor (config.min_lr). '
                        '(--master-min-lr-mode is a deprecated alias.)')
     group.add_argument('--muon-lr-factor', type=float, default=1.0,
-                       help='When --matrix-lr is unset, matrix-param LR for master is '
-                       'muon_lr_factor * lr. Default 1.0.')
+                       help='When --matrix-lr is unset, the matrix-param LR is '
+                       'muon_lr_factor * lr. Default 1.0 (no separate matrix group).')
     group.add_argument('--hypersphere-mode', type=str, default=None,
                        choices=['row', 'col', 'flat', 'embed'],
                        help='Hypersphere normalization mode for non-embedding/output 2D '
@@ -2474,11 +2486,13 @@ def _add_regularization_args(parser):
                        choices=['row', 'col', 'rowcol', 'flat', 'none'],
                        help='Gains mode override for the embedding under master.')
     group.add_argument('--gains-lr', type=float, default=None,
-                       help='Absolute LR for the per-axis gains AdamW under '
-                       '--optimizer master. When unset, falls back to --lr. '
-                       'The gains LR is still multiplied each step by the '
-                       'scheduler ratio (current_lr / max_lr), so it tracks '
-                       'the schedule shape of the main LR.')
+                       help='Absolute peak LR for gain-like parameters, for all '
+                       'optimizers: (1) every 1D vector param (RMSNorm gains, biases) '
+                       'gets its own scheduled group with this peak; (2) master\'s '
+                       'internal per-axis gains AdamW uses this peak with its own '
+                       'schedule (decaying to the --min-lr-mode-derived floor). '
+                       'Mutually exclusive with the legacy --muon-scalar-lr. '
+                       'When unset, falls back to --lr.')
     group.add_argument('--gain-parametrization', type=str, default='direct',
                        choices=['direct', 'offset', 'softplus'],
                        help='Reparametrize the stored gain g; effective multiplier '

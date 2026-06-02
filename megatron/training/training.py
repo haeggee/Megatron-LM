@@ -52,7 +52,11 @@ from typing import Any, Optional, Dict
 import torch.distributed
 
 from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
-from megatron.core.optimizer_param_scheduler import get_canonical_lr_for_logging
+from megatron.core.optimizer_param_scheduler import (
+    LR_CLASS_NAMES,
+    get_canonical_lr_for_logging,
+    get_lr_by_class_for_logging,
+)
 from .log_handler import CustomHandler
 
 # Make default logging level INFO, but filter out all log messages not from MCore.
@@ -162,7 +166,10 @@ from megatron.core.transformer.module import Float16Module
 from megatron.core.distributed import DistributedDataParallelConfig, TorchFullyShardedDataParallelConfig
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as megatron_FSDP
-from megatron.core.optimizer.optimizer import param_group_identifier_keys
+from megatron.core.optimizer.optimizer import (
+    param_group_identifier_keys,
+    use_group_key_matching,
+)
 
 from megatron.core.optimizer.qk_clip import clip_qk
 
@@ -842,7 +849,12 @@ def preprocess_common_state_dict(common_state_dict):
             if "param_groups" not in inner_optimizer:
                 return
             param_groups = inner_optimizer["param_groups"]
-            key_fn = lambda pg: [pg[key] for key in param_group_identifier_keys]
+            if use_group_key_matching(param_groups):
+                # Unique content-derived key (see _get_param_groups); the legacy
+                # tuple collides for groups differing only in max_lr/min_lr/optimizer.
+                key_fn = lambda pg: pg['group_key']
+            else:
+                key_fn = lambda pg: [pg[key] for key in param_group_identifier_keys]
             param_groups.sort(key=key_fn)
             inner_optimizer["param_groups"] = param_groups
 
@@ -2064,6 +2076,7 @@ def training_log(
     max_attention_logit,
     pg_collection=None,
     is_first_iteration=False,
+    lr_by_class: Optional[Dict[str, float]] = None,
 ):
     """Log training information such as losses, timing, ...."""
     args = get_args()
@@ -2148,6 +2161,17 @@ def training_log(
 
     # learning rate will be None on ranks without trainable params, so we must gather across mp ranks
     learning_rate: float | None = reduce_max_stat_across_model_parallel_group(learning_rate)
+    # Per-LR-class learning rates (matrix / embedding / output / vector / ...).
+    # Some classes only exist on certain pipeline stages (e.g. embedding on the
+    # first/last stage), so reduce each across the mp group. Iterate the FIXED
+    # LR_CLASS_NAMES order — every rank must issue the same collectives.
+    lr_by_class_reduced: Dict[str, float] = {}
+    for _lr_class in LR_CLASS_NAMES:
+        _lr = reduce_max_stat_across_model_parallel_group(
+            lr_by_class.get(_lr_class) if lr_by_class else None
+        )
+        if _lr is not None:
+            lr_by_class_reduced[_lr_class] = _lr
     # Tensorboard values.
     if writer and (iteration % args.tensorboard_log_interval == 0):
         if wandb_writer:
@@ -2157,6 +2181,10 @@ def training_log(
             writer.add_scalar('learning-rate vs samples', learning_rate, args.consumed_train_samples)
             if wandb_writer:
                 wandb_writer.log({'learning-rate': learning_rate}, iteration)
+        for _lr_class, _lr in lr_by_class_reduced.items():
+            writer.add_scalar(f'learning-rate-{_lr_class}', _lr, iteration)
+            if wandb_writer:
+                wandb_writer.log({f'learning-rate-{_lr_class}': _lr}, iteration)
         if args.skipped_train_samples > 0:
             writer.add_scalar('skipped-train-samples', args.skipped_train_samples, iteration)
             if wandb_writer:
@@ -3320,8 +3348,10 @@ def train(
             params_norm = calc_params_l2_norm(model)
         if optimizer is not None:
             learning_rate = get_canonical_lr_for_logging(optimizer.param_groups)
+            lr_by_class = get_lr_by_class_for_logging(optimizer.param_groups)
         else:
             learning_rate = None
+            lr_by_class = None
         report_memory_flag = training_log(
             loss_dict,
             total_loss_dict,
@@ -3336,6 +3366,7 @@ def train(
             max_attention_logit,
             pg_collection=model_pg_collection,
             is_first_iteration=is_first_iteration,
+            lr_by_class=lr_by_class,
         )
         is_first_iteration = False
 

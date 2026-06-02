@@ -20,6 +20,10 @@ RECIPE_ARGS=(
     --muon-nesterov
     --muon-momentum 0.95
     --muown-eps 1e-8
-    --muon-scalar-lr "$SCALAR_LR"
+    # SCALAR_LR for everything Adam-managed, via the per-class knobs
+    # (--muon-scalar-lr is now 1D-only; this reproduces the old lumped group).
+    --embedding-lr "$SCALAR_LR"
+    --output-lr "$SCALAR_LR"
+    --gains-lr "$SCALAR_LR"
     --muon-scalar-weight-decay 0.0
 )

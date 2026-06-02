@@ -19,7 +19,7 @@ from torch.optim.optimizer import ParamsT
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.utils import get_pg_size, log_single_rank
 
-from .optimizer_config import ParamKey, ParamPredicate
+from .optimizer_config import ParamKey, ParamPredicate, group_min_lr
 
 try:
     from emerging_optimizers import registry
@@ -518,6 +518,10 @@ def _master_config_to_kwargs(config, model_chunks, pg_collection) -> Dict[str, A
 
     matrix_lr = (config.matrix_lr if config.matrix_lr is not None
                  else config.muon_lr_factor * (config.lr or 0.0))
+    # Master's internal per-axis gains follow --gains-lr (shared knob that also
+    # drives the 1D-vector param group), with their own schedule endpoints
+    # [group_min_lr(gains_lr), gains_lr] per --min-lr-mode.
+    effective_gains_lr = config.gains_lr if config.gains_lr is not None else config.lr
     return dict(
         # Common.
         lr=matrix_lr,
@@ -557,7 +561,8 @@ def _master_config_to_kwargs(config, model_chunks, pg_collection) -> Dict[str, A
         hypersphere_gains_mode=config.hypersphere_gains_mode,
         hypersphere_gains_mode_output=config.hypersphere_gains_mode_output,
         hypersphere_gains_mode_embedding=config.hypersphere_gains_mode_embedding,
-        gains_lr=config.gains_lr if config.gains_lr is not None else config.lr,
+        gains_lr=effective_gains_lr,
+        gains_min_lr=group_min_lr(config, effective_gains_lr),
         gains_betas=(config.adam_beta1, config.adam_beta2),
         gains_eps=config.adam_eps,
         gains_weight_decay=config.weight_decay,
