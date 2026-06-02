@@ -12,10 +12,10 @@
 # cooldown to retune per point. Switch with --decay WSD (uses the recipe's WSD
 # cooldown) or --decay keep (leave the recipe's own setting untouched).
 #
-#   bash sweep-length.sh --size 350m-moe --recipe master --tokens "7.5 15 30"
-#   bash sweep-length.sh --size 350m-moe --recipe master --tokens "15 30 60" --auto-requeue
-#   bash sweep-length.sh --size 350m-moe --recipe master --samples "1831055 3662109"
-#   bash sweep-length.sh --size 350m-moe --recipe master --tokens "15 30" --dry-run
+#   bash sweep-length.sh --size 420m-moe --recipe master --tokens "7.5 15 30"
+#   bash sweep-length.sh --size 420m-moe --recipe master --tokens "15 30 60" --auto-requeue
+#   bash sweep-length.sh --size 420m-moe --recipe master --samples "1831055 3662109"
+#   bash sweep-length.sh --size 420m-moe --recipe master --tokens "15 30" --dry-run
 #
 set -euo pipefail
 

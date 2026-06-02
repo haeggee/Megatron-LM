@@ -9,10 +9,10 @@
 # set MEGATRON_DATA_PATH to a single prefix to override. (See the header of
 # ../interactive-run.sh for how to grab an allocation.)
 #
-#   bash debug.sh --size 350m-moe --recipe my-idea
-#   bash debug.sh --size 175m-moe --recipe my-idea --nproc 2 --iters 10
-#   bash debug.sh --size 350m-moe --recipe my-idea -- --lr 1e-4   # extra flags override
-#   bash debug.sh --size 350m-moe --recipe my-idea --dry-run      # print args, don't run
+#   bash debug.sh --size 420m-moe --recipe my-idea
+#   bash debug.sh --size 270m-moe --recipe my-idea --nproc 2 --iters 10
+#   bash debug.sh --size 420m-moe --recipe my-idea -- --lr 1e-4   # extra flags override
+#   bash debug.sh --size 420m-moe --recipe my-idea --dry-run      # print args, don't run
 #
 # Defaults: 4 ranks, 20 iters, 5-min exit cap, deps installed once (SKIP_DEPS=1
 # to skip on later runs).

@@ -12,10 +12,10 @@ A run is **one model size × one recipe**. You compose them instead of copying a
 ```bash
 cd _research/launch/framework
 cp recipes/_template.sh recipes/my-idea.sh   # set OPTIMIZER, EXP_TAG, RECIPE_ARGS
-bash submit.sh --size 350m-moe --recipe my-idea --dry-run   # inspect composed args
-bash submit.sh --size 350m-moe --recipe my-idea             # launch
+bash submit.sh --size 420m-moe --recipe my-idea --dry-run   # inspect composed args
+bash submit.sh --size 420m-moe --recipe my-idea             # launch
 # sweep a knob with no new file (flows into the flag AND the run name):
-MLR=1e-2 bash submit.sh --size 350m-moe --recipe my-idea
+MLR=1e-2 bash submit.sh --size 420m-moe --recipe my-idea
 # scale the same recipe up later:
 bash submit.sh --size 1.5b-moe --recipe my-idea --nodes 4
 ```
@@ -24,9 +24,9 @@ bash submit.sh --size 1.5b-moe --recipe my-idea --nodes 4
 
 ```bash
 # inside an alps3 interactive allocation (data defaults to the swissai blend):
-bash debug.sh --size 175m-moe --recipe my-idea --nproc 2 --iters 10   # fast inline run
-bash debug.sh --size 350m-moe --recipe my-idea -- --lr 1e-4           # flags after -- override
-bash debug.sh --size 350m-moe --recipe my-idea --dry-run              # show args, don't launch
+bash debug.sh --size 270m-moe --recipe my-idea --nproc 2 --iters 10   # fast inline run
+bash debug.sh --size 420m-moe --recipe my-idea -- --lr 1e-4           # flags after -- override
+bash debug.sh --size 420m-moe --recipe my-idea --dry-run              # show args, don't launch
 ```
 
 ## Why this exists
@@ -56,8 +56,8 @@ and hands off. `common.sh` fills in every default the fragments didn't set.
 ```bash
 cp recipes/_template.sh recipes/my-idea.sh
 $EDITOR recipes/my-idea.sh          # set OPTIMIZER, EXP_TAG, RECIPE_ARGS, LR...
-bash submit.sh --size 350m-moe --recipe my-idea --dry-run   # inspect composed args
-bash submit.sh --size 350m-moe --recipe my-idea             # launch
+bash submit.sh --size 420m-moe --recipe my-idea --dry-run   # inspect composed args
+bash submit.sh --size 420m-moe --recipe my-idea             # launch
 ```
 
 A recipe is usually 10–20 lines. The only required fields are `OPTIMIZER`,
@@ -73,7 +73,7 @@ sources its base recipe and flips `LR_DECAY_STYLE=WSD`; the cooldown/warmup fall
 to `common.sh`'s WSD defaults (`minus_sqrt`, ~20% of the run, warmup 0):
 
 ```bash
-bash submit.sh --size 350m-moe --recipe wsd/muon   # -> 350m-moe-muon-wsd-lr1e-2
+bash submit.sh --size 420m-moe --recipe wsd/muon   # -> 420m-moe-muon-wsd-lr1e-2
 ```
 
 (Ad-hoc, no recipe: `LR_DECAY_STYLE=WSD bash submit.sh --recipe muon`.)
@@ -93,15 +93,17 @@ RECIPE_ARGS+=(--linear-attention-allow-neg-eigval --linear-attention-freq 4)
 
 | size | params | MoE | tokens (default) | nodes | role |
 | --- | --- | --- | ---: | ---: | --- |
-| `175m-moe` | 175M active | 16e-tk1-sh1 | ~12B | 1 | cheap LR probe |
-| `350m-moe` | 350M active | 16e-tk1-sh1 | 15B | 2 | **the main baseline** |
-| `760m-moe` | 760M active | 16e-tk1-sh1 | 30B | 4 | scale-up rung |
-| `1.5b-moe` | 1.5B active | 16e-tk1-sh1 | 30B | 4 | promotion-confirm rung |
+| `270m-moe` | 270m active | 64e-tk2-sh1 | ~12B | 1 | cheap LR probe |
+| `420m-moe` | 420m active | 64e-tk2-sh1 | 15B | 2 | **the main baseline** |
+| `810m-moe` | 810M active | 64e-tk2-sh1 | 30B | 4 | scale-up rung |
+| `1.5b-moe` | 1.5B active | 64e-tk2-sh1 | 30B | 4 | promotion-confirm rung |
 | `1.3b` | 1.3B | dense | 100B | 8 | dense baseline |
 | `2.7b` | 2.7B | dense | 300B | 16 | dense baseline |
 
-The MoE ladder (175m → 1.5b) shares one shape (16 routed top-1 + 1 shared,
-`moe-ffn = ffn/2`), so a recipe that wins at 350m transfers up the same family.
+The MoE ladder (270m → 1.5b) shares one routing recipe (64 routed top-2 + 1
+shared at half-width, `moe-ffn ≈ hidden/1.75`, ~6% non-embedding sparsity;
+DeepSeek-V3-style routing in `lib/common.sh`), so a recipe that wins at 420m
+transfers up the same family.
 `TRAIN_SAMPLES` is the documented default per size but is a per-experiment
 choice — override it: `TRAIN_SAMPLES=7324219 bash submit.sh ...`. See
 `../../SCALING.md` for the D/N rationale and which rungs to actually run.
@@ -121,7 +123,7 @@ entry (all args pinned inline, framework no longer required to run it).
 
 ```bash
 # when a run is worth tracking, freeze it into the board (next free NN- prefix):
-bash freeze.sh --size 350m-moe --recipe master --slug master --board 350m --out auto
+bash freeze.sh --size 420m-moe --recipe master --slug master --board 350m --out auto
 # then: run it, fill in the <FILL IN> loss/W&B/rank header fields, and add a
 # row to leaderboards/350m/README.md (entry / parent / change — see that file).
 ```
@@ -139,7 +141,7 @@ saves and exits cleanly instead of getting `SIGKILL`ed. Resuming is automatic �
 `--save` and `--load` are the same `CKPT_DIR`, derived from the run name, so the
 *next* job for the same size+recipe+sha picks up where the last one stopped.
 
-What's *not* automatic is launching that next job. The main baseline (350m-moe,
+What's *not* automatic is launching that next job. The main baseline (420m-moe,
 15B tokens) fits in one allocation, so by default nothing chains. For runs that
 span allocations (the dense `1.3b`/`2.7b` rungs, or a bumped `TRAIN_SAMPLES`),
 add `--auto-requeue`:
@@ -177,7 +179,7 @@ The full annotated contract is the header of `lib/common.sh`.
 ## Run name
 
 Auto-composed as `<size>-<EXP_TAG>-<KNOB_STR>`, e.g.
-`350m-moe-master-lr1e-3-mlr8e-3-elr1`. Set `KNOB_STR` in your recipe to whatever
+`420m-moe-master-lr1e-3-mlr8e-3-elr1`. Set `KNOB_STR` in your recipe to whatever
 knobs you sweep so runs are self-describing in wandb. For an axis the recipe's
 `KNOB_STR` doesn't cover (e.g. token budget), set `RUN_TAG=...` in the env and it
 gets appended.
@@ -196,16 +198,16 @@ distinct name + checkpoint dir automatically):
 
 ```bash
 for mlr in 2e-3 4e-3 8e-3 1.6e-2; do
-    MLR=$mlr bash submit.sh --size 350m-moe --recipe master
+    MLR=$mlr bash submit.sh --size 420m-moe --recipe master
 done
-# -> 350m-moe-master-lr1e-3-mlr2e-3-elr1, ...-mlr4e-3-..., ...
+# -> 420m-moe-master-lr1e-3-mlr2e-3-elr1, ...-mlr4e-3-..., ...
 ```
 
 **Sweep training length** with `sweep-length.sh` — token budgets in billions, one
 run per point (linear decay scales to each length automatically, no cooldown to tune):
 
 ```bash
-bash sweep-length.sh --size 350m-moe --recipe master --tokens "7.5 15 30"
+bash sweep-length.sh --size 420m-moe --recipe master --tokens "7.5 15 30"
 # -> ...-elr1-t7.5b, ...-t15b, ...-t30b   (add --auto-requeue for the long ones)
 ```
 
@@ -214,8 +216,8 @@ Two-axis sweep is just nested loops (`for mlr ...; do for t ...`).
 ## Inspect without launching
 
 ```bash
-SIZE=350m-moe RECIPE=master bash lib/dump-args.sh        # print the composed arg list
-bash submit.sh --size 350m-moe --recipe master --dry-run # same, with node/time summary
+SIZE=420m-moe RECIPE=master bash lib/dump-args.sh        # print the composed arg list
+bash submit.sh --size 420m-moe --recipe master --dry-run # same, with node/time summary
 ```
 
 ## Verify equivalence to a legacy sbatch
@@ -224,8 +226,8 @@ The framework reproduces the old hand-written files exactly. To prove it for any
 legacy file:
 
 ```bash
-bash verify-equivalence.sh 350m-moe master ../../legacy/transformer-pp-350m-master.sbatch
-# ✓ EQUIVALENT: 350m-moe/master matches transformer-pp-350m-master.sbatch
+bash verify-equivalence.sh 420m-moe master ../../legacy/transformer-pp-350m-master.sbatch
+# ✓ EQUIVALENT: 420m-moe/master matches transformer-pp-350m-master.sbatch
 ```
 
 This is how a legacy sbatch is retired: build the size+recipe, confirm `✓`,
@@ -239,10 +241,10 @@ Run it from inside an interactive allocation (data defaults to the swissai blend
 set `MEGATRON_DATA_PATH` to a single prefix to override):
 
 ```bash
-bash debug.sh --size 350m-moe --recipe my-idea               # 4 ranks, 20 iters
-bash debug.sh --size 175m-moe --recipe my-idea --nproc 2 --iters 10
-bash debug.sh --size 350m-moe --recipe my-idea -- --lr 1e-4   # flags after -- override
-bash debug.sh --size 350m-moe --recipe my-idea --dry-run      # show args, don't launch
+bash debug.sh --size 420m-moe --recipe my-idea               # 4 ranks, 20 iters
+bash debug.sh --size 270m-moe --recipe my-idea --nproc 2 --iters 10
+bash debug.sh --size 420m-moe --recipe my-idea -- --lr 1e-4   # flags after -- override
+bash debug.sh --size 420m-moe --recipe my-idea --dry-run      # show args, don't launch
 ```
 
 Defaults: 4 ranks, 20 iters, 5-min cap, deps installed once (`SKIP_DEPS=1` to

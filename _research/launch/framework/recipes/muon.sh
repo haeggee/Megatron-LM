@@ -7,10 +7,10 @@ EXP_TAG=muon
 
 LR=${LR:-1e-2}                 # matrix (Muon) LR
 MIN_LR=${MIN_LR:-1e-5}
-SCALAR_LR=${SCALAR_LR:-1.5e-3}
+SCALAR_LR=${SCALAR_LR:-1e-3}
 KNOB_STR=lr${LR}
 
-WEIGHT_DECAY=0.0
+WEIGHT_DECAY=0.1
 ADAM_BETA1=0.9
 ADAM_BETA2=0.95
 
@@ -20,4 +20,5 @@ RECIPE_ARGS=(
     --muon-momentum 0.95
     --muon-scalar-lr "$SCALAR_LR"
     --muon-scalar-weight-decay 0.0
+    --min-lr-mode absolute
 )

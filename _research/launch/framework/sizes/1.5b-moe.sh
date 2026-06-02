@@ -1,8 +1,11 @@
 # shellcheck shell=bash
 #
-# 1.5b-moe — top scale-up rung of the 16e-tk1-sh1 MoE ladder.
-# 32L / 2048H / 32h / 8kv. MoE: 16 routed top-1 + 1 shared, width 2560
-# (= ffn/2). The confirmation rung for promoting a 350m winner.
+# 1.5b-moe — top scale-up rung of the MoE ladder.
+# 32L / 2048H / 32h / 8kv. MoE: 64 routed experts top-2 + 1 shared (half a routed
+# expert's width), first 2 layers dense then 30 MoE (~5% dense). moe_ffn =
+# hidden/1.75. ~1.47B active / ~14.6B total; ~6.6% active/total (non-embedding) —
+# iso-sparsity proxy for 670B-A40B. The confirmation rung for promoting a 420m
+# winner. DeepSeek-V3-style routing is invariant and lives in lib/common.sh.
 
 NUM_LAYERS=32
 HIDDEN=2048
@@ -18,20 +21,15 @@ SAVE_INTERVAL=5722
 
 APERTUS_TRACK=transformer-pp-1.5b
 
+# Expert geometry only — routing policy is in common.sh.
 MOE_ARGS=(
-    --num-experts 16
-    --moe-router-topk 1
-    --moe-router-pre-softmax
-    --moe-ffn-hidden-size 2560
-    --moe-shared-expert-intermediate-size 2560
-    --moe-router-load-balancing-type aux_loss
-    --moe-aux-loss-coeff 1e-2
-    --moe-z-loss-coeff 1e-3
-    --moe-grouped-gemm
-    --moe-permute-fusion
-    --moe-token-dispatcher-type alltoall
-    --moe-per-layer-logging
+    --num-experts 64
+    --moe-router-topk 2
+    --moe-ffn-hidden-size 1152
+    --moe-shared-expert-intermediate-size 576
+    --moe-layer-freq "([0]*2+[1]*30)"
 )
+EP=1                           # pure DP: all 64 experts replicated on each GPU
 
 DEFAULT_NODES=4
 DEFAULT_TIME=12:00:00

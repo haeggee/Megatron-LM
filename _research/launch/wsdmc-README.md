@@ -98,12 +98,12 @@ when TP > EP * ETP`) and optimizer-specific save failures (cf. our
 `project_normuon_torch_dist_save_bug.md`).
 
 ```bash
-sbatch _research/launch/wsdmc-smoke-adamw-main.sbatch
+sbatch _research/legacy/wsdmc-smoke-adamw-main.sbatch
 # wait for COMPLETED, then run the paired cooldown smoke via env override:
 WORKDIR=$(pwd)
 sbatch --time=00:20:00 --job-name=wsdmc-smoke-adamw-cd \
     --export=ALL,WSDMC_CKPT_DIR=$WORKDIR/_research/results/ckpts/wsdmc-smoke-adamw,WSDMC_CKPT_ITER=10,WSDMC_COOLDOWN_ITERS=3,WSDMC_EXP_NAME=wsdmc-smoke-adamw-cd \
-    _research/launch/wsdmc-cooldown-adamw-lr5e-4-moe-16e-tk1-sh1.sbatch
+    _research/legacy/wsdmc-cooldown-adamw-lr5e-4-moe-16e-tk1-sh1.sbatch
 # verify:
 python3 _research/launch/wsdmc-smoke-verify.py
 ```
@@ -116,7 +116,7 @@ Once smoke passes:
 
 ```bash
 WSDMC_N_MAIN_JOBS=2 ./_research/launch/submit-wsdmc.sh \
-    _research/launch/transformer-pp-350m-wsdmc-adamw-lr5e-4-moe-16e-tk1-sh1.sbatch
+    _research/legacy/transformer-pp-350m-wsdmc-adamw-lr5e-4-moe-16e-tk1-sh1.sbatch
 ```
 
 This submits:

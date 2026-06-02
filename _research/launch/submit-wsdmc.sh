@@ -4,7 +4,7 @@
 #
 # Usage:
 #   ./submit-wsdmc.sh <main-sbatch> [cooldown-sbatch]
-#   ./submit-wsdmc.sh _research/launch/transformer-pp-350m-wsdmc-aurora-qkn-moe-32e-tk3-sh1.sbatch
+#   ./submit-wsdmc.sh _research/legacy/transformer-pp-350m-wsdmc-aurora-qkn-moe-32e-tk3-sh1.sbatch
 #
 # Tunables (env vars):
 #   WSDMC_N_CKPTS         number of checkpoints (default 5)

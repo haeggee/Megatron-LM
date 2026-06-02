@@ -9,9 +9,9 @@
 # change. So a leaderboard entry must NOT source the framework — it pins every
 # arg inline. This script renders that frozen file for you.
 #
-#   bash freeze.sh --size 350m-moe --recipe master --slug master --board 350m \
+#   bash freeze.sh --size 420m-moe --recipe master --slug master --board 350m \
 #       --rank new --out auto
-#   MLR=1e-2 bash freeze.sh --size 350m-moe --recipe master --slug master-mlr1e-2 --out -
+#   MLR=1e-2 bash freeze.sh --size 420m-moe --recipe master --slug master-mlr1e-2 --out -
 #
 # --out auto  -> writes leaderboards/<board>/runs/NN-<slug>.sbatch (next free NN)
 # --out -     -> prints to stdout

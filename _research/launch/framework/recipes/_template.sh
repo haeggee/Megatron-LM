@@ -4,7 +4,7 @@
 #
 #   cp _template.sh my-idea.sh
 #   # edit, then:
-#   SIZE=350m-moe RECIPE=my-idea bash submit.sh
+#   SIZE=420m-moe RECIPE=my-idea bash submit.sh
 #
 # A recipe is the ONLY file you write. Everything else (model size, data, SLURM,
 # logging, launch) is supplied by sizes/ and lib/common.sh. See README.md for

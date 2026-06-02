@@ -67,7 +67,8 @@ MASTER_PORT=${MASTER_PORT:-25678}
 
 # ── defaults for anything the size/recipe fragment didn't set ────────────────
 TP=${TP:-1}; PP=${PP:-1}; CP=${CP:-1}; EP=${EP:-1}
-INIT_STD=${INIT_STD:-0.02}
+# Init std defaults to 1/sqrt(HIDDEN) (e.g. 1024 -> 0.03125).
+INIT_STD=${INIT_STD:-$(awk "BEGIN{printf \"%.6g\", 1.0/sqrt($HIDDEN)}")}
 # Embedding multiplier defaults to sqrt(HIDDEN) (e.g. 1024 -> 32.0).
 EMBEDDING_MULTIPLIER=${EMBEDDING_MULTIPLIER:-$(awk "BEGIN{printf \"%.1f\", sqrt($HIDDEN)}")}
 EXIT_DURATION_MINS=${EXIT_DURATION_MINS:-595}
@@ -91,6 +92,36 @@ KNOB_STR=${KNOB_STR:-lr${LR}}
 declare -p RECIPE_ARGS    >/dev/null 2>&1 || RECIPE_ARGS=()
 declare -p MOE_ARGS       >/dev/null 2>&1 || MOE_ARGS=()
 declare -p EXTRA_REG_ARGS >/dev/null 2>&1 || EXTRA_REG_ARGS=()
+
+# ── MoE routing policy: DeepSeek-V3-style, invariant across the whole ladder ──
+# The small MoE rungs are iso-sparsity proxies (~5% active/total non-embedding)
+# for a 670B-A40B target, so they all share one routing recipe; only the expert
+# *geometry* (count, expert+shared width, dense-layer fraction) scales per size
+# and lives in sizes/<size>.sh's MOE_ARGS. A size declares itself MoE by leaving
+# MOE_ARGS non-empty (dense sizes set MOE_ARGS=() and skip all of this).
+#
+# DeepSeek-V3 routing = sigmoid gating + aux-loss-free per-expert bias (the bias
+# steers selection only, not the gate weights; updated at moe-router-bias-update-
+# rate) + a tiny complementary seq-wise aux loss + top-k renorm scaled by 2.5,
+# with the router math in fp32 for stability at high expert counts. See
+# https://arxiv.org/abs/2412.19437 (DeepSeek-V3) and arxiv 2408.15664 (loss-free
+# balancing). MOE_AUX_LOSS_COEFF is the one knob worth sweeping; everything else
+# is overridable via `-- --moe-... ` extra flags (argparse last-wins).
+if [ "${#MOE_ARGS[@]}" -gt 0 ]; then
+    MOE_ARGS+=(
+        --moe-router-score-function sigmoid
+        --moe-router-enable-expert-bias
+        --moe-router-bias-update-rate 1e-3
+        --moe-router-topk-scaling-factor 2.5
+        --moe-router-dtype fp32
+        --moe-router-load-balancing-type seq_aux_loss
+        --moe-aux-loss-coeff "${MOE_AUX_LOSS_COEFF:-1e-3}"
+        --moe-grouped-gemm
+        --moe-permute-fusion
+        --moe-token-dispatcher-type alltoall
+        --moe-per-layer-logging
+    )
+fi
 
 # ── run identity ─────────────────────────────────────────────────────────────
 # wandb project: WANDB_PROJECT overrides outright; otherwise WANDB_PROJECT_PREFIX
@@ -199,7 +230,6 @@ DISTRIBUTED_ARGS=(
     --expert-model-parallel-size "$EP"
     --use-distributed-optimizer
     --overlap-grad-reduce
-    --sequence-parallel
 )
 
 LOGGING_ARGS=(
@@ -253,7 +283,7 @@ else
 fi
 DATA_ARGS+=(
     --data-cache-path "$DATASET_CACHE_DIR"
-    --num-workers 32
+    --num-workers 4
 )
 
 # Flat array — order matches the legacy hand-written sbatch files so that the
@@ -298,7 +328,10 @@ if [ -n "${DRY_RUN:-}" ] || [ -n "${COMMON_NO_LAUNCH:-}" ]; then
     return 0 2>/dev/null || exit 0
 fi
 
-MEGATRON_ARGS_STR="${MEGATRON_ARGS[*]}"
+# Shell-quote every token: the args are flattened into one string and re-parsed
+# by `bash -c` below, so values with shell metacharacters (e.g.
+# --moe-layer-freq '([0]*1+[1]*13)') must stay quoted or bash chokes on the '('.
+MEGATRON_ARGS_STR="${MEGATRON_ARGS[*]@Q}"
 
 ENV_SETUP="export MASTER_ADDR=$MASTER_ADDR; \
     export MASTER_PORT=$MASTER_PORT; \

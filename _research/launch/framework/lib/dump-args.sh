@@ -4,7 +4,7 @@
 # token per line, WITHOUT launching anything. Stubs the SLURM commands so it
 # runs on a login node.
 #
-#   SIZE=350m-moe RECIPE=master bash dump-args.sh
+#   SIZE=420m-moe RECIPE=master bash dump-args.sh
 #
 set -euo pipefail
 

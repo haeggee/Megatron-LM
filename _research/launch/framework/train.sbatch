@@ -5,11 +5,11 @@
 # It does almost nothing itself: pick a SIZE and a RECIPE, source them, then
 # hand off to lib/common.sh which assembles the args and launches.
 #
-#   SIZE=350m-moe RECIPE=master sbatch \
+#   SIZE=420m-moe RECIPE=master sbatch \
 #       --nodes=2 --time=10:00:00 _research/launch/framework/train.sbatch
 #
 # Prefer submit.sh, which fills --nodes/--time from the size file for you:
-#   bash _research/launch/framework/submit.sh --size 350m-moe --recipe master
+#   bash _research/launch/framework/submit.sh --size 420m-moe --recipe master
 #
 # The #SBATCH lines below are DEFAULTS; submit.sh (or your own `sbatch` flags)
 # override --nodes/--time/--job-name per run.
@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-: "${SIZE:?set SIZE, e.g. SIZE=350m-moe (see framework/sizes/)}"
+: "${SIZE:?set SIZE, e.g. SIZE=420m-moe (see framework/sizes/)}"
 : "${RECIPE:?set RECIPE, e.g. RECIPE=master (see framework/recipes/)}"
 
 # Locate the framework dir. Under `sbatch`, SLURM copies this script to a

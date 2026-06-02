@@ -6,11 +6,11 @@
 # remember them, then submits. Any knob the recipe reads from the environment
 # (LR, MLR, ...) is passed straight through.
 #
-#   bash submit.sh --size 350m-moe --recipe master
-#   bash submit.sh --size 350m-moe --recipe master --nodes 4
-#   MLR=1e-2 bash submit.sh --size 350m-moe --recipe master       # sweep a knob
+#   bash submit.sh --size 420m-moe --recipe master
+#   bash submit.sh --size 420m-moe --recipe master --nodes 4
+#   MLR=1e-2 bash submit.sh --size 420m-moe --recipe master       # sweep a knob
 #   bash submit.sh --size 1.3b --recipe master --auto-requeue     # chain jobs until done
-#   bash submit.sh --size 350m-moe --recipe master --dry-run      # print args, no submit
+#   bash submit.sh --size 420m-moe --recipe master --dry-run      # print args, no submit
 #
 set -euo pipefail
 
