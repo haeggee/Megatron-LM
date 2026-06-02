@@ -24,4 +24,7 @@ docs/_build
 docs/apidocs
 
 # Git worktrees
-.worktrees/
+.worktrees
+
+.env 
+_research/results
