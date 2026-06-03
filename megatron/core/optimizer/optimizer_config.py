@@ -299,10 +299,6 @@ class OptimizerConfig:
     """Weight decay for the scalar-optimizer param group. When None, inherits
     ``config.weight_decay``. Set to 0.0 to decouple WD from the Muon 2D-matrix group."""
 
-    adaptive_muon_moment2_method: str = 'adamuon'
-    """Second-moment accumulation method for adaptive_muon. 'normuon' applies per-row
-    (neuron) normalisation after Newton-Schulz (NorMuon, arXiv 2510.05491)."""
-
     # Lion.
     lion_beta1: float = 0.95
     """First beta coefficient for Lion optimizer (used in sign update). Defaults to 0.95."""
@@ -321,7 +317,15 @@ class OptimizerConfig:
     """Whether to use the KL-Shampoo preconditioner."""
 
     adaptive_muon_moment2_method: str = "adamuon"
-    """The method to use for the moment2 update in Adaptive Muon optimizer."""
+    """Second-moment accumulation method for adaptive_muon.
+    'adamuon': elementwise AdamW-style second moment on the orthogonalized
+    update. 'normuon': per-neuron (longer-axis) rsqrt rescale (NorMuon,
+    arXiv 2510.05491) — note this cancels the per-matrix muon_scale_mode
+    factor, so the scale mode is effectively a no-op. 'normuonfix': NorMuon
+    rescale as a pure direction change with the update magnitude renormalized
+    to Muon's (frob = scale_mode factor * sqrt(min(d_out, d_in))), matching
+    plain muon's effective per-layer step sizes; implemented locally in
+    TensorParallelAdaptiveMuon (mirrors master's use_normuon path)."""
 
     adaptive_muon_beta2: float = 0.95
     """The beta2 parameter for the Adaptive Muon optimizer."""
@@ -425,7 +429,7 @@ class OptimizerConfig:
     mode of post-step L2 projection. When None, no special normalization is
     applied to routers (they fall back to hypersphere_mode). Orthogonal vs
     Adam updates for routers are controlled separately by
-    master_router_use_orthogonal_updates."""
+    router_use_orthogonal_updates."""
 
     hypersphere_tangential_grad: bool = False
     """When True (and use_orthogonal_updates=True), project p.grad onto the
@@ -450,11 +454,19 @@ class OptimizerConfig:
     Keeps the hypersphere constraint consistent with Megatron's depth-aware
     init for residual-out projections. Default False."""
 
+    router_use_orthogonal_updates: Optional[bool] = None
+    """Per-param-group override for orthogonal (Muon) updates on MoE router
+    weights, for master and the muon family (muon, adaptive_muon, aurora,
+    rmnp, muown, normuown). True → force Muon updates for routers.
+    False → force Adam updates for routers (master: internal Adam branch;
+    muon family: external Adam optimizer). None (default) → master routers
+    follow the global use_orthogonal_updates; muon-family routers use Muon
+    (they are 2D non-embedding). Adam-routed routers are excluded from the
+    matrix_lr group and keep the base lr schedule."""
+
     master_router_use_orthogonal_updates: Optional[bool] = None
-    """Per-param-group override for use_orthogonal_updates on MoE router
-    weights under --optimizer master. True → force Muon for routers.
-    False → force Adam branch for routers. None (default) → routers follow
-    the global use_orthogonal_updates setting."""
+    """DEPRECATED: use ``router_use_orthogonal_updates``. Same semantics,
+    master-only historically. Mutually exclusive with the new knob."""
 
     hypersphere_gains_mode: Optional[str] = None
     """Learnable per-axis gains for matrix params under master. One of 'row',

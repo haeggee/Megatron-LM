@@ -27,6 +27,8 @@ bash submit.sh --size 1.5b-moe --recipe my-idea --nodes 4
 bash debug.sh --size 270m-moe --recipe my-idea --nproc 2 --iters 10   # fast inline run
 bash debug.sh --size 420m-moe --recipe my-idea -- --lr 1e-4           # flags after -- override
 bash debug.sh --size 420m-moe --recipe my-idea --dry-run              # show args, don't launch
+# inside an mi300/ROCm interactive allocation (see ../interactive-run.sh header):
+bash debug.sh --cluster mi300 --size 420m-moe --recipe my-idea
 ```
 
 ## Why this exists
@@ -47,9 +49,11 @@ one small file.
 | `lib/common.sh` | SLURM env, paths, logging, all invariant args, the `srun` launch | ~never |
 | `sizes/<size>.sh` | model dims, batch, token budget, MoE shape, default nodes/time | when adding a scale rung |
 | `recipes/<name>.sh` | `--optimizer` + its flags, LR, regularization — *the idea* | **every experiment** |
+| `clusters/<cluster>.sh` | container EDF, mpi flavor, precision, MoE dispatcher, partition/cpus/mem | when adding a machine |
 
-`train.sbatch` just sources the three in order (`size` → `recipe` → `common`)
-and hands off. `common.sh` fills in every default the fragments didn't set.
+`train.sbatch` just sources the four in order (`size` → `recipe` → `cluster` →
+`common`) and hands off. `common.sh` fills in every default the fragments
+didn't set.
 
 ## Add a new optimizer / baseline
 
@@ -107,6 +111,33 @@ transfers up the same family.
 `TRAIN_SAMPLES` is the documented default per size but is a per-experiment
 choice — override it: `TRAIN_SAMPLES=7324219 bash submit.sh ...`. See
 `../../SCALING.md` for the D/N rationale and which rungs to actually run.
+
+## Clusters
+
+The default cluster is `alps3` (GH200) — nothing changes if you never pass
+`--cluster`. To run the same size×recipe on the AMD MI300A nodes:
+
+```bash
+bash submit.sh --cluster mi300 --size 420m-moe --recipe master
+# -> job 420m-moe-master-mi300, run name 420m-moe-master-lr...-mi300
+CLUSTER=mi300 SIZE=420m-moe RECIPE=master bash lib/dump-args.sh   # inspect
+```
+
+A cluster file (`clusters/<name>.sh`, contract in `clusters/alps3.sh`) owns
+everything machine-specific: the container EDF (`../alps3.toml` /
+`../mi300.toml`), `srun --mpi` flavor, precision args, MoE dispatcher,
+arch-tagged caches/packages dirs, and the sbatch flags submit.sh adds
+(partition/cpus/mem/reservation — note the alps3 reservation now lives in
+`clusters/alps3.sh`, not the `train.sbatch` header).
+
+`mi300` deltas vs `alps3` (each from schlag's verified multinode MoE bring-up,
+`/iopsstor/scratch/cscs/schlag/v25_6_moe_test/run_moe_mn_hooks_rocm6.sbatch`):
+**bf16 only** (no FP8 blockwise → losses are NOT comparable to fp8 GH200 runs),
+`alltoall` MoE dispatcher, `--no-gradient-accumulation-fusion`, ROCm v25.6
+container with cxi + aws_ofi_nccl hooks, separate `cache/triton-rocm` /
+`_research/packages-rocm` (first run reinstalls pip deps there). The run name
+gets a `-mi300` suffix so checkpoints on the shared filesystem never collide
+with an alps3 run of the same composition.
 
 ## Tracking results: the leaderboard bridge
 
@@ -174,7 +205,12 @@ set: `LR MIN_LR KNOB_STR WEIGHT_DECAY ADAM_BETA1 ADAM_BETA2 CLIP_GRAD
 LR_DECAY_STYLE LR_WARMUP_SAMPLES LR_WSD_DECAY_STYLE LR_WSD_DECAY_SAMPLES
 EXTRA_REG_ARGS=(...)`.
 
-The full annotated contract is the header of `lib/common.sh`.
+A **cluster** file may set (all guarded — env/size/recipe win): `EDF_TOML
+SRUN_MPI SRUN_EXTRA_ARGS=(...) MIXED_PRECISION_ARGS=(...) MOE_DISPATCHER
+CLUSTER_TRAIN_ARGS=(...) ARCH_TAG CLUSTER_TAG CLUSTER_SBATCH_FLAGS=(...)`.
+
+The full annotated contracts are the headers of `lib/common.sh` and
+`clusters/alps3.sh`.
 
 ## Run name
 

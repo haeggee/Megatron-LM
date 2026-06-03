@@ -140,16 +140,53 @@ def get_standard_config_overrides(config: OptimizerConfig) -> Dict[ParamKey, Par
     return config_overrides
 
 
-def _master_router_uses_adam(config: OptimizerConfig) -> bool:
-    """True when --optimizer master routes MoE router 2D weights to the Adam
-    branch (explicit per-router override wins over the global
-    use_orthogonal_updates). Adam-branch routers keep the base --lr schedule
-    instead of matrix_lr (which is Muon-tuned and doesn't fit Adam)."""
-    if config.optimizer != 'master':
-        return False
+# Emerging optimizers that orthogonalize 2D non-embedding params (and thus
+# MoE router weights) by default; the router override below applies to these
+# plus master.
+_MUON_FAMILY_EOPT_NAMES = ('muon', 'adaptive_muon', 'aurora', 'rmnp', 'muown', 'normuown')
+
+
+def _router_use_orthogonal_updates(config: OptimizerConfig) -> Optional[bool]:
+    """Resolve the router-override knob, honoring the deprecated
+    master_router_use_orthogonal_updates alias. None means no override."""
+    if (
+        config.router_use_orthogonal_updates is not None
+        and config.master_router_use_orthogonal_updates is not None
+    ):
+        raise ValueError(
+            "Set at most one of router_use_orthogonal_updates and "
+            "master_router_use_orthogonal_updates (the latter is deprecated)."
+        )
     if config.master_router_use_orthogonal_updates is not None:
-        return not config.master_router_use_orthogonal_updates
-    return not config.use_orthogonal_updates
+        log_single_rank(
+            logger,
+            logging.WARNING,
+            "master_router_use_orthogonal_updates is deprecated; use "
+            "--router-use-orthogonal-updates (same semantics, also covers the "
+            "muon family).",
+        )
+        return config.master_router_use_orthogonal_updates
+    return config.router_use_orthogonal_updates
+
+
+def _router_uses_adam(config: OptimizerConfig) -> bool:
+    """True when MoE router 2D weights get Adam updates instead of orthogonal
+    ones (master: internal Adam branch; muon family: external Adam optimizer).
+    Adam-routed routers keep the base --lr schedule instead of matrix_lr
+    (which is Muon-tuned and doesn't fit Adam)."""
+    optimizer_name = config.optimizer
+    if optimizer_name.startswith('dist_'):  # legacy alias, e.g. dist_muon
+        optimizer_name = optimizer_name[len('dist_') :]
+    flag = _router_use_orthogonal_updates(config)
+    if optimizer_name == 'master':
+        if flag is not None:
+            return not flag
+        return not config.use_orthogonal_updates
+    if optimizer_name in _MUON_FAMILY_EOPT_NAMES:
+        # Muon-family routers default to Muon (2D non-embedding); only an
+        # explicit False diverts them to Adam.
+        return flag is False
+    return False
 
 
 def get_lr_class_config_overrides(config: OptimizerConfig) -> Dict[ParamKey, ParamGroupOverride]:
@@ -161,7 +198,8 @@ def get_lr_class_config_overrides(config: OptimizerConfig) -> Dict[ParamKey, Par
 
       - ``matrix_lr`` (default ``muon_lr_factor * lr``): 2D weights that are
         not embedding/output, whatever optimizer manages them. Excludes
-        master's Adam-branch routers (those keep the base lr).
+        Adam-routed MoE routers (see ``_router_uses_adam``; those keep the
+        base lr).
       - ``embedding_lr`` (or deprecated ``embedding_lr_multiplier * lr``):
         embedding and tied LM head (``is_embedding_parameter``).
       - ``output_lr``: untied LM head (``is_output_parameter`` and not
@@ -203,7 +241,7 @@ def get_lr_class_config_overrides(config: OptimizerConfig) -> Dict[ParamKey, Par
         matrix_lr = config.muon_lr_factor * (base_lr or 0.0)
 
     if matrix_lr is not None:
-        router_adam = _master_router_uses_adam(config)
+        router_adam = _router_uses_adam(config)
         matrix_2d = ParamPredicate(
             name="lr_class_matrix_2d",
             fn=lambda p: (
@@ -999,11 +1037,22 @@ def _get_megatron_emerging_optimizer(
         # for routers is wired separately through hypersphere_router_mode on the
         # MasterOptimizer; this only controls Muon-vs-Adam for routers). Adam-branch
         # routers are excluded from the shared matrix_lr override (the lr_class_matrix_2d
-        # predicate checks _master_router_uses_adam), so they keep the base --lr schedule.
-        if config.master_router_use_orthogonal_updates is not None:
+        # predicate checks _router_uses_adam), so they keep the base --lr schedule.
+        router_orthogonal = _router_use_orthogonal_updates(config)
+        if router_orthogonal is not None:
             config_overrides[ParamKey(attr='is_router')] = {
-                'use_orthogonal_updates': config.master_router_use_orthogonal_updates
+                'use_orthogonal_updates': router_orthogonal
             }
+
+    # MoE router optimizer-branch override for the muon family: routers are 2D
+    # non-embedding, so they get Muon updates by default. An explicit
+    # --router-use-orthogonal-updates false diverts them to the external Adam
+    # optimizer; they are then excluded from the shared matrix_lr override
+    # (the lr_class_matrix_2d predicate checks _router_uses_adam), so they
+    # keep the base --lr schedule.
+    elif eopt_name in _MUON_FAMILY_EOPT_NAMES:
+        if _router_use_orthogonal_updates(config) is False:
+            config_overrides[ParamKey(attr='is_router')] = {'optimizer': 'adam'}
 
     # Build param groups and bucket by (optimizer_name, is_expert_parallel).
     # Layer-wise distributed optimizer handles expert params internally so we skip that split.

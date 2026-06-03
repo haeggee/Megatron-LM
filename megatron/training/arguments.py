@@ -2340,8 +2340,15 @@ def _add_regularization_args(parser):
     group.add_argument('--adaptive-muon-moment2-method', type=str, default='adamuon',
                        choices=["adamuon", "normuon", "normuonfix"],
                        help='Second-moment accumulation method for adaptive_muon. '
-                       '"normuon" applies per-row (neuron) normalisation after '
-                       'Newton-Schulz (NorMuon, arXiv 2510.05491). Default "adamuon".')
+                       '"adamuon": elementwise AdamW-style second moment. '
+                       '"normuon": per-neuron rsqrt rescale (NorMuon, arXiv '
+                       '2510.05491) — cancels the --muon-scale-mode factor, every '
+                       'matrix gets an entry-RMS~1 update regardless of mode. '
+                       '"normuonfix": NorMuon rescale as a pure direction change '
+                       'with the magnitude renormalized to plain Muon\'s (frob = '
+                       'scale * sqrt(min(d_out, d_in))), so muon and normuonfix '
+                       'share effective per-layer step sizes under any '
+                       '--muon-scale-mode. Default "adamuon".')
     # Aurora optimizer flags (Tilde Research, 2026; arXiv blog post). Aurora is
     # structurally Muon with a leverage-uniform polar update; it reuses the
     # --muon-momentum / --muon-nesterov / --muon-scalar-* flags via the shared
@@ -2451,7 +2458,7 @@ def _add_regularization_args(parser):
                        help='Hypersphere mode override for MoE router weights under '
                        '--optimizer master. When set, router 2D weights get post-step '
                        'L2 projection in this mode. None disables router-specific '
-                       'normalization. Independent of --master-router-use-orthogonal-updates.')
+                       'normalization. Independent of --router-use-orthogonal-updates.')
     group.add_argument('--hypersphere-tangential-grad', action='store_true', default=False,
                        help='Project p.grad onto the hypersphere tangent space before '
                        'Newton-Schulz (Muown-style grad_v construction). Only effective '
@@ -2468,13 +2475,22 @@ def _add_regularization_args(parser):
                        'models, 2 otherwise). Keeps the hypersphere constraint '
                        'consistent with Megatron depth-aware init for residual-out '
                        'projections.')
+    group.add_argument('--router-use-orthogonal-updates',
+                       type=lambda s: {'true': True, 'false': False}[s.lower()],
+                       default=None, choices=[True, False],
+                       help='Per-param-group override for orthogonal (Muon) updates on '
+                       'MoE router weights, for --optimizer master and the muon family '
+                       '(muon, adaptive_muon, aurora, rmnp, muown, normuown). "true" → '
+                       'force Muon updates for routers. "false" → force Adam updates '
+                       '(master: internal Adam branch; muon family: external Adam '
+                       'optimizer; either way routers then keep the base --lr instead '
+                       'of --matrix-lr). Unset (default) → master routers follow '
+                       '--use-orthogonal-updates; muon-family routers use Muon.')
     group.add_argument('--master-router-use-orthogonal-updates',
                        type=lambda s: {'true': True, 'false': False}[s.lower()],
                        default=None, choices=[True, False],
-                       help='Per-param-group override for use_orthogonal_updates on MoE '
-                       'router weights under --optimizer master. "true" → force Muon for '
-                       'routers. "false" → force Adam branch for routers. Unset (default) '
-                       '→ routers follow --use-orthogonal-updates.')
+                       help='DEPRECATED: use --router-use-orthogonal-updates (same '
+                       'semantics, also covers the muon family).')
     group.add_argument('--hypersphere-gains-mode', type=str, default=None,
                        choices=['row', 'col', 'rowcol', 'flat', 'embed'],
                        help='Learnable per-axis gains for matrix params under master.')

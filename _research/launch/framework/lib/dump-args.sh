@@ -5,6 +5,7 @@
 # runs on a login node.
 #
 #   SIZE=420m-moe RECIPE=master bash dump-args.sh
+#   CLUSTER=mi300 SIZE=420m-moe RECIPE=master bash dump-args.sh
 #
 set -euo pipefail
 
@@ -13,6 +14,7 @@ FRAMEWORK_DIR=$(cd "$LIB_DIR/.." && pwd)
 
 : "${SIZE:?set SIZE}"
 : "${RECIPE:?set RECIPE}"
+CLUSTER=${CLUSTER:-alps3}
 # Data falls through to common.sh's default (the swissai blend) for dry
 # inspection unless MEGATRON_DATA_PATH / DATA_ROOT override it.
 
@@ -29,6 +31,7 @@ export DRY_RUN=1
 {
     source "$FRAMEWORK_DIR/sizes/$SIZE.sh"
     source "$FRAMEWORK_DIR/recipes/$RECIPE.sh"
+    source "$FRAMEWORK_DIR/clusters/$CLUSTER.sh"
     source "$FRAMEWORK_DIR/lib/common.sh"
 } 1>&2
 

@@ -5,9 +5,11 @@
 OPTIMIZER=adam
 EXP_TAG=adamw
 
-LR=${LR:-3e-4}
+MATRIX_LR=${MATRIX_LR:-3e-4}
 MIN_LR=${MIN_LR:-1e-5}
-KNOB_STR=lr${LR}
+LR=${LR:-3e-4}
+EMBEDDING_LR=${EMBEDDING_LR:-$LR}
+KNOB_STR=mlr${MATRIX_LR}_lr${LR}_elr${EMBEDDING_LR}
 
 WEIGHT_DECAY=0.1
 ADAM_BETA1=0.9
@@ -20,4 +22,11 @@ LR_WARMUP_SAMPLES=128000
 # LR_WSD_DECAY_SAMPLES=732422
 
 # Plain AdamW needs no optimizer-specific flags.
-RECIPE_ARGS=()
+RECIPE_ARGS=(
+    --embedding-lr "$EMBEDDING_LR"
+    --output-lr "$LR"
+    --matrix-lr "$MATRIX_LR"
+    --gains-lr "$LR"
+    --min-lr-mode absolute
+)
+

@@ -230,9 +230,15 @@ class MasterOptimizer(torch.optim.Optimizer):
             else:
                 grad = exp_avg
             with emerging_optimizers.utils.fp32_matmul_precision(self.fp32_matmul_prec):
-                update = self._orthogonalize_param(p, grad, is_qkv=is_qkv)
+                # Routers never get the Muon shape scale factor (scale_mode):
+                # the (num_experts, hidden) shape makes spectral/shape_up blow
+                # the update up by ~sqrt(hidden/num_experts). The router update
+                # is the bare orthogonalized matrix (extra_scale_factor still
+                # applies).
+                update = self._orthogonalize_param(p, grad, is_qkv=is_qkv,
+                                                   skip_scale=is_router)
             if self.use_normuon:
-                update = self._normuon_rescale(update, state)
+                update = self._normuon_rescale(update, state, skip_scale=is_router)
             # Shrink Muon update for is_out_proj params to match the smaller
             # target sphere. Muon's shape_up (and spectral) scale targets the
             # natural RMS of a unit-row/col matrix; with target radius
@@ -287,10 +293,12 @@ class MasterOptimizer(torch.optim.Optimizer):
             self._normalize(p, p, is_qkv=is_qkv, is_out_proj=is_out_proj,
                             is_embedding=is_embedding, is_router=is_router)
 
-    def _normuon_rescale(self, update, state):
+    def _normuon_rescale(self, update, state, skip_scale: bool = False):
         """Pure NorMuon (arXiv 2510.05491): 2nd-moment rescale of the
         orthogonalized update along the shorter axis. Reduces (averages
         squared values) along the longer axis; rescales by 1/sqrt(max(v, eps)).
+        skip_scale=True drops the final scale_mode shape factor (routers); the
+        frob-norm renormalization to min(d_out, d_in)**0.5 still applies.
         """
         avg_dim = -1 if update.shape[-2] >= update.shape[-1] else -2
         if "normuon_v" not in state:
@@ -315,6 +323,8 @@ class MasterOptimizer(torch.optim.Optimizer):
         res = res * shape_scaling / vnorm_new
 
         # apply other shape scaling factors as in muon
+        if skip_scale:
+            return res
         scaling_factor = _get_muon_scale_factor(update.size(-2), update.size(-1), mode=self.scale_mode)
         return res * scaling_factor
  
@@ -324,8 +334,9 @@ class MasterOptimizer(torch.optim.Optimizer):
         if weight_decay != 0:
             p.add_(p, alpha=-weight_decay * group["lr"])
 
-    def _orthogonalize_param(self, p, grad, is_qkv: bool = False):
-        """Newton-Schulz orthogonalization, with optional QKV split."""
+    def _orthogonalize_param(self, p, grad, is_qkv: bool = False, skip_scale: bool = False):
+        """Newton-Schulz orthogonalization, with optional QKV split.
+        skip_scale=True drops the scale_mode shape factor (used for routers)."""
         if self.pg_collection is not None:
             tp_group = (self.pg_collection.expt_tp
                         if getattr(p, "expert_tp", False)
@@ -338,13 +349,13 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         if self.split_qkv and is_qkv:
             qs, ks, vs = _split_qkv(grad, self.qkv_split_shapes)
-            qs = self._orthogonalize_tensor(qs, tp_group, partition_dim)
-            ks = self._orthogonalize_tensor(ks, tp_group, partition_dim)
-            vs = self._orthogonalize_tensor(vs, tp_group, partition_dim)
+            qs = self._orthogonalize_tensor(qs, tp_group, partition_dim, skip_scale=skip_scale)
+            ks = self._orthogonalize_tensor(ks, tp_group, partition_dim, skip_scale=skip_scale)
+            vs = self._orthogonalize_tensor(vs, tp_group, partition_dim, skip_scale=skip_scale)
             return _merge_qkv((qs, ks, vs), grad.shape, self.qkv_split_shapes)
-        return self._orthogonalize_tensor(grad, tp_group, partition_dim)
+        return self._orthogonalize_tensor(grad, tp_group, partition_dim, skip_scale=skip_scale)
 
-    def _orthogonalize_tensor(self, grad, tp_group, partition_dim):
+    def _orthogonalize_tensor(self, grad, tp_group, partition_dim, skip_scale: bool = False):
         assert grad.ndim == 2
         size = [grad.size(-2), grad.size(-1)]
         if partition_dim is not None:
@@ -357,7 +368,7 @@ class MasterOptimizer(torch.optim.Optimizer):
             partition_dim=partition_dim,
             tp_mode=("duplicated" if self.tp_mode == "blockwise" else self.tp_mode),
         )
-        scale = _get_muon_scale_factor(size[0], size[1], mode=self.scale_mode)
+        scale = 1.0 if skip_scale else _get_muon_scale_factor(size[0], size[1], mode=self.scale_mode)
         return orth * scale * self.extra_scale_factor
 
     def _resolve_mode(self, is_embedding: bool, is_router: bool = False):

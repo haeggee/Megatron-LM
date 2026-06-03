@@ -17,7 +17,7 @@ EXP_TAG=master
 LR=${LR:-1e-3}
 MLR=${MLR:-8e-3}
 MIN_LR=${MIN_LR:-1e-5}
-ELR=${ELR:-3e-3}
+ELR=${ELR:-$LR}
 KNOB_STR=lr${LR}-mlr${MLR}-elr${ELR}
 
 # master's canonical regularization
@@ -43,8 +43,10 @@ RECIPE_ARGS=(
     --muon-scale-mode shape_up
     --matrix-lr "$MLR"
     --embedding-lr "$ELR"
-    # router: use adam branch, normalize row-wise.
-    --master-router-use-orthogonal-updates false
+    --gains-lr "$LR"
+    --output-lr "$LR"
+    # router: use muon branch, normalize row-wise.
+    --router-use-orthogonal-updates true
     --hypersphere-router-mode row
     --min-lr-mode absolute
     --hypersphere-scale-out-proj-init

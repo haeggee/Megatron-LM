@@ -1,31 +1,43 @@
 # shellcheck shell=bash
 #
-# normuon — NorMuon: the same spectral-scaled Muon as adaptive-muon, but with
-# the `normuon` second-moment normalization on the matrix update. That changes
-# the matrix-LR regime sharply (natural LR is ~30x smaller than plain
-# adaptive-muon's 1e-2), so it carries its own LR default.
+# normuon — NorMuon: Muon + per-neuron second-moment rescale on the matrix
+# update. MOMENT2 picks the variant:
+#   normuonfix (default) — NorMuon rescale as a pure direction change; update
+#     magnitude renormalized to plain Muon's, so --muon-scale-mode behaves
+#     exactly as in the muon recipe and MATRIX_LR transfers (frob = sqrt(out)
+#     under shape_scaling).
+#   normuon — upstream NorMuon: the rescale cancels the scale-mode factor
+#     (every matrix gets entry-RMS~1 updates; natural MATRIX_LR ~sqrt(hidden)
+#     smaller, scale mode is a no-op).
 
 OPTIMIZER=adaptive_muon
 EXP_TAG=normuon
 
-LR=${LR:-3.6e-4}              # matrix LR (much smaller than adaptive-muon's 1e-2)
+MATRIX_LR=${MATRIX_LR:-1e-2}              # matrix LR (muon-comparable under normuonfix)
 MIN_LR=${MIN_LR:-1e-5}
-SCALAR_LR=${SCALAR_LR:-1.5e-3}
-KNOB_STR=lr${LR}
+SCALAR_LR=${SCALAR_LR:-1e-3}
+MOMENT2=${MOMENT2:-normuonfix}            # normuonfix | normuon | adamuon
+KNOB_STR=fixed_lr${SCALAR_LR}_mlr${MATRIX_LR}
+[ "$MOMENT2" != normuonfix ] && KNOB_STR=${KNOB_STR}-${MOMENT2}
 
-WEIGHT_DECAY=0.0
+# Match muon.sh so muon-vs-normuonfix is apples-to-apples (WD equilibrium and
+# warmup drive early param-norm growth far more than the moment2 method).
+WEIGHT_DECAY=0.1
 ADAM_BETA1=0.9
 ADAM_BETA2=0.95
 
+LR_WARMUP_SAMPLES=128000
+
 RECIPE_ARGS=(
-    --muon-scale-mode spectral
+    --muon-scale-mode shape_scaling
     --muon-nesterov
     --muon-momentum 0.95
     # SCALAR_LR for everything Adam-managed, via the per-class knobs
     # (--muon-scalar-lr is now 1D-only; this reproduces the old lumped group).
+    --matrix-lr "$MATRIX_LR"
     --embedding-lr "$SCALAR_LR"
     --output-lr "$SCALAR_LR"
     --gains-lr "$SCALAR_LR"
     --muon-scalar-weight-decay 0.0
-    --adaptive-muon-moment2-method normuon
+    --adaptive-muon-moment2-method "$MOMENT2"
 )
