@@ -235,6 +235,11 @@ if [ "$LR_DECAY_STYLE" = "WSD" ]; then
         --lr-wsd-decay-samples "$LR_WSD_DECAY_SAMPLES"
     )
 fi
+# OVERRIDE_OPT_SCHED=1: rebuild the LR schedule from the args above instead of
+# the one stored in the checkpoint. Needed when branching a cooldown off a
+# constant-LR run (see sweep-cooldowns.sh) — optimizer state and iteration are
+# still loaded; only the schedule is replaced.
+[ -n "${OVERRIDE_OPT_SCHED:-}" ] && LEARNING_RATE_ARGS+=(--override-opt-param-scheduler)
 
 INITIALIZATION_ARGS=(
     --seed 42

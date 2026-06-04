@@ -203,7 +203,9 @@ DEFAULT_NODES DEFAULT_TIME`.
 A **recipe** file sets (required): `OPTIMIZER EXP_TAG RECIPE_ARGS=(...)`. May
 set: `LR MIN_LR KNOB_STR WEIGHT_DECAY ADAM_BETA1 ADAM_BETA2 CLIP_GRAD
 LR_DECAY_STYLE LR_WARMUP_SAMPLES LR_WSD_DECAY_STYLE LR_WSD_DECAY_SAMPLES
-EXTRA_REG_ARGS=(...)`.
+EXTRA_REG_ARGS=(...)`. Env-only: `OVERRIDE_OPT_SCHED=1` adds
+`--override-opt-param-scheduler` (used by `sweep-cooldowns.sh` to re-schedule a
+loaded checkpoint).
 
 A **cluster** file may set (all guarded — env/size/recipe win): `EDF_TOML
 SRUN_MPI SRUN_EXTRA_ARGS=(...) MIXED_PRECISION_ARGS=(...) MOE_DISPATCHER
@@ -248,6 +250,24 @@ bash sweep-length.sh --size 420m-moe --recipe master --tokens "7.5 15 30"
 ```
 
 Two-axis sweep is just nested loops (`for mlr ...; do for t ...`).
+
+**Sweep cooldowns from one constant-LR run** with `sweep-cooldowns.sh` — the
+multiple-cooldown analysis: one base run at constant LR + WSD cooldowns branched
+off its intermediate checkpoints (~20% of each branch budget):
+
+```bash
+bash sweep-cooldowns.sh --size 420m-moe --recipe master --base-tokens 15 --branches "3 6 9 15"
+# -> base:      ...-elr1e-3-const-t15b                          (constant LR, auto-requeue)
+# -> cooldowns: ...-const-t15b-d3b-cd0.6b, ...-d6b-cd1.2b, ...  (one per branch)
+```
+
+Branch points snap to the size's `SAVE_INTERVAL` (3B tokens at 420m-moe). Each
+cooldown's `CKPT_DIR` is pre-seeded with a symlink to the base checkpoint, then
+runs as a normal job: optimizer state loads, and `OVERRIDE_OPT_SCHED=1` swaps in
+the branch-local WSD schedule. Run it again later (or use `--watch`) to submit
+branches whose checkpoint doesn't exist yet; cooldowns must use the same `--nodes`
+as the base run (per-rank optimizer shards). `--cooldown-frac`/`--cooldown-tokens`
+override the cooldown length.
 
 ## Inspect without launching
 

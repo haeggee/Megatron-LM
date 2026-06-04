@@ -28,7 +28,7 @@ SAVE_INTERVAL=5722             # ~10 saves over the run
 
 EMBEDDING_MULTIPLIER=32.0      # sqrt(1024)
 
-APERTUS_TRACK=transformer-pp-420m
+APERTUS_TRACK=420a-moe
 
 # Expert geometry only — routing policy is in common.sh. 64 experts top-2 + 1
 # shared at half a routed expert's width; first layer dense, the other 19 MoE.

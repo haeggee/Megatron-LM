@@ -40,6 +40,7 @@ done
 
 # Geometric x2 grids centered on each recipe's default.
 ADAMW_LRS=${ADAMW_LRS:-"1.5e-4 3e-4 6e-4 1.2e-3"}
+# ADAMW_LRS=${ADAMW_LRS:-"2.4e-3 4.8e-3"}
 MUON_MLRS=${MUON_MLRS:-"5e-3 1e-2 2e-2 4e-2"}
 
 submit() {  # submit <env assignments...> -- passed straight to submit.sh
@@ -56,21 +57,29 @@ submit() {  # submit <env assignments...> -- passed straight to submit.sh
 }
 
 n=0
-for lr in $ADAMW_LRS; do
-    submit LR="1e-3" MATRIX_LR="$lr" -- --recipe adamw; n=$((n+1))
+# adamw
+# for lr in $ADAMW_LRS; do
+#     submit LR="1e-3" MATRIX_LR="$lr" -- --recipe adamw; n=$((n+1))
+# done
+# muon
+# for mlr in $MUON_MLRS; do
+#     submit MATRIX_LR="$mlr" -- --recipe muon; n=$((n+1))
+# done
+# # # muon + radam
+# # for mlr in $MUON_MLRS; do
+# #     submit MATRIX_LR="$mlr" ROUTER_ADAM=1 -- --recipe muon; n=$((n+1))
+# # done
+# # master
+# for mlr in $MUON_MLRS; do
+#     submit MLR="$mlr" -- --recipe master; n=$((n+1))
+# done
+# # normuon
+# for mlr in $MUON_MLRS; do
+#     submit MATRIX_LR="$mlr" -- --recipe normuon; n=$((n+1))
+# done
+# muown
+for mlr in $ADAMW_LRS; do
+    submit MATRIX_LR="$mlr" -- --recipe muown; n=$((n+1))
 done
-for mlr in $MUON_MLRS; do
-    submit MATRIX_LR="$mlr" -- --recipe muon; n=$((n+1))
-done
-for mlr in $MUON_MLRS; do
-    submit MATRIX_LR="$mlr" ROUTER_ADAM=1 -- --recipe muon; n=$((n+1))
-done
-for mlr in $MUON_MLRS; do
-    submit MLR="$mlr" -- --recipe master; n=$((n+1))
-done
-for mlr in $MUON_MLRS; do
-    submit MATRIX_LR="$mlr" -- --recipe normuon; n=$((n+1))
-done
-
 
 echo ">>> $n jobs ${DRY:+(dry run, nothing submitted) }for SIZE=$SIZE CLUSTER=$CLUSTER NODES=$NODES${MBS:+ MBS=$MBS}"

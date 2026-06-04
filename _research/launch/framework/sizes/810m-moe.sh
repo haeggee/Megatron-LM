@@ -19,7 +19,7 @@ GBS=128
 TRAIN_SAMPLES=${TRAIN_SAMPLES:-7324219}   # ~30B tokens (leaderboard 810m budget)
 SAVE_INTERVAL=5722
 
-APERTUS_TRACK=transformer-pp-810m
+APERTUS_TRACK=810a-moe
 
 # Expert geometry only — routing policy is in common.sh.
 MOE_ARGS=(
