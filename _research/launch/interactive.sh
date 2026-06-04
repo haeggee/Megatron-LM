@@ -44,7 +44,9 @@ set -euo pipefail
 
 REPO_DIR=${REPO_DIR:-/iopsstor/scratch/cscs/$USER/megatron-lm-research-baseline}
 WORKDIR=${WORKDIR:-$REPO_DIR}
-PACKAGE_DIR=$REPO_DIR/_research/packages
+# Inside the ROCm container (mi300), set ARCH_TAG=-rocm so packages/kernel
+# caches don't shadow the CUDA ones (mirrors framework/clusters/mi300.sh).
+PACKAGE_DIR=$REPO_DIR/_research/packages${ARCH_TAG:-}
 DATASET_CACHE_DIR=$REPO_DIR/cache/dataset
 TMP_CACHE_DIR=$REPO_DIR/cache/tmp
 
@@ -52,8 +54,8 @@ export PYTHONPATH=$WORKDIR:$PACKAGE_DIR:$WORKDIR${PYTHONPATH:+:$PYTHONPATH}
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export TORCH_CPP_LOG_LEVEL=WARNING
-export TRITON_CACHE_DIR=$REPO_DIR/cache/triton
-export TORCHINDUCTOR_CACHE_DIR=$REPO_DIR/cache/inductor
+export TRITON_CACHE_DIR=$REPO_DIR/cache/triton${ARCH_TAG:-}
+export TORCHINDUCTOR_CACHE_DIR=$REPO_DIR/cache/inductor${ARCH_TAG:-}
 export TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER=0
 export TMPDIR=$TMP_CACHE_DIR
 

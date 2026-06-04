@@ -57,7 +57,12 @@ from ..fp8_utils import dequantize_fp8_tensor, is_float8tensor, quantize_param_s
 from ..transformer.fsdp_dtensor_checkpoint import handle_experts_in_state_dict
 from ..transformer.module import MegatronModule
 from .grad_scaler import MegatronGradScaler
-from .optimizer import MixedPrecisionOptimizer, _zero_grad_group_helper, param_group_identifier_keys
+from .optimizer import (
+    MixedPrecisionOptimizer,
+    _zero_grad_group_helper,
+    param_group_identifier_keys,
+    use_group_key_matching,
+)
 from .optimizer_config import OptimizerConfig
 from .param_layout import FullParamLayout, PerBufferParamLayout, pad_bucket_end, pad_param_start
 
@@ -912,7 +917,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         #   contains an integer ordering of parameters within each group, and
         #   the ordering of parameters within its flattened parameter state
         #   list.
-        def make_needed_groups(param_group):
+        def make_needed_groups(param_group, use_group_key):
+            # Prefer the unique content-derived group_key (see _get_param_groups);
+            # fall back to the legacy identifier tuple for old checkpoints, which
+            # collides for groups differing only in max_lr/min_lr/optimizer.
+            if use_group_key:
+                return ('group_key', param_group['group_key'])
             needed_groups = []
             for key in param_group_identifier_keys:
                 # NeMo changes these variable names from `lr_mult` and `wd_mult`
@@ -929,14 +939,17 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             needed_groups = tuple(needed_groups)
             return needed_groups
 
+        inner_state_dict = self.optimizer.state_dict()
+        use_group_key = use_group_key_matching(
+            state_dict["optimizer"]["param_groups"], inner_state_dict["param_groups"]
+        )
         param_groups_map = {}
         for param_group in state_dict["optimizer"]["param_groups"]:
-            needed_groups = make_needed_groups(param_group)
+            needed_groups = make_needed_groups(param_group, use_group_key)
             param_groups_map[needed_groups] = param_group
-        inner_state_dict = self.optimizer.state_dict()
         state_dict_param_groups = []
         for inner_param_group in inner_state_dict["param_groups"]:
-            needed_groups = make_needed_groups(inner_param_group)
+            needed_groups = make_needed_groups(inner_param_group, use_group_key)
             state_dict_param_groups.append(
                 {**param_groups_map[needed_groups], "params": inner_param_group['params']}
             )

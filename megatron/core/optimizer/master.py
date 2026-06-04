@@ -146,22 +146,13 @@ class MasterOptimizer(torch.optim.Optimizer):
         )
         super().__init__(params, defaults)
 
-        # Ckpt-resume workaround: Megatron's _filter_and_reorder_param_groups
-        # (optimizer.py) keys saved groups by (wd_mult, lr_mult,
-        # is_expert_parallel, is_decoupled_lr). Master's overrides differ only
-        # in max_lr / min_lr / use_orthogonal_updates / optimizer, so multiple
-        # groups (matrix, embedding, LM-head, router, ...) collide on that
-        # tuple. The loader's dict-based map then silently overwrites colliding
-        # entries and reassigns the surviving group's `params` repeatedly,
-        # which trips torch.optim.Optimizer.load_state_dict's per-group size
-        # check ("loaded state dict contains a parameter group that doesn't
-        # match the size of optimizer's group"). lr_mult is unused at runtime
-        # (OptimizerParamScheduler reads max_lr/min_lr), so a unique tag per
-        # group disambiguates the loader without touching training math.
-        # Save/load round-trip works because both jobs run this same code in
-        # the same param-group order.
-        for _i, _g in enumerate(self.param_groups):
-            _g['lr_mult'] = float(_i + 1)
+        # NOTE: param groups that differ only in max_lr / min_lr /
+        # use_orthogonal_updates used to collide in Megatron's checkpoint
+        # group matching (keyed by wd_mult/lr_mult/is_expert_parallel/
+        # is_decoupled_lr), which required a per-group lr_mult tagging hack
+        # here. Groups now carry a unique content-derived 'group_key' (see
+        # _get_param_groups in megatron/core/optimizer/__init__.py) that the
+        # loaders match on, so no per-optimizer workaround is needed.
 
         # Normalize parameters at init so the first forward sees on-sphere weights.
         # When hypersphere_preserve_init=True we skip this so the model's init
@@ -239,9 +230,15 @@ class MasterOptimizer(torch.optim.Optimizer):
             else:
                 grad = exp_avg
             with emerging_optimizers.utils.fp32_matmul_precision(self.fp32_matmul_prec):
-                update = self._orthogonalize_param(p, grad, is_qkv=is_qkv)
+                # Routers never get the Muon shape scale factor (scale_mode):
+                # the (num_experts, hidden) shape makes spectral/shape_up blow
+                # the update up by ~sqrt(hidden/num_experts). The router update
+                # is the bare orthogonalized matrix (extra_scale_factor still
+                # applies).
+                update = self._orthogonalize_param(p, grad, is_qkv=is_qkv,
+                                                   skip_scale=is_router)
             if self.use_normuon:
-                update = self._normuon_rescale(update, state)
+                update = self._normuon_rescale(update, state, skip_scale=is_router)
             # Shrink Muon update for is_out_proj params to match the smaller
             # target sphere. Muon's shape_up (and spectral) scale targets the
             # natural RMS of a unit-row/col matrix; with target radius
@@ -296,10 +293,12 @@ class MasterOptimizer(torch.optim.Optimizer):
             self._normalize(p, p, is_qkv=is_qkv, is_out_proj=is_out_proj,
                             is_embedding=is_embedding, is_router=is_router)
 
-    def _normuon_rescale(self, update, state):
+    def _normuon_rescale(self, update, state, skip_scale: bool = False):
         """Pure NorMuon (arXiv 2510.05491): 2nd-moment rescale of the
         orthogonalized update along the shorter axis. Reduces (averages
         squared values) along the longer axis; rescales by 1/sqrt(max(v, eps)).
+        skip_scale=True drops the final scale_mode shape factor (routers); the
+        frob-norm renormalization to min(d_out, d_in)**0.5 still applies.
         """
         avg_dim = -1 if update.shape[-2] >= update.shape[-1] else -2
         if "normuon_v" not in state:
@@ -324,6 +323,8 @@ class MasterOptimizer(torch.optim.Optimizer):
         res = res * shape_scaling / vnorm_new
 
         # apply other shape scaling factors as in muon
+        if skip_scale:
+            return res
         scaling_factor = _get_muon_scale_factor(update.size(-2), update.size(-1), mode=self.scale_mode)
         return res * scaling_factor
  
@@ -333,8 +334,9 @@ class MasterOptimizer(torch.optim.Optimizer):
         if weight_decay != 0:
             p.add_(p, alpha=-weight_decay * group["lr"])
 
-    def _orthogonalize_param(self, p, grad, is_qkv: bool = False):
-        """Newton-Schulz orthogonalization, with optional QKV split."""
+    def _orthogonalize_param(self, p, grad, is_qkv: bool = False, skip_scale: bool = False):
+        """Newton-Schulz orthogonalization, with optional QKV split.
+        skip_scale=True drops the scale_mode shape factor (used for routers)."""
         if self.pg_collection is not None:
             tp_group = (self.pg_collection.expt_tp
                         if getattr(p, "expert_tp", False)
@@ -347,13 +349,13 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         if self.split_qkv and is_qkv:
             qs, ks, vs = _split_qkv(grad, self.qkv_split_shapes)
-            qs = self._orthogonalize_tensor(qs, tp_group, partition_dim)
-            ks = self._orthogonalize_tensor(ks, tp_group, partition_dim)
-            vs = self._orthogonalize_tensor(vs, tp_group, partition_dim)
+            qs = self._orthogonalize_tensor(qs, tp_group, partition_dim, skip_scale=skip_scale)
+            ks = self._orthogonalize_tensor(ks, tp_group, partition_dim, skip_scale=skip_scale)
+            vs = self._orthogonalize_tensor(vs, tp_group, partition_dim, skip_scale=skip_scale)
             return _merge_qkv((qs, ks, vs), grad.shape, self.qkv_split_shapes)
-        return self._orthogonalize_tensor(grad, tp_group, partition_dim)
+        return self._orthogonalize_tensor(grad, tp_group, partition_dim, skip_scale=skip_scale)
 
-    def _orthogonalize_tensor(self, grad, tp_group, partition_dim):
+    def _orthogonalize_tensor(self, grad, tp_group, partition_dim, skip_scale: bool = False):
         assert grad.ndim == 2
         size = [grad.size(-2), grad.size(-1)]
         if partition_dim is not None:
@@ -366,7 +368,7 @@ class MasterOptimizer(torch.optim.Optimizer):
             partition_dim=partition_dim,
             tp_mode=("duplicated" if self.tp_mode == "blockwise" else self.tp_mode),
         )
-        scale = _get_muon_scale_factor(size[0], size[1], mode=self.scale_mode)
+        scale = 1.0 if skip_scale else _get_muon_scale_factor(size[0], size[1], mode=self.scale_mode)
         return orth * scale * self.extra_scale_factor
 
     def _resolve_mode(self, is_embedding: bool, is_router: bool = False):
@@ -500,6 +502,7 @@ class GainsMasterOptimizer(MasterOptimizer):
         hypersphere_gains_mode_output: Optional[Literal["row", "col", "rowcol", "flat", "none"]] = None,
         hypersphere_gains_mode_embedding: Optional[Literal["row", "col", "rowcol", "flat", "none"]] = None,
         gains_lr: Optional[float] = None,
+        gains_min_lr: Optional[float] = None,
         gains_betas: tuple[float, float] = (0.9, 0.999),
         gains_eps: float = 1e-8,
         gains_weight_decay: float = 0.0,
@@ -513,6 +516,7 @@ class GainsMasterOptimizer(MasterOptimizer):
         self.hypersphere_gains_mode_output = hypersphere_gains_mode_output
         self.hypersphere_gains_mode_embedding = hypersphere_gains_mode_embedding
         self.gains_lr = gains_lr  # None → follow group["lr"] verbatim
+        self.gains_min_lr = gains_min_lr  # floor of the gains' own schedule
         self.gains_betas = gains_betas
         self.gains_eps = gains_eps
         self.gains_weight_decay = gains_weight_decay
@@ -728,15 +732,25 @@ class GainsMasterOptimizer(MasterOptimizer):
         eps = self.gains_eps
         wd = self.gains_weight_decay
 
-        # Gains follow the param-group LR. If gains_lr is unset, use group["lr"]
-        # verbatim (so the param scheduler drives gains too). Otherwise treat
-        # gains_lr as a base LR and apply the param schedule shape on top.
+        # Gains have their OWN schedule with peak gains_lr and floor
+        # gains_min_lr, following the host group's schedule shape: map the
+        # host group's normalized position t = (lr - min) / (max - min) onto
+        # the gains' [gains_min_lr, gains_lr] interval. With min_lr_mode
+        # 'relative' this reduces exactly to gains_lr * (lr / max_lr); with
+        # 'absolute' the gains floor at gains_min_lr (= config.min_lr) instead
+        # of inheriting the host group's fraction. During warmup the affine
+        # map can extrapolate below the floor (host lr starts at init_lr,
+        # often 0), so clamp at 0 — gains warm up alongside everything else.
+        # If gains_lr is unset, use group["lr"] verbatim.
         if self.gains_lr is None:
             lr = group["lr"]
         else:
             max_lr = group.get("max_lr", group["lr"])
-            schedule_mult = (group["lr"] / max_lr) if max_lr > 0 else 1.0
-            lr = self.gains_lr * schedule_mult
+            min_lr = group.get("min_lr", 0.0)
+            gains_min = self.gains_min_lr if self.gains_min_lr is not None else 0.0
+            denom = max_lr - min_lr
+            t = ((group["lr"] - min_lr) / denom) if denom > 0 else 1.0
+            lr = max(gains_min + t * (self.gains_lr - gains_min), 0.0)
 
         bias_correction1 = 1.0 - beta1 ** step
         bias_correction2 = 1.0 - beta2 ** step

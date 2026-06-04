@@ -97,6 +97,34 @@ def _multi_tensor_copy_this_to_that(
 param_group_identifier_keys = ('wd_mult', 'lr_mult', 'is_expert_parallel', 'is_decoupled_lr')
 
 
+def get_param_group_match_key(group: Dict) -> tuple:
+    """Identifier used to match a runtime param group with a saved one.
+
+    Prefers the unique, content-derived ``group_key`` stamped by
+    ``_get_param_groups`` (present in checkpoints saved after its
+    introduction). Falls back to the legacy ``param_group_identifier_keys``
+    tuple, which collides for groups that differ only in fields outside it
+    (e.g. max_lr/min_lr/optimizer from the per-class LR knobs).
+
+    Callers must use the same scheme for both sides of a match — see
+    ``use_group_key_matching``.
+    """
+    if 'group_key' in group:
+        return ('group_key', group['group_key'])
+    # NeMo may rename required fields, e.g. "wd_mult" to "pre_wd_mult".
+    return tuple(
+        group[key] if key in group else group[f"pre_{key}"]
+        for key in param_group_identifier_keys
+    )
+
+
+def use_group_key_matching(*group_lists: List[Dict]) -> bool:
+    """True when every group in every list carries ``group_key``, so exact
+    matching can be used on both sides. Mixed presence (e.g. loading an old
+    checkpoint with new code) falls back to the legacy tuple for ALL groups."""
+    return all('group_key' in g for groups in group_lists for g in groups)
+
+
 class MegatronOptimizer(ABC):
     """
     Base class for all Megatron optimizers.
@@ -412,8 +440,13 @@ class MegatronOptimizer(ABC):
         current_groups: List[Dict], state_dict_groups: List[Dict]
     ) -> List[Dict]:
         """Filter and reorder state_dict parameter groups to match current optimizer groups.
-        Keys used for matching align with those from _get_param_groups:
-        (wd_mult, lr_mult, is_expert_parallel, is_decoupled_lr)
+
+        Groups are matched on the unique content-derived ``group_key`` stamped
+        by ``_get_param_groups`` when both runtime and checkpoint groups carry
+        it. For checkpoints saved before its introduction, falls back to the
+        legacy ``param_group_identifier_keys`` tuple (wd_mult, lr_mult,
+        is_expert_parallel, is_decoupled_lr) — which can collide for groups
+        that differ only in other fields (max_lr/min_lr/optimizer).
 
         Args:
             current_groups (List[Dict]): Parameter groups from the current optimizer instance.
@@ -425,24 +458,27 @@ class MegatronOptimizer(ABC):
         Raises:
             ValueError: If parameter groups in state dict don't match current optimizer.
         """
-        # Define groups order that is needed in the current optimizer (coming from runtime)
-        needed_groups = [
+        if use_group_key_matching(current_groups, state_dict_groups):
+            key_fn = lambda g: ('group_key', g['group_key'])
+        else:
             # NeMo may have different key for required fields, e.g., "wd_mult" to "pre_wd_mult"
-            tuple(g[key] if key in g else g[f"pre_{key}"] for key in param_group_identifier_keys)
-            for g in current_groups
-        ]
+            key_fn = lambda g: tuple(
+                g[key] if key in g else g[f"pre_{key}"] for key in param_group_identifier_keys
+            )
+
+        # Define groups order that is needed in the current optimizer (coming from runtime)
+        needed_groups = [key_fn(g) for g in current_groups]
 
         # Keep state_dict param group order since groups are LocalNonpersistentObject
         # and their order is determined at runtime, not from the checkpoint.
         params_in_state_dict_order = [g['params'] for g in state_dict_groups]
-        loaded_groups_map = {
-            tuple(
-                # NeMo may have different key for required fields, e.g., "wd_mult" to "pre_wd_mult"
-                group[key] if key in group else group[f"pre_{key}"]
-                for key in param_group_identifier_keys
-            ): group
-            for group in state_dict_groups
-        }
+        loaded_groups_map = {key_fn(group): group for group in state_dict_groups}
+        if len(loaded_groups_map) != len(state_dict_groups):
+            warnings.warn(
+                "Duplicate parameter-group keys in checkpoint state dict; colliding groups "
+                "were silently merged. This indicates groups are not uniquely identified "
+                "(legacy checkpoint without group_key?) and may load incorrectly."
+            )
 
         final_groups = []
         for key, params in zip(needed_groups, params_in_state_dict_order):
@@ -451,7 +487,8 @@ class MegatronOptimizer(ABC):
                 raise ValueError(
                     f"Could not find parameter group with key {key} in loaded checkpoint.\n"
                     f"Available keys:\n{available_keys}\n"
-                    f"Parameter group key definition: {param_group_identifier_keys}"
+                    f"Parameter group key definition: group_key when present on both sides, "
+                    f"else {param_group_identifier_keys}"
                 )
 
             # Update group's parameters to preserve state dict ordering

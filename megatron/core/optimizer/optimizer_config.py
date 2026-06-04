@@ -290,16 +290,14 @@ class OptimizerConfig:
     One of 'adam' or 'lion'. Defaults to 'adam'."""
 
     muon_scalar_lr: Optional[float] = None
-    """Learning rate for the scalar-optimizer param group (non-2D / embedding / output
-    params routed to Adam or Lion when using muon). When None, inherits ``config.lr``."""
+    """Legacy alias for ``gains_lr``: peak LR for 1D vector params (biases, norm
+    gains) under the Muon family and master. Embedding / LM-head LRs are set with
+    ``embedding_lr`` / ``output_lr``. Mutually exclusive with ``gains_lr``.
+    When None, 1D params inherit ``config.lr``."""
 
     muon_scalar_weight_decay: Optional[float] = None
     """Weight decay for the scalar-optimizer param group. When None, inherits
     ``config.weight_decay``. Set to 0.0 to decouple WD from the Muon 2D-matrix group."""
-
-    adaptive_muon_moment2_method: str = 'adamuon'
-    """Second-moment accumulation method for adaptive_muon. 'normuon' applies per-row
-    (neuron) normalisation after Newton-Schulz (NorMuon, arXiv 2510.05491)."""
 
     # Lion.
     lion_beta1: float = 0.95
@@ -319,7 +317,15 @@ class OptimizerConfig:
     """Whether to use the KL-Shampoo preconditioner."""
 
     adaptive_muon_moment2_method: str = "adamuon"
-    """The method to use for the moment2 update in Adaptive Muon optimizer."""
+    """Second-moment accumulation method for adaptive_muon.
+    'adamuon': elementwise AdamW-style second moment on the orthogonalized
+    update. 'normuon': per-neuron (longer-axis) rsqrt rescale (NorMuon,
+    arXiv 2510.05491) — note this cancels the per-matrix muon_scale_mode
+    factor, so the scale mode is effectively a no-op. 'normuonfix': NorMuon
+    rescale as a pure direction change with the update magnitude renormalized
+    to Muon's (frob = scale_mode factor * sqrt(min(d_out, d_in))), matching
+    plain muon's effective per-layer step sizes; implemented locally in
+    TensorParallelAdaptiveMuon (mirrors master's use_normuon path)."""
 
     adaptive_muon_beta2: float = 0.95
     """The beta2 parameter for the Adaptive Muon optimizer."""
@@ -369,34 +375,41 @@ class OptimizerConfig:
     muown_use_normuon=True. Default 0.95."""
 
     ##########################################################################
-    # Master optimizer (Adam/AdEMAMix + optional Muon orthogonalized updates +
-    # L2 hypersphere weight clipping + learnable per-axis gains). Flag-gated
-    # via --optimizer master. Defaults below leave non-master runs unchanged.
+    # Per-parameter-class LR knobs, shared by ALL optimizers (adam, muon
+    # family, muown, master, ...). Each is an absolute peak LR; the scheduler
+    # then warms the group up to that peak and decays it to a per-group min
+    # derived via ``group_min_lr`` / ``min_lr_mode``. Defaults (None) leave
+    # every group on the base ``lr`` schedule.
     ##########################################################################
     matrix_lr: Optional[float] = None
-    """Absolute LR for matrix (2D non-embedding/output) params under
-    --optimizer master. When None, falls back to ``muon_lr_factor * lr``."""
+    """Absolute peak LR for matrix (2D non-embedding/output) params, whatever
+    optimizer manages them (Adam, Muon, Muown, master). When None, falls back
+    to ``muon_lr_factor * lr``."""
+
+    embedding_lr: Optional[float] = None
+    """Absolute peak LR for embedding (and tied LM-head) params. Mutually
+    exclusive with ``embedding_lr_multiplier``. When both are None, those
+    params use ``lr`` directly."""
 
     embedding_lr_multiplier: Optional[float] = None
-    """LR multiplier for embedding (and tied LM-head) params under --optimizer
-    master. Final max_lr for those params = embedding_lr_multiplier * lr. When
-    None, those params use ``lr`` directly."""
+    """DEPRECATED: use ``embedding_lr``. LR multiplier for embedding (and tied
+    LM-head) params; final max_lr = embedding_lr_multiplier * lr."""
 
     output_lr: Optional[float] = None
-    """Absolute LR for the (untied) output LM-head params under --optimizer
-    master. When None, the output layer uses ``lr`` directly. Independent of
-    embedding_lr_multiplier and muon_scalar_lr."""
+    """Absolute peak LR for the (untied) output LM-head params. When None, the
+    output layer uses ``lr`` directly. Independent of embedding_lr and
+    gains_lr."""
 
     min_lr_mode: str = 'relative'
     """How per-group min_lr is set for any param group with a custom max_lr
-    (master matrix/embedding/output groups and the Muon-family scalar group).
+    (matrix / embedding / output / gains groups).
     'relative' (default): each group decays by the same fraction
     (config.min_lr / config.lr), so min_lr = max_lr * ratio per group — the
     schedule shape is preserved across groups, floors differ.
     'absolute': every group decays to the same absolute floor config.min_lr."""
 
     muon_lr_factor: float = 1.0
-    """When ``matrix_lr`` is None, the matrix-param LR for master is
+    """When ``matrix_lr`` is None, the matrix-param LR is
     ``muon_lr_factor * lr``."""
 
     hypersphere_mode: Optional[str] = None
@@ -416,7 +429,7 @@ class OptimizerConfig:
     mode of post-step L2 projection. When None, no special normalization is
     applied to routers (they fall back to hypersphere_mode). Orthogonal vs
     Adam updates for routers are controlled separately by
-    master_router_use_orthogonal_updates."""
+    router_use_orthogonal_updates."""
 
     hypersphere_tangential_grad: bool = False
     """When True (and use_orthogonal_updates=True), project p.grad onto the
@@ -441,11 +454,19 @@ class OptimizerConfig:
     Keeps the hypersphere constraint consistent with Megatron's depth-aware
     init for residual-out projections. Default False."""
 
+    router_use_orthogonal_updates: Optional[bool] = None
+    """Per-param-group override for orthogonal (Muon) updates on MoE router
+    weights, for master and the muon family (muon, adaptive_muon, aurora,
+    rmnp, muown, normuown). True → force Muon updates for routers.
+    False → force Adam updates for routers (master: internal Adam branch;
+    muon family: external Adam optimizer). None (default) → master routers
+    follow the global use_orthogonal_updates; muon-family routers use Muon
+    (they are 2D non-embedding). Adam-routed routers are excluded from the
+    matrix_lr group and keep the base lr schedule."""
+
     master_router_use_orthogonal_updates: Optional[bool] = None
-    """Per-param-group override for use_orthogonal_updates on MoE router
-    weights under --optimizer master. True → force Muon for routers.
-    False → force Adam branch for routers. None (default) → routers follow
-    the global use_orthogonal_updates setting."""
+    """DEPRECATED: use ``router_use_orthogonal_updates``. Same semantics,
+    master-only historically. Mutually exclusive with the new knob."""
 
     hypersphere_gains_mode: Optional[str] = None
     """Learnable per-axis gains for matrix params under master. One of 'row',
@@ -460,10 +481,13 @@ class OptimizerConfig:
     hypersphere_gains_mode_output."""
 
     gains_lr: Optional[float] = None
-    """Absolute LR for the per-axis gains AdamW under --optimizer master.
-    When None, falls back to config.lr. The gains LR is still scaled each
-    step by the main scheduler's (lr / max_lr) ratio so it tracks the
-    schedule shape."""
+    """Absolute peak LR for "gain"-like parameters, for all optimizers:
+    (1) every 1D vector param (RMSNorm gains, biases) gets its own scheduled
+    param group with this peak, and (2) master's internal per-axis gains AdamW
+    uses this peak with its own schedule (decaying to
+    ``group_min_lr(config, gains_lr)`` per ``min_lr_mode``). When None, both
+    fall back to the base ``lr`` schedule. Mutually exclusive with the legacy
+    ``muon_scalar_lr``."""
 
     gain_parametrization: str = 'direct'
     """Reparametrize the stored gain g; the effective per-axis multiplier on
@@ -654,3 +678,27 @@ class OptimizerConfig:
 # Backward-compatible aliases (deprecated; use OptimizerConfig directly).
 AdamOptimizerConfig = OptimizerConfig
 SGDOptimizerConfig = OptimizerConfig
+
+
+def group_min_lr(config: OptimizerConfig, max_lr: float) -> float:
+    """Per-group min_lr policy for any param group with a custom max_lr.
+
+    The LR scheduler decays every group from its own max_lr to its own min_lr
+    along the same schedule shape (warmup/decay steps, decay style). To keep the
+    decay curve well-formed, a group's min_lr must be derived from its max_lr —
+    not left at the global config.min_lr, which would invert the schedule when
+    max_lr < config.min_lr. Policy is shared across all optimizers and
+    controlled by config.min_lr_mode:
+
+    'relative' (default): proportional decay — min_lr = max_lr * (config.min_lr /
+    config.lr). Every group decays by the same fraction; floors differ across
+    groups, so the per-group curve is a constant rescaling of the base schedule.
+
+    'absolute': shared floor — min_lr = config.min_lr (clamped to <= max_lr to
+    avoid an inverted schedule when max_lr < config.min_lr).
+    """
+    floor = config.min_lr if config.min_lr is not None else 0.0
+    if config.min_lr_mode == 'absolute':
+        return min(floor, max_lr)
+    ratio = (floor / config.lr) if (config.lr and config.lr > 0) else 0.0
+    return max_lr * ratio

@@ -2,14 +2,23 @@
 #
 # Run an sbatch's training command INLINE in your current interactive shell
 # (skips the wrapping srun). Pre-req: you're already inside an interactive
-# allocation on a GH200 node, inside the alps3 container.
+# allocation inside the matching container — alps3 on GH200 (default), or the
+# ROCm container on an mi300 node (then run with CLUSTER=mi300 in the env, or
+# via framework/debug.sh --cluster mi300).
 #
-# Typical flow on clariden:
+# Typical flow on clariden (GH200 / alps3):
 #
 #   srun --account=<acc> --time=01:00:00 --nodes=1 --gpus-per-node=4 \
 #        --cpus-per-task=72 --mem=460000 --mpi=pmix \
 #        --environment=_research/launch/alps3.toml --pty bash
 #   # ... now inside the alps3 container ...
+#
+# Or on the AMD MI300A partition:
+#
+#   srun --account=<acc> --partition=mi300 --time=01:00:00 --nodes=1 \
+#        --gpus-per-node=4 --cpus-per-task=48 --mpi=pmi2 \
+#        --environment=_research/launch/mi300.toml --pty bash
+#   # ... now inside the ROCm container ...
 #   # data defaults to the swissai blend; or point at a single binary prefix:
 #   export MEGATRON_DATA_PATH=/path/to/megatron_binary_prefix   # optional
 #   bash _research/launch/interactive-run.sh

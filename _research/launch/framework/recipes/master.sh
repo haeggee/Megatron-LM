@@ -5,10 +5,11 @@
 # the Adam branch (hardcoded). --master-min-lr-mode absolute: every per-group
 # LR floor is MIN_LR.
 #
-# Knobs (override via env, e.g. `MLR=1e-2 ELR=3 submit.sh ...`):
-#   LR   scalar-group LR (embeddings, LM head, biases)
+# Knobs (override via env, e.g. `MLR=1e-2 ELR=3e-3 submit.sh ...`):
+#   LR   scalar-group LR (LM head, biases, norm gains)
 #   MLR  matrix LR — tune INDEPENDENTLY of LR
-#   ELR  embedding LR multiplier
+#   ELR  embedding LR — ABSOLUTE (was a multiplier; old ELR=3 ≡ new ELR=3e-3
+#        at LR=1e-3)
 
 OPTIMIZER=master
 EXP_TAG=master
@@ -16,7 +17,7 @@ EXP_TAG=master
 LR=${LR:-1e-3}
 MLR=${MLR:-8e-3}
 MIN_LR=${MIN_LR:-1e-5}
-ELR=${ELR:-3}
+ELR=${ELR:-$LR}
 KNOB_STR=lr${LR}-mlr${MLR}-elr${ELR}
 
 # master's canonical regularization
@@ -41,9 +42,11 @@ RECIPE_ARGS=(
     --muon-nesterov
     --muon-scale-mode shape_up
     --matrix-lr "$MLR"
-    --embedding-lr-multiplier "$ELR"
-    # router: use adam branch, normalize row-wise.
-    --master-router-use-orthogonal-updates false
+    --embedding-lr "$ELR"
+    --gains-lr "$LR"
+    --output-lr "$LR"
+    # router: use muon branch, normalize row-wise.
+    --router-use-orthogonal-updates true
     --hypersphere-router-mode row
     --min-lr-mode absolute
     --hypersphere-scale-out-proj-init

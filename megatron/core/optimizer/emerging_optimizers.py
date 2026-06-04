@@ -19,7 +19,7 @@ from torch.optim.optimizer import ParamsT
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.utils import get_pg_size, log_single_rank
 
-from .optimizer_config import ParamKey, ParamPredicate
+from .optimizer_config import ParamKey, ParamPredicate, group_min_lr
 
 try:
     from emerging_optimizers import registry
@@ -306,7 +306,13 @@ class TensorParallelAdaptiveMuon(TensorParallelMuon, AdaptiveMuon):
         extra_scale_factor: The additional scale factor to use for the update.
         pg_collection: Process group collection for distributed training.
         tp_mode: Tensor parallel mode ("blockwise", "duplicated", or "distributed").
-        moment2_method: Method for second moment accumulation ("adamuon" or "normuon").
+        moment2_method: Method for second moment accumulation. "adamuon" and
+            "normuon" are handled by the emerging-optimizers package (note:
+            "normuon" cancels the scale_mode factor — see
+            _apply_moment2_normalization). "normuonfix" is implemented locally
+            in this class: NorMuon per-neuron rescale as a pure direction
+            change with the update magnitude pinned to Muon's
+            (scale_mode-aware), matching MasterOptimizer._normuon_rescale.
         beta2: The exponential decay rate for second moment.
         eps: Small constant for numerical stability.
     """
@@ -353,10 +359,86 @@ class TensorParallelAdaptiveMuon(TensorParallelMuon, AdaptiveMuon):
             tp_mode=tp_mode,
         )
         self.moment2_method = moment2_method
+        # Kept for the normuonfix moment2 path; the package only bakes these
+        # into the orthogonalize closure, so they aren't otherwise accessible.
+        self.scale_mode = scale_mode
+        self.extra_scale_factor = extra_scale_factor
+        log_single_rank(
+            logger,
+            logging.INFO,
+            f'TensorParallelAdaptiveMuon: moment2_method={moment2_method} '
+            f'(normuonfix handled locally, muon-matched magnitude), '
+            f'scale_mode={scale_mode}, extra_scale_factor={extra_scale_factor}',
+        )
 
         for group in self.param_groups:
             group.setdefault("beta2", beta2)
             group.setdefault("eps", eps)
+
+    @torch.no_grad()  # type: ignore[misc]
+    def _init_group(self, group: dict, skip_non_grad_params: bool = True) -> None:
+        """Lazy state init. 'normuonfix' is handled locally so the installed
+        emerging-optimizers package doesn't need to know about it (its
+        _init_group raises on unknown moment2 methods). Buffer layout is the
+        same as 'normuon': per-slice second moment, reduced along the longer
+        axis."""
+        if self.moment2_method != 'normuonfix':
+            return AdaptiveMuon._init_group(self, group, skip_non_grad_params)
+        for p in group["params"]:
+            if skip_non_grad_params and p.grad is None:
+                continue
+            state = self.state[p]
+            if len(state) == 0:
+                state["momentum_buffer"] = torch.zeros_like(p.data)
+                if p.data.ndim != 2:
+                    raise ValueError(
+                        f"{self.__class__.__name__} only supports 2D parameters, "
+                        f"got shape {tuple(p.data.shape)}"
+                    )
+                avg_dim = -1 if p.data.shape[-2] >= p.data.shape[-1] else -2
+                moment2_shape = list(p.data.shape)
+                moment2_shape[avg_dim] = 1
+                state["moment2_buffer"] = torch.zeros(
+                    moment2_shape, dtype=p.data.dtype, device=p.data.device
+                )
+
+    def _apply_moment2_normalization(
+        self, orth_grad: torch.Tensor, moment2: torch.Tensor, beta2: float, eps: float
+    ) -> torch.Tensor:
+        """Second-moment normalization of the orthogonalized update.
+
+        'adamuon'/'normuon' delegate to the emerging-optimizers package. Note
+        that 'normuon' divides the update by the rsqrt of its own EMA'd
+        magnitude, which cancels the per-matrix scale_mode factor baked into
+        orth_grad — --muon-scale-mode is effectively a no-op there and every
+        matrix gets an entry-RMS≈1 update (frob sqrt(m*n)).
+
+        'normuonfix' (local): keep NorMuon's per-neuron rescale as a pure
+        direction change, then renormalize the Frobenius norm to
+        sqrt(min(m, n)) — the semi-orthogonal shell plain Muon updates live
+        on — and re-apply the scale_mode factor. Same formulation as
+        MasterOptimizer._normuon_rescale, so muon and adaptive_muon/normuonfix
+        share effective per-layer step sizes under any --muon-scale-mode
+        (e.g. shape_scaling → update frob = sqrt(d_out), entry RMS =
+        1/sqrt(d_in), for tall and wide matrices alike). The frob renorm wipes
+        any scalar already applied to orth_grad, so this is exact regardless
+        of what the orthogonalize closure baked in. Uses the local shard shape
+        for the renorm/scale (same as master) — exact under pure DP /
+        duplicated tp_mode.
+        """
+        if self.moment2_method != 'normuonfix':
+            return AdaptiveMuon._apply_moment2_normalization(self, orth_grad, moment2, beta2, eps)
+        avg_dim = -1 if orth_grad.shape[-2] >= orth_grad.shape[-1] else -2
+        v_mean = orth_grad.square().mean(dim=avg_dim, keepdim=True)
+        moment2.lerp_(v_mean, 1 - beta2)
+        res = orth_grad * moment2.clamp_min(eps).rsqrt()
+        # Renormalize onto the semi-orthogonal shell, then apply the Muon scale.
+        vnorm = res.norm(dim=(-2, -1), keepdim=True).clamp_min(eps)
+        res = res * (min(orth_grad.size(-2), orth_grad.size(-1)) ** 0.5) / vnorm
+        scale = get_muon_scale_factor(
+            orth_grad.size(-2), orth_grad.size(-1), mode=self.scale_mode
+        )
+        return res * scale * self.extra_scale_factor
 
     @torch.no_grad()  # type: ignore[misc]
     def step(self, closure: Optional[Callable] = None) -> Optional[float]:
@@ -518,6 +600,10 @@ def _master_config_to_kwargs(config, model_chunks, pg_collection) -> Dict[str, A
 
     matrix_lr = (config.matrix_lr if config.matrix_lr is not None
                  else config.muon_lr_factor * (config.lr or 0.0))
+    # Master's internal per-axis gains follow --gains-lr (shared knob that also
+    # drives the 1D-vector param group), with their own schedule endpoints
+    # [group_min_lr(gains_lr), gains_lr] per --min-lr-mode.
+    effective_gains_lr = config.gains_lr if config.gains_lr is not None else config.lr
     return dict(
         # Common.
         lr=matrix_lr,
@@ -557,7 +643,8 @@ def _master_config_to_kwargs(config, model_chunks, pg_collection) -> Dict[str, A
         hypersphere_gains_mode=config.hypersphere_gains_mode,
         hypersphere_gains_mode_output=config.hypersphere_gains_mode_output,
         hypersphere_gains_mode_embedding=config.hypersphere_gains_mode_embedding,
-        gains_lr=config.gains_lr if config.gains_lr is not None else config.lr,
+        gains_lr=effective_gains_lr,
+        gains_min_lr=group_min_lr(config, effective_gains_lr),
         gains_betas=(config.adam_beta1, config.adam_beta2),
         gains_eps=config.adam_eps,
         gains_weight_decay=config.weight_decay,

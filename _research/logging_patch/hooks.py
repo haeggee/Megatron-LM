@@ -692,12 +692,14 @@ def patch_training_log() -> None:
         report_memory_flag, skipped_iter, grad_norm, params_norm,
         num_zeros_in_grad, max_attention_logit,
         pg_collection=None, is_first_iteration=False,
+        lr_by_class=None,
     ):
         ret = original(
             loss_dict, total_loss_dict, learning_rate, iteration, loss_scale,
             report_memory_flag, skipped_iter, grad_norm, params_norm,
             num_zeros_in_grad, max_attention_logit,
             pg_collection=pg_collection, is_first_iteration=is_first_iteration,
+            lr_by_class=lr_by_class,
         )
 
         writer = _STATE["writer"]

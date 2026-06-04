@@ -2,13 +2,17 @@
 #
 # common.sh — the invariant training scaffolding for every run.
 #
-# This file is SOURCED by train.sbatch AFTER the chosen size/ and recipe/
-# fragments have run. Those fragments set a handful of variables and arrays
-# (the "contract" below); this file fills in every default they didn't set,
-# assembles the final MEGATRON_ARGS, wires up wandb, and launches via srun.
+# This file is SOURCED by train.sbatch AFTER the chosen size/, recipe/ and
+# clusters/ fragments have run. Those fragments set a handful of variables and
+# arrays (the "contract" below); this file fills in every default they didn't
+# set, assembles the final MEGATRON_ARGS, wires up wandb, and launches via srun.
 #
 # You almost never edit this file. Everything experiment-specific lives in
-# sizes/<size>.sh (model + data scale) and recipes/<name>.sh (optimizer/arch).
+# sizes/<size>.sh (model + data scale) and recipes/<name>.sh (optimizer/arch);
+# everything machine-specific lives in clusters/<cluster>.sh (EDF, mpi flavor,
+# precision, MoE dispatcher, sbatch flags — contract in clusters/alps3.sh).
+# Every cluster default below reproduces alps3, so sourcing no cluster file at
+# all (legacy invocations) still behaves exactly as before clusters/ existed.
 #
 # ── contract ────────────────────────────────────────────────────────────────
 # A size file MUST set:
@@ -44,7 +48,9 @@ REPO_DIR=/iopsstor/scratch/cscs/$USER/megatron-lm-research-baseline
 WORKDIR=${SLURM_SUBMIT_DIR:-$REPO_DIR}
 cd "$WORKDIR"
 
-PACKAGE_DIR=$REPO_DIR/_research/packages
+# ARCH_TAG (from clusters/<cluster>.sh, e.g. "-rocm") keeps compiled-kernel
+# caches and pip-installed packages separate per GPU arch; empty on alps3.
+PACKAGE_DIR=$REPO_DIR/_research/packages${ARCH_TAG:-}
 DATASET_CACHE_DIR=$REPO_DIR/cache/dataset
 TMP_CACHE_DIR=$REPO_DIR/cache/tmp
 
@@ -52,11 +58,14 @@ export PYTHONPATH=$WORKDIR:$PACKAGE_DIR:$WORKDIR${PYTHONPATH:+:$PYTHONPATH}
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export TORCH_CPP_LOG_LEVEL=WARNING
-export TRITON_CACHE_DIR=$REPO_DIR/cache/triton
-export TORCHINDUCTOR_CACHE_DIR=$REPO_DIR/cache/inductor
+export TRITON_CACHE_DIR=$REPO_DIR/cache/triton${ARCH_TAG:-}
+export TORCHINDUCTOR_CACHE_DIR=$REPO_DIR/cache/inductor${ARCH_TAG:-}
 export TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER=0
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-72}
 export TMPDIR=$TMP_CACHE_DIR
+# Data is pre-tokenized .bin/.idx; the HF tokenizer is only loaded for vocab
+# metadata, so its thread pool is useless — silence the fork warning.
+export TOKENIZERS_PARALLELISM=false
 
 mkdir -p "$DATASET_CACHE_DIR" "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR" \
     "$TMP_CACHE_DIR" "$PACKAGE_DIR" \
@@ -93,6 +102,15 @@ declare -p RECIPE_ARGS    >/dev/null 2>&1 || RECIPE_ARGS=()
 declare -p MOE_ARGS       >/dev/null 2>&1 || MOE_ARGS=()
 declare -p EXTRA_REG_ARGS >/dev/null 2>&1 || EXTRA_REG_ARGS=()
 
+# Cluster defaults (= alps3) for legacy invocations that source no cluster file.
+declare -p SRUN_EXTRA_ARGS      >/dev/null 2>&1 || SRUN_EXTRA_ARGS=(--network=disable_rdzv_get)
+declare -p CLUSTER_TRAIN_ARGS   >/dev/null 2>&1 || CLUSTER_TRAIN_ARGS=()
+declare -p MIXED_PRECISION_ARGS >/dev/null 2>&1 || MIXED_PRECISION_ARGS=(
+    --bf16
+    --fp8-format e4m3
+    --fp8-recipe blockwise
+)
+
 # ── MoE routing policy: DeepSeek-V3-style, invariant across the whole ladder ──
 # The small MoE rungs are iso-sparsity proxies (~5% active/total non-embedding)
 # for a 670B-A40B target, so they all share one routing recipe; only the expert
@@ -117,8 +135,12 @@ if [ "${#MOE_ARGS[@]}" -gt 0 ]; then
         --moe-router-load-balancing-type seq_aux_loss
         --moe-aux-loss-coeff "${MOE_AUX_LOSS_COEFF:-1e-3}"
         --moe-grouped-gemm
-        --moe-permute-fusion
-        --moe-token-dispatcher-type alltoall
+    )
+    # Permute fusion needs TE >= 2.1 symbols (moe_permute_with_probs & co) that
+    # the ROCm TE fork lacks — clusters/mi300.sh turns it off (unfused fallback).
+    [ "${MOE_PERMUTE_FUSION:-1}" = 1 ] && MOE_ARGS+=(--moe-permute-fusion)
+    MOE_ARGS+=(
+        --moe-token-dispatcher-type "${MOE_DISPATCHER:-allgather}"
         --moe-per-layer-logging
     )
 fi
@@ -127,10 +149,12 @@ fi
 # wandb project: WANDB_PROJECT overrides outright; otherwise WANDB_PROJECT_PREFIX
 # (debug.sh sets "debug-") is prepended to the base name so debug runs land in a
 # separate board.
-PROJECT=${WANDB_PROJECT:-${WANDB_PROJECT_PREFIX:-}megatron-lm-research-baseline}
-# Run name = size + recipe tag + swept knobs (+ optional RUN_TAG to disambiguate
-# any axis KNOB_STR doesn't already cover, e.g. token budget in a length sweep).
-EXP_NAME=${EXP_NAME:-${SIZE}-${EXP_TAG}-${KNOB_STR}${RUN_TAG:+-${RUN_TAG}}}
+PROJECT=${WANDB_PROJECT:-${WANDB_PROJECT_PREFIX:-}apertus-v2-optim-baseline}
+# Run name = size + recipe tag + swept knobs (+ CLUSTER_TAG on non-default
+# clusters — same filesystem, so an mi300 run must not share the alps3 run's
+# CKPT_DIR) (+ optional RUN_TAG to disambiguate any axis KNOB_STR doesn't
+# already cover, e.g. token budget in a length sweep).
+EXP_NAME=${EXP_NAME:-${SIZE}-${EXP_TAG}-${KNOB_STR}${CLUSTER_TAG:-}${RUN_TAG:+-${RUN_TAG}}}
 CKPT_DIR=${CKPT_DIR:-$WORKDIR/_research/results/ckpts/$EXP_NAME}
 mkdir -p "$CKPT_DIR"
 
@@ -187,6 +211,7 @@ TRAINING_ARGS=(
     --disable-bias-linear
     --no-check-for-nan-in-loss-and-grad
 )
+[ "${#CLUSTER_TRAIN_ARGS[@]}" -gt 0 ] && TRAINING_ARGS+=("${CLUSTER_TRAIN_ARGS[@]}")
 
 REGULARIZATION_ARGS=(
     --attention-dropout 0.0
@@ -210,6 +235,11 @@ if [ "$LR_DECAY_STYLE" = "WSD" ]; then
         --lr-wsd-decay-samples "$LR_WSD_DECAY_SAMPLES"
     )
 fi
+# OVERRIDE_OPT_SCHED=1: rebuild the LR schedule from the args above instead of
+# the one stored in the checkpoint. Needed when branching a cooldown off a
+# constant-LR run (see sweep-cooldowns.sh) — optimizer state and iteration are
+# still loaded; only the schedule is replaced.
+[ -n "${OVERRIDE_OPT_SCHED:-}" ] && LEARNING_RATE_ARGS+=(--override-opt-param-scheduler)
 
 INITIALIZATION_ARGS=(
     --seed 42
@@ -217,11 +247,8 @@ INITIALIZATION_ARGS=(
     --embedding-multiplier "$EMBEDDING_MULTIPLIER"
 )
 
-MIXED_PRECISION_ARGS=(
-    --bf16
-    --fp8-format e4m3
-    --fp8-recipe blockwise
-)
+# MIXED_PRECISION_ARGS comes from clusters/<cluster>.sh (alps3: bf16+fp8
+# blockwise; mi300: bf16 only) — defaulted above with the other cluster knobs.
 
 DISTRIBUTED_ARGS=(
     --tensor-model-parallel-size "$TP"
@@ -283,7 +310,7 @@ else
 fi
 DATA_ARGS+=(
     --data-cache-path "$DATASET_CACHE_DIR"
-    --num-workers 4
+    --num-workers ${NUM_WORKERS:-4}
 )
 
 # Flat array — order matches the legacy hand-written sbatch files so that the
@@ -350,7 +377,8 @@ echo "CKPT_DIR: $CKPT_DIR"
 echo "CMD: $TRAINING_CMD"
 export APERTUS_PHASE_PRE_SRUN=$(date +%s.%N)
 SRUN_RC=0
-srun -lu --mpi=pmix --network=disable_rdzv_get --environment="$WORKDIR/_research/launch/alps3.toml" \
+srun -lu --mpi="${SRUN_MPI:-pmix}" "${SRUN_EXTRA_ARGS[@]}" \
+    --environment="$WORKDIR/_research/launch/${EDF_TOML:-alps3.toml}" \
     --cpus-per-task "${SLURM_CPUS_PER_TASK:-72}" --wait 120 \
     bash -c "export APERTUS_PHASE_CONTAINER_STARTED=\$(date +%s.%N); $ENV_SETUP; $TRAINING_CMD" \
     || SRUN_RC=$?
@@ -395,12 +423,19 @@ maybe_auto_requeue() {
     fi
 
     echo ">>> auto-requeue: $samples_done/$TRAIN_SAMPLES samples (chain #$((rq_count+1))/$rq_max) — submitting dependent job."
+    # CLUSTER_SBATCH_FLAGS (partition/cpus/mem/reservation) must be re-applied:
+    # arrays don't survive --export, but the chained train.sbatch re-sources
+    # clusters/$CLUSTER.sh, and CLUSTER itself travels via the export list.
+    # afterany = run after this job; singleton (ANDed) = additionally never
+    # overlap any other job of the same name (e.g. a manual resubmit of the
+    # same sweep point) — same protection submit.sh applies.
     sbatch \
-        --dependency=afterany:"${SLURM_JOB_ID}" \
+        --dependency=afterany:"${SLURM_JOB_ID}",singleton \
         --nodes="${SLURM_NNODES:-1}" \
         --time="${REQUEUE_TIME:-${DEFAULT_TIME:-10:00:00}}" \
         --job-name="${SLURM_JOB_NAME:-$SIZE-$RECIPE}" \
-        --export=ALL,SIZE="$SIZE",RECIPE="$RECIPE",FRAMEWORK_DIR="$FRAMEWORK_DIR",AUTO_REQUEUE=1,REQUEUE_COUNT=$((rq_count+1)),MAX_REQUEUES="$rq_max",REQUEUE_TIME="${REQUEUE_TIME:-${DEFAULT_TIME:-10:00:00}}" \
+        ${CLUSTER_SBATCH_FLAGS[@]+"${CLUSTER_SBATCH_FLAGS[@]}"} \
+        --export=ALL,SIZE="$SIZE",RECIPE="$RECIPE",CLUSTER="${CLUSTER:-alps3}",FRAMEWORK_DIR="$FRAMEWORK_DIR",AUTO_REQUEUE=1,REQUEUE_COUNT=$((rq_count+1)),MAX_REQUEUES="$rq_max",REQUEUE_TIME="${REQUEUE_TIME:-${DEFAULT_TIME:-10:00:00}}" \
         "$FRAMEWORK_DIR/train.sbatch"
 }
 maybe_auto_requeue

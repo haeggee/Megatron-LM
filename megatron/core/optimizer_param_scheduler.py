@@ -35,6 +35,19 @@ class ParamGroupOverride(TypedDict, total=False):
     end_wd: float
     wd_mult: float
     optimizer: str
+    lr_class: str
+
+
+# Canonical LR-class names used by the per-class LR knobs (see
+# get_lr_class_config_overrides in megatron/core/optimizer/__init__.py):
+#   matrix    -> --matrix-lr        (2D non-embedding/output weights)
+#   embedding -> --embedding-lr     (embedding + tied LM head)
+#   output    -> --output-lr        (untied LM head)
+#   vector    -> --gains-lr / --muon-scalar-lr (1D params: norm gains, biases)
+#   decoupled -> --decoupled-lr     (legacy embedding+output knob)
+# The tuple order is FIXED because per-class logging issues one collective per
+# entry on every rank (see training_log) — order must match across ranks.
+LR_CLASS_NAMES = ('matrix', 'embedding', 'output', 'vector', 'decoupled')
 
 
 def get_canonical_lr_for_logging(param_groups: list[dict]) -> float | None:
@@ -55,6 +68,32 @@ def get_canonical_lr_for_logging(param_groups: list[dict]) -> float | None:
         if param_group.get('default_config', False):
             return param_group.get('lr')
     return None
+
+
+def get_lr_by_class_for_logging(param_groups: list[dict]) -> dict[str, float]:
+    """Return {lr_class: current lr} for every LR-class param group present.
+
+    Groups created by the per-class LR knobs carry an ``lr_class`` tag
+    ('matrix', 'embedding', ...). All groups with the same tag share one
+    schedule (same max_lr/min_lr), so the first group per tag is
+    representative — including empty rank-alignment stub groups, which the
+    scheduler still writes a valid lr onto.
+
+    Args:
+        param_groups (list[dict]): parameter groups from the optimizer.
+
+    Returns:
+        dict[str, float]: current learning rate per LR class present on this
+            rank (absent classes are simply missing from the dict).
+    """
+    lr_by_class: dict[str, float] = {}
+    for param_group in param_groups:
+        lr_class = param_group.get('lr_class')
+        if lr_class is not None and lr_class not in lr_by_class:
+            lr = param_group.get('lr')
+            if lr is not None:
+                lr_by_class[lr_class] = lr
+    return lr_by_class
 
 
 def param_group_override_to_tuple(
