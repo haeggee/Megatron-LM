@@ -15,7 +15,7 @@ NUM_KV_HEADS=2
 SEQ_LEN=4096
 
 MBS=${MBS:-16}
-GBS=128
+GBS=${GBS:-128}
 TRAIN_SAMPLES=${TRAIN_SAMPLES:-1280000}    # ~5.2B tokens, 10k steps (override for even quicker runs)
 SAVE_INTERVAL=2288                        # ~10 saves over the run
 

@@ -63,7 +63,7 @@ usage="usage: sweep-cooldowns.sh --size <size> --recipe <recipe> --base-tokens B
 SIZE_FILE="$FRAMEWORK_DIR/sizes/$SIZE.sh"
 [ -f "$SIZE_FILE" ] || { echo "no such size: $SIZE" >&2; exit 1; }
 SEQ_LEN=$(grep -E '^SEQ_LEN=' "$SIZE_FILE" | head -1 | cut -d= -f2)
-GBS=$(grep -E '^GBS=' "$SIZE_FILE" | head -1 | cut -d= -f2)
+GBS=$( (source "$SIZE_FILE" >/dev/null 2>&1; echo "$GBS") )   # resolves ${GBS:-128}
 SAVE_INTERVAL=$(grep -E '^SAVE_INTERVAL=' "$SIZE_FILE" | head -1 | cut -d= -f2 | awk '{print $1}')
 : "${SEQ_LEN:?}" "${GBS:?}" "${SAVE_INTERVAL:?}"
 

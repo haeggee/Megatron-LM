@@ -16,7 +16,7 @@ NUM_KV_HEADS=4
 SEQ_LEN=4096
 
 MBS=${MBS:-8}
-GBS=128
+GBS=${GBS:-128}
 TRAIN_SAMPLES=${TRAIN_SAMPLES:-3584000}   # ~15B tokens (override for other budgets)
 SAVE_INTERVAL=2289
 
