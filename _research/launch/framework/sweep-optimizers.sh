@@ -39,7 +39,7 @@ done
 [ "$CLUSTER" = mi300 ] && export MBS=${MBS:-4}
 
 # Geometric x2 grids centered on each recipe's default.
-ADAMW_LRS=${ADAMW_LRS:-"1.5e-4 3e-4 6e-4 1.2e-3"}
+ADAMW_LRS=${ADAMW_LRS:-"1.5e-4 3e-4 6e-4 1.2e-3 2.4e-3 4.8e-3"}
 # ADAMW_LRS=${ADAMW_LRS:-"2.4e-3 4.8e-3"}
 MUON_MLRS=${MUON_MLRS:-"5e-3 1e-2 2e-2 4e-2"}
 
@@ -69,7 +69,7 @@ n=0
 # # for mlr in $MUON_MLRS; do
 # #     submit MATRIX_LR="$mlr" ROUTER_ADAM=1 -- --recipe muon; n=$((n+1))
 # # done
-# # master
+# master
 # for mlr in $MUON_MLRS; do
 #     submit MLR="$mlr" -- --recipe master; n=$((n+1))
 # done
@@ -78,8 +78,13 @@ n=0
 #     submit MATRIX_LR="$mlr" -- --recipe normuon; n=$((n+1))
 # done
 # muown
+# for mlr in $ADAMW_LRS; do
+#     submit MATRIX_LR="$mlr" -- --recipe muown; n=$((n+1))
+# done
+
+# normuon with kimi scaling
 for mlr in $ADAMW_LRS; do
-    submit MATRIX_LR="$mlr" -- --recipe muown; n=$((n+1))
+    submit MATRIX_LR="$mlr" -- --recipe normuon_kimi_scaling; n=$((n+1))
 done
 
 echo ">>> $n jobs ${DRY:+(dry run, nothing submitted) }for SIZE=$SIZE CLUSTER=$CLUSTER NODES=$NODES${MBS:+ MBS=$MBS}"

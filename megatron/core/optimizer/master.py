@@ -322,11 +322,13 @@ class MasterOptimizer(torch.optim.Optimizer):
         # now we have a matrix with frob norm 1, we can apply other shape scaling factors as in muon
         res = res * shape_scaling / vnorm_new
 
-        # apply other shape scaling factors as in muon
+        # apply other shape scaling factors as in muon (the frob renorm above
+        # wiped the scale_mode/extra_scale_factor baked into the orthogonalized
+        # update, so both must be re-applied here to match _orthogonalize_param)
         if skip_scale:
-            return res
+            return res * self.extra_scale_factor
         scaling_factor = _get_muon_scale_factor(update.size(-2), update.size(-1), mode=self.scale_mode)
-        return res * scaling_factor
+        return res * scaling_factor * self.extra_scale_factor
  
 
     def _apply_weight_decay_inplace(self, p, group):
