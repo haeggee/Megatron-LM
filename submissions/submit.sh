@@ -37,6 +37,7 @@ MUON_MOMENTUM=0.95
 ADAMBETA1=0.95
 ALPHA=5
 MUON_SCALE_MODE=none
+MUON_EXTRA_SCALE_FACTOR=1.0
 MUON_NUM_NS_STEPS=5
 EMBEDDING_LR_MULTIPLIER=1.0
 
@@ -128,6 +129,7 @@ usage () {
 	echo " --b3: beta3 (master&ademamix)"
 	echo " --alpha: ademamix alpha"
 	echo " --muon-scale <spectral/shape_scaling/unit_rms_norm/none>"
+	echo " --muon-extra-scale-factor <float>: extra multiplicative factor on the muon scale (default=$MUON_EXTRA_SCALE_FACTOR)"
 	echo " --muon-nesterov: Enables muon nesterov momentum"
 	echo " --muon-num-ns-steps <int>: Number of Newton-Schulz steps for the Muon optimizer"
 	echo " --mlr: muon learning rate factor"
@@ -625,6 +627,8 @@ while [[ $# -gt 0 ]]; do
 			ALPHA=$2; shift 2;;
 		--muon-scale)
 			MUON_SCALE_MODE=$2; shift 2;;
+		--muon-extra-scale-factor)
+			MUON_EXTRA_SCALE_FACTOR=$2; shift 2;;
 		--muon-nesterov)
 			MUON_NESTEROV=true; shift;;
 		--muon-num-ns-steps)
@@ -1313,6 +1317,7 @@ TRAINING_ARGS=(
 	--adam-beta1 $BETA1
 	--muon-momentum $MUON_MOMENTUM
 	--muon-scale-mode $MUON_SCALE_MODE
+	--muon-extra-scale-factor $MUON_EXTRA_SCALE_FACTOR
 	--muon-num-ns-steps $MUON_NUM_NS_STEPS
 	--adam-beta2 $BETA2
 	--ademamix-beta3 $BETA3

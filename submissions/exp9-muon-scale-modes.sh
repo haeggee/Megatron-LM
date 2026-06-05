@@ -13,24 +13,44 @@ EMB_LR=0.003
 
 
 # master-muon, no gains
-for scale in shape_scaling unit_rms_norm; do
-	for k in 3 4 5 6 7 8; do
-		matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
-		bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
-			--eval-every 1000 --eval-iters 50 \
-			--opt master --master-orthogonalize --alpha 0 \
-			--hs flat --hs-embed row --hs-embed-no-orthogonal \
-			--b1 0.95 --mb1 0.9 --muon-scale $scale --muon-nesterov \
-			--post-norm \
-			--fixed-layer-scale $INV_LAYERS \
-			--upscale-embedding $SQRT_MODELDIM \
-			--qk-norm RMSNorm \
-			--wd 0 --decay linear --no-warmup \
-			--untie-embed \
-			--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
-			--extra-name exp9-master-scale \
-			$*
-	done
+# for scale in shape_scaling unit_rms_norm; do
+# 	for k in 3 4 5 6 7 8; do
+# 		matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
+# 		bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+# 			--eval-every 1000 --eval-iters 50 \
+# 			--opt master --master-orthogonalize --alpha 0 \
+# 			--hs flat --hs-embed row --hs-embed-no-orthogonal \
+# 			--b1 0.95 --mb1 0.9 --muon-scale $scale --muon-nesterov \
+# 			--post-norm \
+# 			--fixed-layer-scale $INV_LAYERS \
+# 			--upscale-embedding $SQRT_MODELDIM \
+# 			--qk-norm RMSNorm \
+# 			--wd 0 --decay linear --no-warmup \
+# 			--untie-embed \
+# 			--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
+# 			--extra-name exp9-master-scale \
+# 			$*
+# 	done
+# done
+
+
+# master-muon, no gains
+for k in 3 4 5 6 7 8; do
+	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
+	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+		--eval-every 1000 --eval-iters 50 \
+		--opt master --master-orthogonalize --alpha 0 \
+		--hs flat --hs-embed row --hs-embed-no-orthogonal \
+		--b1 0.95 --mb1 0.9 --muon-scale spectral  --muon-extra-scale-factor 0.2 --muon-nesterov \
+		--post-norm \
+		--fixed-layer-scale $INV_LAYERS \
+		--upscale-embedding $SQRT_MODELDIM \
+		--qk-norm RMSNorm \
+		--wd 0 --decay linear --no-warmup \
+		--untie-embed \
+		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
+		--extra-name exp9-master-scale \
+		$*
 done
 
 # # ---- muon (master + orthogonalize, no hypersphere) ----
@@ -53,3 +73,22 @@ done
 # 			$*
 # 	done
 # done
+
+# muon (master + orthogonalize, no hypersphere)
+for k in 3 4 5 6 7 8; do
+	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
+	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+		--eval-every 1000 --eval-iters 50 \
+		--opt master --master-orthogonalize --alpha 0 \
+		--b1 0.95 --mb1 0.9 --muon-scale spectral  --muon-extra-scale-factor 0.2 --muon-nesterov \
+		--post-norm \
+		--fixed-layer-scale $INV_LAYERS \
+		--upscale-embedding $SQRT_MODELDIM \
+		--qk-norm RMSNorm \
+		--wd 0 --decay linear --warmup-iters 1000 \
+		--untie-embed \
+		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
+		--extra-name exp9-muon-scale \
+		$*
+done
+
