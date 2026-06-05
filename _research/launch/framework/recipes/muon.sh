@@ -18,7 +18,13 @@ EXP_TAG=muon
 MATRIX_LR=${MATRIX_LR:-1e-2}                 # matrix (Muon) LR
 MIN_LR=${MIN_LR:-1e-5}
 LR=${LR:-1e-3}
+EMBEDDING_LR=${EMBEDDING_LR:-$LR}            # per-class overrides (default: base LR)
+OUTPUT_LR=${OUTPUT_LR:-$LR}
+GAINS_LR=${GAINS_LR:-$LR}
 KNOB_STR=lr${LR}-mlr${MATRIX_LR}
+[ "$EMBEDDING_LR" != "$LR" ] && KNOB_STR=${KNOB_STR}-elr${EMBEDDING_LR}
+[ "$OUTPUT_LR" != "$LR" ] && KNOB_STR=${KNOB_STR}-olr${OUTPUT_LR}
+[ "$GAINS_LR" != "$LR" ] && KNOB_STR=${KNOB_STR}-glr${GAINS_LR}
 
 WEIGHT_DECAY=0.1
 ADAM_BETA1=0.9
@@ -33,9 +39,9 @@ RECIPE_ARGS=(
     # LR for everything Adam-managed, via the per-class knobs
     # (--muon-scalar-lr is now 1D-only; this reproduces the old lumped group).
     --matrix-lr "$MATRIX_LR"
-    --embedding-lr "$LR"
-    --output-lr "$LR"
-    --gains-lr "$LR"
+    --embedding-lr "$EMBEDDING_LR"
+    --output-lr "$OUTPUT_LR"
+    --gains-lr "$GAINS_LR"
     --muon-scalar-weight-decay 0.0
     --min-lr-mode absolute
 )

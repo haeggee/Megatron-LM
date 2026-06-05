@@ -10,6 +10,7 @@
 #   MLR  matrix LR — tune INDEPENDENTLY of LR
 #   ELR  embedding LR — ABSOLUTE (was a multiplier; old ELR=3 ≡ new ELR=3e-3
 #        at LR=1e-3)
+#   OLR  output (LM head) LR — defaults to LR
 
 OPTIMIZER=master
 EXP_TAG=master
@@ -18,7 +19,9 @@ LR=${LR:-1e-3}
 MLR=${MLR:-8e-3}
 MIN_LR=${MIN_LR:-1e-5}
 ELR=${ELR:-$LR}
+OLR=${OLR:-$LR}
 KNOB_STR=lr${LR}-mlr${MLR}-elr${ELR}
+[ "$OLR" != "$LR" ] && KNOB_STR=${KNOB_STR}-olr${OLR}
 
 # master's canonical regularization
 WEIGHT_DECAY=0.0
@@ -44,7 +47,7 @@ RECIPE_ARGS=(
     --matrix-lr "$MLR"
     --embedding-lr "$ELR"
     --gains-lr "$LR"
-    --output-lr "$LR"
+    --output-lr "$OLR"
     # router: use muon branch, normalize row-wise.
     --router-use-orthogonal-updates true
     --hypersphere-router-mode row

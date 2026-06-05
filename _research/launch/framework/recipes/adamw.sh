@@ -9,7 +9,11 @@ MATRIX_LR=${MATRIX_LR:-3e-4}
 MIN_LR=${MIN_LR:-1e-5}
 LR=${LR:-3e-4}
 EMBEDDING_LR=${EMBEDDING_LR:-$LR}
+OUTPUT_LR=${OUTPUT_LR:-$LR}
+GAINS_LR=${GAINS_LR:-$LR}
 KNOB_STR=mlr${MATRIX_LR}_lr${LR}_elr${EMBEDDING_LR}
+[ "$OUTPUT_LR" != "$LR" ] && KNOB_STR=${KNOB_STR}_olr${OUTPUT_LR}
+[ "$GAINS_LR" != "$LR" ] && KNOB_STR=${KNOB_STR}_glr${GAINS_LR}
 
 WEIGHT_DECAY=0.1
 ADAM_BETA1=0.9
@@ -24,9 +28,9 @@ LR_WARMUP_SAMPLES=128000
 # Plain AdamW needs no optimizer-specific flags.
 RECIPE_ARGS=(
     --embedding-lr "$EMBEDDING_LR"
-    --output-lr "$LR"
+    --output-lr "$OUTPUT_LR"
     --matrix-lr "$MATRIX_LR"
-    --gains-lr "$LR"
+    --gains-lr "$GAINS_LR"
     --min-lr-mode absolute
 )
 
