@@ -435,6 +435,7 @@ maybe_auto_requeue() {
         --time="${REQUEUE_TIME:-${DEFAULT_TIME:-10:00:00}}" \
         --job-name="${SLURM_JOB_NAME:-$SIZE-$RECIPE}" \
         ${CLUSTER_SBATCH_FLAGS[@]+"${CLUSTER_SBATCH_FLAGS[@]}"} \
+        ${RESERVATION:+--reservation="$RESERVATION"} \
         --export=ALL,SIZE="$SIZE",RECIPE="$RECIPE",CLUSTER="${CLUSTER:-alps3}",FRAMEWORK_DIR="$FRAMEWORK_DIR",AUTO_REQUEUE=1,REQUEUE_COUNT=$((rq_count+1)),MAX_REQUEUES="$rq_max",REQUEUE_TIME="${REQUEUE_TIME:-${DEFAULT_TIME:-10:00:00}}" \
         "$FRAMEWORK_DIR/train.sbatch"
 }

@@ -11,6 +11,9 @@
 #   bash submit.sh --size 420m-moe --recipe master --nodes 4
 #   bash submit.sh --cluster mi300 --size 420m-moe --recipe master   # AMD MI300A
 #   MLR=1e-2 bash submit.sh --size 420m-moe --recipe master       # sweep a knob
+#   bash submit.sh ... --reservation SD-69241-apertus-1-5-0       # slurm reservation
+#   RESERVATION=SD-69241-... bash sweep-scaling-laws.sh ...       # env form: all sweep
+#                                                # scripts inherit it via submit.sh
 #   bash submit.sh --size 1.3b --recipe master --auto-requeue     # chain jobs until done
 #   bash submit.sh --size 420m-moe --recipe master --dry-run      # print args, no submit
 #
@@ -19,6 +22,7 @@ set -euo pipefail
 FRAMEWORK_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)
 
 NODES=""; TIME=""; DRY=""; AUTO_RQ=""; CLUSTER=${CLUSTER:-alps3}
+RESERVATION=${RESERVATION:-}
 while [ $# -gt 0 ]; do
     case "$1" in
         --size)    SIZE="$2"; shift 2 ;;
@@ -26,14 +30,15 @@ while [ $# -gt 0 ]; do
         --cluster) CLUSTER="$2"; shift 2 ;;
         --nodes)   NODES="$2"; shift 2 ;;
         --time)    TIME="$2"; shift 2 ;;
+        --reservation) RESERVATION="$2"; shift 2 ;;
         --auto-requeue) AUTO_RQ=1; shift ;;
         --dry-run) DRY=1; shift ;;
         *) echo "unknown arg: $1" >&2; exit 1 ;;
     esac
 done
 
-: "${SIZE:?usage: submit.sh --size <size> --recipe <recipe> [--cluster C] [--nodes N] [--time T] [--auto-requeue] [--dry-run]}"
-: "${RECIPE:?usage: submit.sh --size <size> --recipe <recipe> [--cluster C] [--nodes N] [--time T] [--auto-requeue] [--dry-run]}"
+: "${SIZE:?usage: submit.sh --size <size> --recipe <recipe> [--cluster C] [--nodes N] [--time T] [--reservation R] [--auto-requeue] [--dry-run]}"
+: "${RECIPE:?usage: submit.sh --size <size> --recipe <recipe> [--cluster C] [--nodes N] [--time T] [--reservation R] [--auto-requeue] [--dry-run]}"
 
 SIZE_FILE="$FRAMEWORK_DIR/sizes/$SIZE.sh"
 [ -f "$SIZE_FILE" ] || { echo "no such size: $SIZE (see $FRAMEWORK_DIR/sizes/)" >&2; exit 1; }
@@ -78,8 +83,11 @@ if [ -n "$AUTO_RQ" ]; then
     EXPORT="$EXPORT,AUTO_REQUEUE=1,REQUEUE_TIME=$TIME"
     echo ">>> auto-requeue ON: will chain dependent jobs until TRAIN_SAMPLES is reached (clean exits only)"
 fi
+# RESERVATION travels in the export list so auto-requeue re-applies it (the
+# sbatch flag itself doesn't survive into chained jobs).
+[ -n "$RESERVATION" ] && EXPORT="$EXPORT,RESERVATION=$RESERVATION"
 
-echo ">>> sbatch --nodes=$NODES --time=$TIME --job-name=$JOB_NAME ${CLUSTER_SBATCH_FLAGS[@]+${CLUSTER_SBATCH_FLAGS[*]}} (SIZE=$SIZE RECIPE=$RECIPE CLUSTER=$CLUSTER)"
+echo ">>> sbatch --nodes=$NODES --time=$TIME --job-name=$JOB_NAME ${CLUSTER_SBATCH_FLAGS[@]+${CLUSTER_SBATCH_FLAGS[*]}}${RESERVATION:+ --reservation=$RESERVATION} (SIZE=$SIZE RECIPE=$RECIPE CLUSTER=$CLUSTER)"
 # --dependency=singleton: at most one job with this (knob-unique) name runs at
 # a time, so rerunning a sweep/submit while a same-point job is still queued or
 # running QUEUES the new one instead of double-writing the checkpoint dir.
@@ -89,5 +97,6 @@ exec sbatch \
     --job-name="$JOB_NAME" \
     --dependency=singleton \
     ${CLUSTER_SBATCH_FLAGS[@]+"${CLUSTER_SBATCH_FLAGS[@]}"} \
+    ${RESERVATION:+--reservation="$RESERVATION"} \
     --export="$EXPORT" \
     "$FRAMEWORK_DIR/train.sbatch"

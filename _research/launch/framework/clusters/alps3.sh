@@ -39,5 +39,4 @@ CLUSTER_TAG=${CLUSTER_TAG:-}
 declare -p CLUSTER_SBATCH_FLAGS >/dev/null 2>&1 || CLUSTER_SBATCH_FLAGS=(
     --cpus-per-task=72
     --mem=460000
-    --reservation=SD-69241-apertus-1-5-0
 )
