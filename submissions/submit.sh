@@ -603,6 +603,8 @@ while [[ $# -gt 0 ]]; do
 			MASTER_ORTHOGONALIZE=true; shift;;
 		--poor-mans-ortho)
 			POOR_MANS_ORTHO=true; shift;;
+		--use-lion)
+			USE_LION=true; shift;;
 		--b1)
 			BETA1=$2; shift 2;;
 		--b2)
@@ -793,6 +795,10 @@ elif [[ $OPT = dmaster ]] || [[ $OPT = master ]]; then
 			OPT_ARGS+=(--muon-use-nesterov)
 		fi
 	else
+		if [[ $USE_LION = true ]]; then
+			SUFFIX=${SUFFIX}_lion
+			OPT_ARGS+=(--use-lion)
+		fi
 		if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.99 ]] || [[ $BETA3 != 0.999 ]]; then
 			SUFFIX=${SUFFIX}_b${BETA1}_${BETA2}_$BETA3
 		fi

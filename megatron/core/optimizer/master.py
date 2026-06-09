@@ -59,6 +59,9 @@ class MasterOptimizer(torch.optim.Optimizer):
         hypersphere_project: bool = False,
         hypersphere_soft: bool = False,
 
+        # Lion.
+        use_lion: bool = False,  # Use Lion-style sign-momentum updates (no second moment).
+
         # Muon.
         use_orthogonal_updates: bool = False,  # Enable or disable muon entirely.
         poor_mans_ortho: bool = False,  # Use _normalize instead of _orthogonalize in the Muon branch.
@@ -79,6 +82,9 @@ class MasterOptimizer(torch.optim.Optimizer):
         mode: Literal["blockwise", "duplicated", "distributed"] = "duplicated",
         preserve_init: bool = False,
     ):
+
+        assert not (use_lion and use_orthogonal_updates), \
+            "use_lion and use_orthogonal_updates are mutually exclusive."
 
         self.preserve_init = preserve_init
         self.fp32_matmul_prec = fp32_matmul_prec
@@ -129,6 +135,7 @@ class MasterOptimizer(torch.optim.Optimizer):
             alpha_warmup=alpha_warmup,
             eps=eps,
 
+            use_lion=use_lion,
             use_orthogonal_updates=use_orthogonal_updates,
         )
         super().__init__(params, default_args_dict)
@@ -175,7 +182,8 @@ class MasterOptimizer(torch.optim.Optimizer):
         if "exp_avg" not in state:  # row_gain could be already in state if we are using learnable gains.
             state["exp_avg"] = torch.zeros_like(grad)
             # TODO: Make it such that we can use ademamix-like updates with muon.
-            if not group["use_orthogonal_updates"]: 
+            # Lion only needs the first-moment buffer (no second moment, no slow EMA).
+            if not group["use_orthogonal_updates"] and not group["use_lion"]:
                 if group["beta2"] != 0: # Enables g^2 EMA as in adam & ademamix.
                     state["exp_avg_sq"] = torch.zeros_like(grad)
                 if group["alpha"] != 0:  # Enables slow momentum as in ademamix.
@@ -216,6 +224,19 @@ class MasterOptimizer(torch.optim.Optimizer):
                 with emerging_optimizers.utils.fp32_matmul_precision(self.fp32_matmul_prec):
                     group_kwargs = {k: v for k, v in group.items() if k != "params"}
                     update = self.orthogonalize(p, grad, **group_kwargs, is_qkv=is_qkv)
+
+        elif group["use_lion"]:  # Lion branch.
+            beta2 = group["beta2"]
+
+            # Update direction is the sign of an interpolation between the (old)
+            # momentum and the current gradient. mul() (not mul_) keeps the buffer
+            # intact so we can update it separately below.
+            update = exp_avg.mul(beta1).add_(grad, alpha=1 - beta1).sign_()
+
+            # Momentum EMA uses beta2 (decoupled from the interpolation coefficient).
+            exp_avg.mul_(beta2).add_(grad, alpha=1 - beta2)
+
+            self._apply_weight_decay_inplace(p, group)
 
         else: # AdamW & Ademamix branch.
             beta2 = group["beta2"]
@@ -1014,7 +1035,8 @@ def get_megatron_master_optimizer(
             for p in group['params']:
                 if "exp_avg" not in opt.state[p]:
                     opt.state[p]["exp_avg"] = torch.zeros_like(p.data)
-                    if not group["use_orthogonal_updates"]:  # Enables g^2 EMA as in adam & ademamix.
+                    # Lion only needs the first-moment buffer (no second moment, no slow EMA).
+                    if not group["use_orthogonal_updates"] and not group["use_lion"]:
                         if group["beta2"] != 0:
                             opt.state[p]["exp_avg_sq"] = torch.zeros_like(p.data)
                         if group["alpha"] != 0:  # Enables slow momentum as in ademamix.
@@ -1093,6 +1115,9 @@ def get_megatron_master_optimizer(
         "hypersphere_update_embeddings": config.hypersphere_update_embeddings,
         "hypersphere_project": config.hypersphere_project,
         "hypersphere_soft": config.hypersphere_soft,
+
+        # Lion.
+        "use_lion": config.use_lion,
 
         # Muon.
         "use_orthogonal_updates": config.use_orthogonal_updates,

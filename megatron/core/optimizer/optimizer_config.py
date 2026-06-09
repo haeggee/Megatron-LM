@@ -326,6 +326,10 @@ class OptimizerConfig:
     poor_mans_ortho: bool = False
     """If enabled, use _normalize instead of _orthogonalize in the Muon branch (cheaper approximation)."""
 
+    use_lion: bool = False
+    """If enabled, use Lion-style sign-momentum updates (like Adam but without the second moment).
+    beta1 controls the update interpolation, beta2 controls the momentum EMA."""
+
     # AdEMAMix
     ademamix_alpha: float = 2.0
     """AdEMAMix alpha coefficient mixing the slow and fast EMAs."""

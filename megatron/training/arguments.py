@@ -2272,6 +2272,9 @@ def _add_regularization_args(parser):
     group.add_argument('--no-use-orthogonal-embeddings', action="store_false", dest="use_orthogonal_embeddings")
     group.add_argument('--poor-mans-ortho', action="store_true",
                        help='Use _normalize instead of _orthogonalize in the Muon branch (cheaper approximation).')
+    group.add_argument('--use-lion', action="store_true",
+                       help='Use Lion-style sign-momentum updates (like Adam but without the second moment). '
+                            'beta1 controls the update interpolation, beta2 controls the momentum EMA.')
     return parser
 
 
