@@ -140,9 +140,34 @@ def _initialize_affine_weight_gpu(weight, init_method, partition_dim, stride=1, 
         tensor=weight, is_parallel=True, dim=partition_dim, stride=stride
     )
 
+    # >>>
+    @torch.no_grad
+    def canonical_init_method(weight):
+        canonical_tp = int(os.environ["USE_DETERMINISTIC_TP_INIT"])
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        assert stride == 1, "USE_DETERMINISTIC_TP_INIT does not support stride > 1"
+        gshape = list(weight.shape)
+        gshape[partition_dim] *= tp_size
+        shard_size = gshape[partition_dim] // canonical_tp
+        buf = torch.empty(gshape, dtype=weight.dtype, device=weight.device)
+        for i in range(canonical_tp):
+            idx = [slice(None)] * len(gshape)
+            idx[partition_dim] = slice(i * shard_size, (i + 1) * shard_size)
+            init_method(buf[tuple(idx)])
+        weight.copy_(buf.chunk(tp_size, dim=partition_dim)[tp_rank])
+    use_canonical = (
+        not is_expert
+        and os.environ.get("USE_DETERMINISTIC_TP_INIT", "false") != "false"
+    )
+    # <<<
+
     if not is_expert:
         with get_cuda_rng_tracker().fork():
-            init_method(weight)
+            if use_canonical:
+                canonical_init_method(weight)
+            else:
+                init_method(weight)
     else:
         with get_cuda_rng_tracker().fork(get_expert_parallel_rng_tracker_name()):
             init_method(weight)

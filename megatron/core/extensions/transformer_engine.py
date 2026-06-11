@@ -1033,6 +1033,37 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
 
         self.stride = stride
 
+        # >>>
+        @torch.no_grad
+        def canonical_init_method(weight):
+            nonlocal local_idx
+            if local_idx == 0:
+                for i in range(canonical_tp):
+                    original_init_method(buf[i * shard_size : (i + 1) * shard_size, :])
+            local_out = output_size // tp_size
+            weight.copy_(buf[tp_rank * local_out : (tp_rank + 1) * local_out, :])
+            local_idx += 1
+            return weight
+        local_idx = 0
+        original_init_method = (
+                condition_init_method(config, init_method)
+                if not config.use_cpu_initialization
+                else lambda w: None
+        )
+        if os.environ.get("USE_DETERMINISTIC_TP_INIT", "false") != "false":
+            canonical_tp = int(os.environ["USE_DETERMINISTIC_TP_INIT"])
+            tp_size = get_pg_size(tp_group)
+            tp_rank = get_pg_rank(tp_group)
+            shard_size = output_size // canonical_tp
+            buf = torch.empty(output_size, input_size,
+                              dtype=config.params_dtype,
+                              device=torch.cuda.current_device())
+            init_method = canonical_init_method
+        else:
+            init_method = original_init_method
+        # <<<
+
+
         super().__init__(
             in_features=input_size,
             out_features=output_size,
@@ -1044,11 +1075,7 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             get_rng_state_tracker=(
                 get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
             ),
-            init_method=(
-                condition_init_method(config, init_method)
-                if not config.use_cpu_initialization
-                else lambda w: None
-            ),
+            init_method=init_method,
             bias=bias,
             return_bias=self.te_return_bias,
             parallel_mode="column",
@@ -1182,16 +1209,45 @@ class TEColumnParallelLinear(TELinear):
         rank = get_pg_rank(tp_group)
         self.stride = stride
 
+
+        # >>>
+        @torch.no_grad
+        def canonical_init_method(weight):
+            nonlocal local_idx
+            if local_idx == 0:
+                for i in range(canonical_tp):
+                    original_init_method(buf[i * shard_size : (i + 1) * shard_size, :])
+            local_out = output_size // tp_size
+            weight.copy_(buf[tp_rank * local_out : (tp_rank + 1) * local_out, :])
+            local_idx += 1
+            return weight
+        local_idx = 0
+        original_init_method = (
+                condition_init_method(config, init_method)
+                if not config.use_cpu_initialization
+                else lambda w: None
+        )
+        if os.environ.get("USE_DETERMINISTIC_TP_INIT", "false") != "false":
+            canonical_tp = int(os.environ["USE_DETERMINISTIC_TP_INIT"])
+            tp_size = get_pg_size(tp_group)
+            tp_rank = get_pg_rank(tp_group)
+            shard_size = output_size // canonical_tp
+            buf = torch.empty(output_size, input_size,
+                              dtype=config.params_dtype,
+                              device=torch.cuda.current_device())
+            init_method = canonical_init_method
+        else:
+            init_method = original_init_method
+        # <<<
+
+
+
         super().__init__(
             input_size=input_size,
             output_size=output_size,
             parallel_mode="column",
             config=config,
-            init_method=(
-                condition_init_method(config, init_method)
-                if not config.use_cpu_initialization
-                else lambda w: None
-            ),
+            init_method=init_method,
             bias=bias,
             skip_bias_add=skip_bias_add,
             is_expert=is_expert,
@@ -1289,16 +1345,45 @@ class TERowParallelLinear(TELinear):
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
         self._tp_group = tp_group
 
+
+        # >>>
+        @torch.no_grad
+        def canonical_init_method(weight):
+            nonlocal local_idx
+            if local_idx == 0:
+                for i in range(canonical_tp):
+                    original_init_method(buf[:, i * shard_size : (i + 1) * shard_size])
+            local_in = input_size // tp_size
+            weight.copy_(buf[:, tp_rank * local_in : (tp_rank + 1) * local_in])
+            local_idx += 1
+            return weight
+        local_idx = 0
+        original_init_method = (
+                condition_init_method(config, init_method)
+                if not config.use_cpu_initialization
+                else lambda w: None
+        )
+        if os.environ.get("USE_DETERMINISTIC_TP_INIT", "false") != "false":
+            canonical_tp = int(os.environ["USE_DETERMINISTIC_TP_INIT"])
+            tp_size = get_pg_size(tp_group)
+            tp_rank = get_pg_rank(tp_group)
+            shard_size = input_size // canonical_tp
+            buf = torch.empty(output_size, input_size,
+                              dtype=config.params_dtype,
+                              device=torch.cuda.current_device())
+            init_method = canonical_init_method
+        else:
+            init_method = original_init_method
+        # <<<
+
+
+
         super().__init__(
             input_size=input_size,
             output_size=output_size,
             parallel_mode="row",
             config=config,
-            init_method=(
-                condition_init_method(config, init_method)
-                if not config.use_cpu_initialization
-                else lambda w: None
-            ),
+            init_method=init_method,
             bias=bias,
             skip_bias_add=skip_bias_add,
             skip_weight_param_allocation=False,
@@ -1769,6 +1854,27 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                 tp_size = 1
                 tp_group_for_te = None
 
+            # >>>
+            @torch.no_grad
+            def canonical_init_method(weight):
+                nonlocal local_idx
+                if local_idx == 0:
+                    for i in range(buf.size(0)):
+                        original_init_method(buf[i])
+                weight.copy_(buf[local_expert_indices_offset + local_idx])
+                local_idx += 1
+                return weight
+            local_expert_indices_offset = get_pg_rank(self._pg_collection.ep) * num_gemms
+            local_idx = 0
+            original_init_method = condition_init_method(config, init_method)
+            if os.environ.get("USE_DETERMINISTIC_MOE_INIT", "false") == "true":
+                init_method = canonical_init_method
+                buf = torch.empty(get_pg_size(self._pg_collection.ep) * num_gemms, output_size, input_size,
+                                  device=torch.cuda.current_device())
+            else:
+                init_method = original_init_method
+            # <<<
+
             super().__init__(
                 num_gemms=num_gemms,
                 in_features=input_size,
@@ -1780,7 +1886,7 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                 get_rng_state_tracker=(
                     get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
                 ),
-                init_method=condition_init_method(config, init_method),
+                init_method=init_method, # TODO(Ale) Return old code.
                 bias=bias,
                 return_bias=self.te_return_bias,
                 parallel_mode=parallel_mode,
