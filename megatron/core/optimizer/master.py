@@ -594,6 +594,25 @@ class GainsMasterOptimizer(MasterOptimizer):
         raise ValueError(f"Unknown gain_parametrization {mode}")
 
     @torch.no_grad()
+    def _tp_reduced_norm(self, x, dim, partition_dim=None, is_expert_tp=False):
+        """L2 norm of `x` over `dim` (full Frobenius if dim is None), all-reduced
+        across the TP group when the reduced axis is the TP-sharded one — so the
+        preserve_init gains absorb the SAME global magnitude on TP=1 and TP>1.
+        Mirrors the distributed-norm logic in _normalize_single:
+            dim is None (flat) → reduce iff the param is sharded (partition_dim in {0,1})
+            dim in {0, 1}      → reduce iff partition_dim == dim (reduced axis is sharded)
+        """
+        norm = torch.norm(x) if dim is None else torch.norm(x, dim=dim)
+        should_reduce = self.pg_collection is not None and (
+            partition_dim in {0, 1} if dim is None else partition_dim == dim
+        )
+        if should_reduce:
+            tp_group = self.pg_collection.expt_tp if is_expert_tp else self.pg_collection.tp
+            norm_squared = norm**2
+            torch.distributed.all_reduce(norm_squared, group=tp_group)
+            norm = torch.sqrt(norm_squared)
+        return norm.to(torch.float32).clamp_min(self.hypersphere_eps)
+
     def _maybe_init_gain_state(self, p):
         if self.hypersphere_gains_mode is None or p.ndim < 2:
             return
@@ -605,6 +624,11 @@ class GainsMasterOptimizer(MasterOptimizer):
             return
         is_out_proj = getattr(p, "is_out_proj", False)
         preserve = self.hypersphere_preserve_init
+        # TP sharding info: the absorbed norm must be reduced across the TP group
+        # when it reduces over the sharded dimension, else TP=1 and TP>1 absorb
+        # different magnitudes and diverge from step 1.
+        partition_dim = getattr(p, "partition_dim", None)
+        is_expert_tp = getattr(p, "expert_tp", False)
 
         wants_row = ("row" in mode) or (mode == "embed" and not is_out_proj)
         wants_col = ("col" in mode) or (mode == "embed" and is_out_proj)
@@ -633,8 +657,10 @@ class GainsMasterOptimizer(MasterOptimizer):
         # cur_frob/target_frob) → seed phi_inv of that.
         if wants_row:
             if absorb_axis == "row":
-                target = (p.detach().norm(dim=1).to(torch.float32)
-                          .clamp_min(self.hypersphere_eps))
+                # norm over dim=1 (the in dim) → reduced iff row-parallel (partition_dim==1)
+                target = self._tp_reduced_norm(p.detach(), dim=1,
+                                               partition_dim=partition_dim,
+                                               is_expert_tp=is_expert_tp)
             else:
                 target = torch.ones(p.size(0), dtype=torch.float32, device=p.device)
             state["row_gain"] = self._phi_inv(target)
@@ -643,8 +669,10 @@ class GainsMasterOptimizer(MasterOptimizer):
 
         if wants_col:
             if absorb_axis == "col":
-                target = (p.detach().norm(dim=0).to(torch.float32)
-                          .clamp_min(self.hypersphere_eps))
+                # norm over dim=0 (the out dim) → reduced iff col-parallel (partition_dim==0)
+                target = self._tp_reduced_norm(p.detach(), dim=0,
+                                               partition_dim=partition_dim,
+                                               is_expert_tp=is_expert_tp)
             else:
                 target = torch.ones(p.size(1), dtype=torch.float32, device=p.device)
             state["col_gain"] = self._phi_inv(target)
@@ -653,9 +681,16 @@ class GainsMasterOptimizer(MasterOptimizer):
 
         if wants_flat:
             if absorb_axis == "flat":
-                target_frob = max(p.size(-2), p.size(-1)) ** 0.5
-                cur_frob = (p.detach().norm().to(torch.float32)
-                            .clamp_min(self.hypersphere_eps))
+                # full Frobenius norm → reduced iff the param is sharded at all.
+                # target_frob uses GLOBAL sizes so TP=1 and TP>1 match.
+                gsizes = [p.size(-2), p.size(-1)]
+                if self.pg_collection is not None and partition_dim in {0, 1}:
+                    tp_group = self.pg_collection.expt_tp if is_expert_tp else self.pg_collection.tp
+                    gsizes[partition_dim] *= get_pg_size(tp_group)
+                target_frob = max(gsizes) ** 0.5
+                cur_frob = self._tp_reduced_norm(p.detach(), dim=None,
+                                                 partition_dim=partition_dim,
+                                                 is_expert_tp=is_expert_tp)
                 target = (cur_frob / target_frob).reshape(())
             else:
                 target = torch.ones((), dtype=torch.float32, device=p.device)
