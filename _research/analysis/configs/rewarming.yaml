@@ -1,0 +1,76 @@
+# Warm-restart (re-warming) experiment, 150m-master on mi300 (warm-restart.sh).
+#
+# A source run trained to 10k (the branch point). From its iter_0010000 checkpoint
+# four continuations train 10k->20k, a clean 2x2 over {optimizer moments reused
+# vs fresh} x {warmup ramp vs jump-to-peak}, all sharing the same data stream and
+# matched LR trajectory. The 20k-p0 run is the reference: the original schedule
+# carried straight through to 20k without any restart.
+#
+# Plotted by plot_rewarming.py (NOT the sweep plotters — these are explicit named
+# curves, not an LR sweep). Run names are matched WITHOUT the trailing
+# -<slurm-job-id>; restarts/fragments of the same run merge automatically (the
+# 20k-p0 baseline is a crashed@15098 + finished@20000 pair that stitches to 0->20k).
+#   uv run ../plot_rewarming.py configs/rewarming.yaml
+#   uv run ../plot_rewarming.py configs/rewarming.yaml --x iters --smooth 100
+#   uv run ../plot_rewarming.py configs/rewarming.yaml --list
+#
+# Style convention for the 2x2: colour = optimizer-state (reopt warm / newopt cool),
+# dash = warmup (solid = jump to peak, dashed = 500-step warm-up ramp). The source
+# and the no-restart baseline are greys/black.
+#
+# "newopt" = fresh optimizer MOMENTUM but the learnable master gains are REUSED
+# (the -keepgains runs: full resume + --reset-optimizer-moments). The earlier
+# plain --no-load-optim runs (no -keepgains suffix) RESET the gains to identity;
+# they're kept below, commented, as a gains-ablation overlay if you want it.
+
+project: len-ablation-apertus-v2-optim-baseline
+entity: haeggee
+metric: lm loss
+grad_metric: grad-norm
+branch_iter: 10000          # marked with a vertical rule; source -> continuations branch here
+
+title: "Continual Training and Rewarming"
+ylabel: "Loss"
+grad_ylabel: "Grad Norm"
+
+cache_dir: ../../results/wandb-cache
+out_dir: ../../results/plots
+tag: rewarming-150m         # filename stem for the two plots
+
+# Ordered; drawn back-to-front so later (the four arms) sit on top of the refs.
+curves:
+  - run: 150m-master-lr1e-3-mlr2e-2-elr1e-3-mi300-10k
+    label: "Source"
+    color: "9A9A9A"          # grey
+    linestyle: "-"
+  - run: 150m-master-lr1e-3-mlr2e-2-elr1e-3-mi300-20k-p0
+    label: "Target Baseline"
+    color: "000000"          # black reference
+    linestyle: "-"
+  - run: 150m-master-lr1e-3-mlr2e-2-elr1e-3-mi300-from10000-reopt-nowarm
+    label: "Reuse Optstate"
+    color: "BA2F29"          # red
+    linestyle: "-"
+  - run: 150m-master-lr1e-3-mlr2e-2-elr1e-3-mi300-from10000-reopt-warm500
+    label: "Reuse OptState w/ WU"
+    color: "E8736B"          # light red
+    linestyle: "--"
+  - run: 150m-master-lr1e-3-mlr2e-2-elr1e-3-mi300-from10000-newopt-nowarm-keepgains
+    label: "Fresh Momentum"
+    color: "1F5C99"          # dark blue
+    linestyle: "-"
+  - run: 150m-master-lr1e-3-mlr2e-2-elr1e-3-mi300-from10000-newopt-warm500-keepgains
+    label: "Fresh Momentum w/ WU"
+    color: "73B3E0"          # light blue
+    linestyle: "--"
+  # Gains-ablation overlay: the original --no-load-optim runs that RESET the
+  # master gains to identity (vs the -keepgains runs above that reuse them).
+  # Uncomment to compare "fresh momentum, kept gains" vs "fresh everything".
+  # - run: 150m-master-lr1e-3-mlr2e-2-elr1e-3-mi300-from10000-newopt-nowarm
+  #   label: "Fresh + Reset Gains"
+  #   color: "2E8B8B"          # teal
+  #   linestyle: "-"
+  # - run: 150m-master-lr1e-3-mlr2e-2-elr1e-3-mi300-from10000-newopt-warm500
+  #   label: "Fresh + Reset Gains w/ WU"
+  #   color: "7FC9C9"          # light teal
+  #   linestyle: "--"

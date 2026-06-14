@@ -99,6 +99,7 @@ RECIPE_ARGS+=(--linear-attention-allow-neg-eigval --linear-attention-freq 4)
 | --- | --- | --- | ---: | ---: | --- |
 | `270m-moe` | 270m active | 64e-tk2-sh1 | 15B | 2 | cheap LR probe |
 | `420m-moe` | 420m active | 64e-tk2-sh1 | 15B | 2 | **the main baseline** |
+| `600m-moe` | 580m active | 64e-tk2-sh1 | 30B | 4 | in-between rung |
 | `810m-moe` | 810M active | 64e-tk2-sh1 | 30B | 4 | scale-up rung |
 | `1.5b-moe` | 1.5B active | 64e-tk2-sh1 | 30B | 4 | promotion-confirm rung |
 | `1.3b` | 1.3B | dense | 100B | 8 | dense baseline |

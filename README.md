@@ -104,6 +104,7 @@ optimizer/architecture idea. Available sizes:
 | --- | --- | --- | ---: | ---: | --- |
 | `270m-moe` | 0.27B / 1.2B | MoE 64e-tk2-sh1 | 15B | 2 | cheap LR probe |
 | `420m-moe` | 0.42B / 2.5B | MoE 64e-tk2-sh1 | 15B | 2 | **the main baseline** |
+| `600m-moe` | 0.58B / 4.1B | MoE 64e-tk2-sh1 | 30B | 4 | in-between rung |
 | `810m-moe` | 0.81B / 6.7B | MoE 64e-tk2-sh1 | 30B | 4 | scale-up rung |
 | `1.5b-moe` | 1.5B / 14.6B | MoE 64e-tk2-sh1 | 30B | 4 | promotion-confirm rung |
 | `1.3b` | 1.3B (dense) | dense | 100B | 8 | dense baseline |
@@ -125,14 +126,14 @@ budgets are worth running.
 
 MoE ladder dimensions (Transformer++: SwiGLU, RMSNorm, RoPE, GQA):
 
-| | 270m-moe | 420m-moe | 810m-moe | 1.5b-moe |
-| --- | ---: | ---: | ---: | ---: |
-| hidden | 768 | 1024 | 1536 | 2048 |
-| layers (dense + MoE) | 1 + 13 | 1 + 19 | 1 + 23 | 2 + 30 |
-| heads / kv_heads | 12 / 4 | 16 / 4 | 24 / 8 | 32 / 8 |
-| dense-layer ffn (SwiGLU) | 1920 | 2560 | 4096 | 5120 |
-| moe ffn / shared ffn | 512 / 256 | 576 / 288 | 896 / 448 | 1152 / 576 |
-| non-embed sparsity | 6.4% | 6.5% | 6.5% | 6.6% |
+| | 270m-moe | 420m-moe | 600m-moe | 810m-moe | 1.5b-moe |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| hidden | 768 | 1024 | 1280 | 1536 | 2048 |
+| layers (dense + MoE) | 1 + 13 | 1 + 19 | 1 + 21 | 1 + 23 | 2 + 30 |
+| heads / kv_heads | 12 / 4 | 16 / 4 | 20 / 4 | 24 / 8 | 32 / 8 |
+| dense-layer ffn (SwiGLU) | 1920 | 2560 | 3200 | 4096 | 5120 |
+| moe ffn / shared ffn | 512 / 256 | 576 / 288 | 704 / 352 | 896 / 448 | 1152 / 576 |
+| non-embed sparsity | 6.4% | 6.5% | 6.4% | 6.5% | 6.6% |
 
 Dense baselines: `1.3b` = 24L / 2048H / 32h / 8kv / ffn 5632; `2.7b` = 32L /
 2560H / 32h / 8kv / ffn 7680. Rough dense wall-clock: 1.3B/100B ≈19 h

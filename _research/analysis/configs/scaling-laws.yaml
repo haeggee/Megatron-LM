@@ -1,0 +1,76 @@
+# Optimizer scaling-law comparison (sweep-scaling-laws.sh) — one line per
+# (model size, optimizer), x = consumed tokens (or compute), y = tail loss.
+# Driven by plot_scaling_laws.py:
+#   uv run ../plot_scaling_laws.py configs/scaling-laws.yaml
+#   uv run ../plot_scaling_laws.py configs/scaling-laws.yaml --x flops
+#   uv run ../plot_scaling_laws.py configs/scaling-laws.yaml --list   # check matches
+#   uv run ../plot_scaling_laws.py configs/scaling-laws.yaml --show-incomplete
+#
+# Styling is split so the two grid axes read independently:
+#   colour      -> optimizer (palette below)
+#   marker+dash -> model size (table below)
+# Groups are the (size x optimizer) cross product. Each cell's runs are matched
+# by a regex (anchored fullmatch over base names, sans -<jobid>); see the
+# precedence + curation notes at the bottom.
+
+project: apertus-v2-optim-baseline
+entity: haeggee
+metric: lm loss
+tail_iters: 50
+x: tokens                 # tokens | flops  (--x overrides)
+title: Scaling Laws w/ MoEs
+ylabel: Loss
+
+
+cache_dir: ../../results/wandb-cache
+out_dir: ../../images
+tag: scaling-laws         # filename stem for the plot + summary csv
+
+# colour per optimizer — requested palette: blue / yellow / red.
+# `regex` overrides regex_template for that optimizer ({size}/{opt} substituted).
+# adamw/muon REQUIRE a weight-decay knob ([-_]wd<val>): the current sweep always
+# scales WD off the default, so canonical runs carry it — this drops the older
+# wrong-config / crashed muon launches that were started without it. master runs
+# keep WD=0 (recipe), so they use the plain template.
+optimizers:
+  adamw:
+    label: AdamW
+    color: "396FAF"        # blue
+    regex: '{size}-{opt}-.*[-_]wd[0-9.]+.*t[0-9.]+b'
+  muon:
+    label: Muon
+    color: "F2A33A"        # yellow
+    regex: '{size}-{opt}-.*[-_]wd[0-9.]+.*t[0-9.]+b'
+  master:
+    label: MuonMD (ours)
+    color: "BA2F29"        # red
+
+# marker + linestyle per size. For x=flops (C=6ND): `params` = total active params
+# (incl. embeddings, the default), `params_ne` = active NON-embedding params
+# (--flops-params non-embed). Values from param-count.py on each size.
+sizes:
+  270m-moe: {label: 1.2B-270M-A, marker: o, linestyle: "-",  params: 2.67e8, params_ne: 6.5e7}
+  420m-moe: {label: 2.5B-420M-A, marker: s, linestyle: "--", params: 4.14e8, params_ne: 1.46e8}
+  600m-moe: {label: 4.1B-580M-A, marker: D, linestyle: "-.", params: 5.78e8, params_ne: 2.42e8}
+  810m-moe: {label: 6.7B-810M-A, marker: "^", linestyle: ":", params: 8.12e8, params_ne: 4.10e8}
+
+# Default cell regex. {size}/{opt} are filled from the keys above and escaped.
+# The trailing t<budget>b tag is stamped by the sweep via RUN_TAG (mi300-t<tok>b);
+# requiring it keeps stray LR-probe runs out of the tagged budgets.
+regex_template: '{size}-{opt}-.*t[0-9.]+b'
+
+# Per-cell curation, keyed "size/opt". `runs:` adds explicit base names on top of
+# the regex matches; `regex:`/`exclude:` override or subtract per cell.
+# The 14.68B (=15B) points are the original 270m LR-sweep optima — they predate
+# the t<budget>b tagging convention, so they carry no tag and must be named here.
+# (These are the exact LRs the scaling rules in sweep-scaling-laws.sh anchor to.)
+cells:
+  270m-moe/adamw:  {runs: [270m-moe-adamw-mlr2.4e-3_lr1e-3_elr1e-3-mi300]}
+  270m-moe/muon:   {runs: [270m-moe-muon-lr1e-3-mlr5e-3-mi300]}
+  270m-moe/master: {runs: [270m-moe-master-lr1e-3-mlr1e-2-elr1e-3-mi300]}
+  # 420m-moe/adamw:  {runs: [420m-moe-adamw-mlr2.4e-3_lr1e-3_elr1e-3-mi300]}
+  # 420m-moe/muon:   {runs: [420m-moe-muon-lr1e-3-mlr5e-3-mi300]}
+  # 420m-moe/master: {runs: [420m-moe-master-lr1e-3-mlr1e-2-elr1e-3-mi300]}
+
+# Optional global drop (regex, fullmatch) applied to every cell, e.g.
+# exclude: '.*-radam-.*'

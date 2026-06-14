@@ -1,0 +1,44 @@
+# Batch-size scaling per optimizer (sweep-batchsize.sh) — one line per optimizer,
+# x = global batch size, y = tail loss, at FIXED step count (28k). Same plotter
+# as scaling-laws, with x=gbs:
+#   uv run ../plot_scaling_laws.py configs/batchsize.yaml --x gbs
+#   uv run ../plot_scaling_laws.py configs/batchsize.yaml --x gbs --list
+#
+# Protocol holds optimizer steps constant and grows GBS with LR ~ (GBS/128)^BSPOW,
+# so this shows how much extra loss-per-step each optimizer extracts from bigger
+# batches. Colour = optimizer, marker+dash = size (one size here).
+
+project: apertus-v2-optim-baseline
+entity: haeggee
+metric: lm loss
+tail_iters: 50
+x: gbs                    # global batch size on the x-axis
+title: "Batch-Size Scaling @ 28k steps"
+xlabel: "Global Batch Size @ 4k Sequences"
+ylabel: "Loss"
+
+cache_dir: ../../results/wandb-cache
+out_dir: ../../results/plots
+tag: batchsize
+
+# NOTE: unlike scaling-laws, batch-size runs carry NO -wd knob — at fixed steps
+# WD reduces to the 0.1 default, which the recipe omits from the name. So the
+# default template is used (no wd requirement). Trailing s<steps>k anchors the
+# match and drops the -lrx<m> off-rule rule-check variants.
+optimizers:
+  adamw:  {label: AdamW,  color: "396FAF"}   # blue
+  muon:   {label: Muon,   color: "F2A33A"}   # yellow
+  master: {label: MASTER, color: "BA2F29"}   # red
+
+sizes:
+  270m-moe: {label: 1.2B-270M-A, marker: o, linestyle: "-"}
+
+regex_template: '{size}-{opt}-.*-gbs[0-9]+-s[0-9.]+k'
+
+# GBS=128 is the reference rung = the tuned 270m optima at 28k steps / GBS128
+# (= 14.68B tokens). Those predate the -gbs tag, so name them explicitly — same
+# baseline runs the scaling-laws plot uses as its 14.68B point.
+cells:
+  270m-moe/adamw:  {runs: [270m-moe-adamw-mlr2.4e-3_lr1e-3_elr1e-3-mi300]}
+  270m-moe/muon:   {runs: [270m-moe-muon-lr1e-3-mlr5e-3-mi300]}
+  270m-moe/master: {runs: [270m-moe-master-lr1e-3-mlr1e-2-elr1e-3-mi300]}

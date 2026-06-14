@@ -6,6 +6,7 @@
 #   "pandas>=2.0",
 #   "numpy",
 #   "matplotlib>=3.8",
+#   "seaborn>=0.13",
 #   "pyyaml",
 # ]
 # ///
@@ -53,6 +54,7 @@ import yaml
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import seaborn as sns
 from matplotlib.ticker import LogLocator, NullFormatter
 
 # Trailing "-<slurm job id>" (4+ digits so LR-ish suffixes like '-p0.5' survive).
@@ -99,6 +101,11 @@ class Cfg:
     out_dir: Path
     groups: list[Group]
     tag: str  # filename stem for plots/csv
+    ylabel: str | None
+    xlabel: str | None
+    title: str | None
+    subtitle: str | None
+    subtitle_sweep: str | None
 
 
 def load_cfg(path: Path, args: argparse.Namespace) -> Cfg:
@@ -131,6 +138,11 @@ def load_cfg(path: Path, args: argparse.Namespace) -> Cfg:
         out_dir=Path(args.out_dir) if args.out_dir else respath("out_dir", "../results/plots"),
         groups=groups,
         tag=raw.get("tag", path.stem),
+        ylabel=raw.get("ylabel"),
+        xlabel=raw.get("xlabel"),
+        title=raw.get("title"),
+        subtitle=raw.get("subtitle"),
+        subtitle_sweep=raw.get("subtitle_sweep"),
     )
 
 
@@ -344,16 +356,52 @@ def get_x(config: dict, x_key: str, base: str) -> float:
 
 # ── plots ────────────────────────────────────────────────────────────────────
 
+def set_plot_style(rcParams):
+    """Shared house style (seaborn whitegrid + Computer Modern). Imported by
+    plot_scaling_laws.py too, so both scripts produce matching figures."""
+    sns.set_theme(style="whitegrid")
+    rcParams["text.usetex"] = False
+    rcParams["figure.dpi"] = 300
+    rcParams["font.size"] = "12.5"
+    rcParams["axes.unicode_minus"] = False
+    rcParams["font.family"] = "cmr10"
+    rcParams["mathtext.fontset"] = "cm"
+    rcParams["axes.formatter.use_mathtext"] = False
+    rcParams["axes.edgecolor"] = "black"
+    rcParams["axes.linewidth"] = 1.5
+    rcParams["xtick.color"] = "black"
+    rcParams["ytick.color"] = "black"
+    rcParams["axes.facecolor"] = "#EFEFEAFF"
+    rcParams["grid.color"] = "white"
+    rcParams["grid.alpha"] = 0.7
+    rcParams["grid.linewidth"] = 1.0
+    rcParams["grid.linestyle"] = "-"
+    rcParams["axes.grid.which"] = "both"
+    rcParams["xtick.bottom"] = True
+    rcParams["ytick.left"] = True
+    sns.set_context(context="talk", font_scale=0.9)
+    return rcParams
+
+
+def autotune_font_size_title(text: str, base_size=15, max_length=35):
+    """Scale font size inversely with text length."""
+    if len(text) <= max_length:
+        return base_size
+    scale_factor = max_length / len(text)
+    return max(8, int(base_size * scale_factor))   # floor of 8
+
+
 def style(ax, xlabel, ylabel, title):
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    ax.set_title(title)
+    ax.set_title(title, fontsize=autotune_font_size_title(title))
     ax.grid(True, which="both", alpha=0.25)
-    ax.legend(frameon=False)
+    ax.legend(frameon=True, ncol=1, fontsize=12)
 
 
 def plot_sweep(cfg: Cfg, rows: list[dict], out: Path) -> None:
-    fig, ax = plt.subplots(figsize=(7, 5))
+    set_plot_style(plt.rcParams)
+    fig, ax = plt.subplots(figsize=(5, 4))
     for g in cfg.groups:
         pts = sorted((r for r in rows if r["group"] == g.key), key=lambda r: r["x"])
         if not pts:
@@ -372,17 +420,18 @@ def plot_sweep(cfg: Cfg, rows: list[dict], out: Path) -> None:
     ax.set_xscale("log")
     ax.xaxis.set_minor_locator(LogLocator(base=10, subs="auto"))
     ax.xaxis.set_minor_formatter(NullFormatter())
-    style(ax, cfg.x_key.replace("_", "-"),
-          f"{cfg.metric} (mean over last {cfg.tail_iters} iters)",
-          f"{cfg.tag}: LR sweep (★ best, ○ incomplete)")
+    style(ax, "Matrix LR",
+          cfg.ylabel or f"{cfg.metric} (mean over last {cfg.tail_iters} iters)",
+          f"{cfg.title}: {cfg.subtitle_sweep}" if cfg.title else f"{cfg.tag}: best run per group")
     fig.tight_layout()
     for ext in ("png", "pdf"):
-        fig.savefig(out.with_suffix(f".{ext}"), dpi=200)
+        fig.savefig(out.with_suffix(f".{ext}"), dpi=300, bbox_inches="tight")
     print(f"{OK}wrote{RST} {out.with_suffix('.png')}")
 
 
 def plot_curves(cfg: Cfg, best: list[dict], smooth: int, out: Path) -> None:
-    fig, ax = plt.subplots(figsize=(7, 5))
+    set_plot_style(plt.rcParams)
+    fig, ax = plt.subplots(figsize=(5, 4))
     tail_means = []
     for r in best:
         df, g = r["df"], r["group_obj"]
@@ -390,19 +439,20 @@ def plot_curves(cfg: Cfg, best: list[dict], smooth: int, out: Path) -> None:
         if smooth > 1:
             y = y.rolling(smooth, min_periods=1).mean()
         tok = consumed_tokens(df, r["config"], r["base"]) / 1e9
-        ax.plot(tok, y, label=f"{g.label} ({cfg.x_key.split('_')[0]}={r['x']:g})",
+        # ax.plot(tok, y, label=f"{g.label} ({cfg.x_key.split('_')[0]}={r['x']:g})",
+        ax.plot(tok, y, label=g.label,
                 color=g.color, lw=1.2)
         tail_means.append(r["tail_mean"])
     # zoom past the initial loss cliff: cap y at ~3x the spread above the best tail
     if tail_means:
         lo, hi = min(tail_means), max(tail_means)
-        ax.set_ylim(lo - 0.05, hi + max(3 * (hi - lo), 0.5))
-    style(ax, "consumed tokens (B)",
-          cfg.metric + (f" (rolling mean, {smooth})" if smooth > 1 else ""),
-          f"{cfg.tag}: best run per group")
+        ax.set_ylim(lo - 0.05, hi + max(7 * (hi - lo), 0.5))
+    style(ax, "Training Tokens (B)",
+          cfg.ylabel or cfg.metric + (f" (rolling mean, {smooth})" if smooth > 1 else ""),
+          f"{cfg.title}: {cfg.subtitle}" if cfg.title else f"{cfg.tag}: best run per group")
     fig.tight_layout()
     for ext in ("png", "pdf"):
-        fig.savefig(out.with_suffix(f".{ext}"), dpi=200)
+        fig.savefig(out.with_suffix(f".{ext}"), dpi=300, bbox_inches="tight")
     print(f"{OK}wrote{RST} {out.with_suffix('.png')}")
 
 

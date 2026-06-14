@@ -15,7 +15,11 @@ x_key: matrix_lr           # wandb config key for the sweep x-axis
 tail_iters: 50             # tail window (in iterations) for the y-axis average
 target_iter: 28000       # default: max final iter observed across runs
 # extra_history_keys: [learning-rate, grad-norm]   # cached alongside the metric
+ylabel: "Loss"
 
+title: "1.2B-270M-A"
+subtitle: "Best Run per Optimizer"
+subtitle_sweep: "LR Sweep"
 cache_dir: ../../results/wandb-cache
 out_dir: ../../results/plots
 tag: 270m-moe-opt-sweep    # filename stem for plots + summary csv
@@ -27,15 +31,18 @@ groups:
   muon:
     label: Muon
     regex: '270m-moe-muon-lr1e-3-mlr[0-9.e-]+-mi300'
-  muon-radam:
-    label: Muon + router AdamW
-    regex: '270m-moe-muon-lr1e-3-mlr[0-9.e-]+-radam-mi300'
+  # muon-radam:
+  #   label: Muon (Router)
+  #   regex: '270m-moe-muon-lr1e-3-mlr[0-9.e-]+-radam-mi300'
   master:
     label: MASTER
     regex: '270m-moe-master-lr1e-3-mlr[0-9.e-]+-elr1e-3-mi300'
   normuon:
-    label: NorMuon (same shape scaling as Muon)
+    label: NorMuon
     regex: '270m-moe-normuon-fixed_lr1e-3_mlr[0-9.e-]+-mi300'
+  normuon-kimi:
+    label: NorMuon (Kimi scaling)
+    regex: '270m-moe-normuon-kimi-fixed_lr1e-3_mlr[0-9.e-]+-mi300'
   muown:
     label: Muown
     # two naming generations: ...-mi300-fix and ...-mi300 — both belong here

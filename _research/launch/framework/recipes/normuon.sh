@@ -28,11 +28,12 @@ KNOB_STR=fixed_lr${SCALAR_LR}_mlr${MATRIX_LR}
 
 # Match muon.sh so muon-vs-normuonfix is apples-to-apples (WD equilibrium and
 # warmup drive early param-norm growth far more than the moment2 method).
-WEIGHT_DECAY=0.1
+WEIGHT_DECAY=${WEIGHT_DECAY:-0.1}
+[ "$WEIGHT_DECAY" != 0.1 ] && KNOB_STR=${KNOB_STR}_wd${WEIGHT_DECAY}
 ADAM_BETA1=0.9
 ADAM_BETA2=0.95
 
-LR_WARMUP_SAMPLES=128000
+LR_WARMUP_SAMPLES=${LR_WARMUP_SAMPLES:-128000}
 
 RECIPE_ARGS=(
     --muon-scale-mode shape_scaling

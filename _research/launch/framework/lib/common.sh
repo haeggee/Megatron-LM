@@ -235,6 +235,16 @@ if [ "$LR_DECAY_STYLE" = "WSD" ]; then
         --lr-wsd-decay-samples "$LR_WSD_DECAY_SAMPLES"
     )
 fi
+# LR_DECAY_SAMPLES: decouple the LR decay length from TRAIN_SAMPLES. Defaults
+# (unset) to TRAIN_SAMPLES in Megatron. Set it to anneal over a window shorter
+# than the run — e.g. a fresh-optimizer continuation (NO_LOAD_OPTIM=1) whose
+# scheduler counts from 0 but whose TRAIN_SAMPLES includes the loaded prefix.
+[ -n "${LR_DECAY_SAMPLES:-}" ] && LEARNING_RATE_ARGS+=(--lr-decay-samples "$LR_DECAY_SAMPLES")
+# LR_WARMUP_START_SAMPLES: shift the warmup ramp to begin at this sample instead
+# of 0, so a run that RESUMES at this point does a fresh init->max warmup from
+# there (a "warm-restart" warmup). Pair with OVERRIDE_OPT_SCHED=1 + a
+# LR_WARMUP_SAMPLES > LR_WARMUP_START_SAMPLES to re-schedule a loaded checkpoint.
+[ -n "${LR_WARMUP_START_SAMPLES:-}" ] && LEARNING_RATE_ARGS+=(--lr-warmup-start-samples "$LR_WARMUP_START_SAMPLES")
 # OVERRIDE_OPT_SCHED=1: rebuild the LR schedule from the args above instead of
 # the one stored in the checkpoint. Needed when branching a cooldown off a
 # constant-LR run (see sweep-cooldowns.sh) — optimizer state and iteration are
@@ -272,6 +282,25 @@ LOGGING_ARGS=(
     --tensorboard-log-interval 1
     --log-timers-to-tensorboard
 )
+# PRETRAINED_CKPT: seed a fresh run from another run's weights WITHOUT its
+# optimizer state. Megatron finetunes (iteration/sample counters reset to 0,
+# optimizer + RNG + dataloader fresh) from this dir on the FIRST load only —
+# once this run writes its own checkpoint into CKPT_DIR, normal resume takes
+# over. Used by the warm-restart experiments for the "fresh optimizer" arms.
+[ -n "${PRETRAINED_CKPT:-}" ] && LOGGING_ARGS+=(--pretrained-checkpoint "$PRETRAINED_CKPT")
+# NO_LOAD_OPTIM=1: load the model (and iteration / consumed-samples / RNG, so the
+# data loader CONTINUES) from CKPT_DIR but start with a fresh optimizer. The LR
+# scheduler rides with the optimizer, so it also starts fresh at step 0 — pair
+# with LR_DECAY_SAMPLES to anneal over just the continuation. Used by the
+# warm-restart "fresh optimizer, same data" arms. NOTE: not crash-resume-safe
+# (a mid-run resume would re-discard the optimizer), so don't auto-requeue it.
+[ -n "${NO_LOAD_OPTIM:-}" ] && LOGGING_ARGS+=(--no-load-optim)
+# RESET_OPT_MOMENTS=1: full resume (model + gains + scheduler + data), but after
+# load, zero the optimizer moments/EMAs (Adam m/v, momentum, gain m/v, step)
+# while KEEPING the learnable gains. Warm restart that reuses the model's gain
+# reparameterization with fresh momentum. Resets on every load -> single
+# allocation only (don't auto-requeue; on a crash, re-seed and relaunch).
+[ -n "${RESET_OPT_MOMENTS:-}" ] && LOGGING_ARGS+=(--reset-optimizer-moments)
 
 TOKENIZER_ARGS=(
     --tokenizer-type HuggingFaceTokenizer
@@ -410,19 +439,24 @@ maybe_auto_requeue() {
         echo ">>> auto-requeue: no checkpoint written yet — NOT chaining."
         return 0
     fi
-    local iter samples_done
+    local iter target_iters
     iter=$(tr -dc '0-9' < "$marker")
     if [ -z "$iter" ]; then
         echo ">>> auto-requeue: marker not numeric ('$(cat "$marker")') — NOT chaining."
         return 0
     fi
-    samples_done=$(( iter * GBS ))
-    if [ "$samples_done" -ge "$TRAIN_SAMPLES" ]; then
-        echo ">>> auto-requeue: reached $samples_done/$TRAIN_SAMPLES samples — DONE."
+    # Compare ITERATIONS with Megatron's own floor semantics
+    # (train_iters = train_samples // GBS). Comparing raw samples instead
+    # chains forever when TRAIN_SAMPLES isn't a multiple of GBS: the run
+    # finishes at floor(TRAIN_SAMPLES/GBS)*GBS samples, which never reaches
+    # TRAIN_SAMPLES, so each chained job loads, does 0 iters, exits 0, requeues.
+    target_iters=$(( TRAIN_SAMPLES / GBS ))
+    if [ "$iter" -ge "$target_iters" ]; then
+        echo ">>> auto-requeue: reached iter $iter/$target_iters — DONE."
         return 0
     fi
 
-    echo ">>> auto-requeue: $samples_done/$TRAIN_SAMPLES samples (chain #$((rq_count+1))/$rq_max) — submitting dependent job."
+    echo ">>> auto-requeue: iter $iter/$target_iters (chain #$((rq_count+1))/$rq_max) — submitting dependent job."
     # CLUSTER_SBATCH_FLAGS (partition/cpus/mem/reservation) must be re-applied:
     # arrays don't survive --export, but the chained train.sbatch re-sources
     # clusters/$CLUSTER.sh, and CLUSTER itself travels via the export list.

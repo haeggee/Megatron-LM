@@ -194,6 +194,14 @@ class SchedulerConfig:
     lr_warmup_samples: int = 0
     """number of samples to linearly warmup learning rate over."""
 
+    lr_warmup_start_samples: int = 0
+    """sample at which the warmup ramp begins (default 0 = anchored at the start
+    of training). When > 0 the warmup window becomes
+    [lr-warmup-start-samples, lr-warmup-samples], so a run resuming at that
+    sample performs a fresh warmup from there (a "warm restart" warmup). Pairs
+    with --override-opt-param-scheduler when reusing a checkpoint's optimizer
+    state but re-scheduling the LR."""
+
     lr_warmup_init: float = 0.0
     """Initial value for learning rate warmup. The scheduler starts warmup from this value."""
 

@@ -29,7 +29,8 @@ MOE_ARGS=(
     --moe-shared-expert-intermediate-size 448
     --moe-layer-freq "([0]*1+[1]*23)"
 )
-EP=1                           # pure DP: all 64 experts replicated on each GPU
+EP=${EP:-1}                    # default pure DP (all 64 experts replicated per GPU);
+                               # env EP>1 shards experts (see sweep-scaling-laws-810m-ep4.sh)
 
 DEFAULT_NODES=4
 DEFAULT_TIME=10:00:00

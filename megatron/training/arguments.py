@@ -2854,6 +2854,15 @@ def _add_checkpointing_args(parser):
                        help='Do not load optimizer when loading checkpoint.')
     group.add_argument('--no-load-rng', action='store_true', default=None,
                        help='Do not load rng state when loading checkpoint.')
+    group.add_argument('--reset-optimizer-moments', action='store_true', default=False,
+                       help='After loading a checkpoint, zero the optimizer moment/EMA '
+                            'buffers (Adam exp_avg/exp_avg_sq/exp_avg_slow, momentum, '
+                            'NorMuon v, and the gains\' own m/v) and the per-group step, '
+                            'while PRESERVING the learnable gains (row/col/flat_gain). A '
+                            'warm restart that keeps the model gain reparameterization but '
+                            'discards momentum/variance. NOTE: resets on EVERY load, so use '
+                            'only for a single-allocation run (do not pair with auto-requeue; '
+                            'on a crash, re-seed the checkpoint dir and relaunch).')
     group.add_argument('--use-dist-ckpt', action='store_true',
                        dest='use_dist_ckpt_deprecated',
                        help='Deprecated: see --ckpt-format.')

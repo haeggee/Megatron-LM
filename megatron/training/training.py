@@ -1628,6 +1628,7 @@ def get_optimizer_param_scheduler(optimizer):
         max_lr=args.lr,
         min_lr=args.min_lr,
         lr_warmup_steps=lr_warmup_steps,
+        lr_warmup_start_steps=args.lr_warmup_start_samples,
         lr_decay_steps=lr_decay_steps,
         lr_decay_style=args.lr_decay_style,
         start_wd=args.start_weight_decay,
@@ -1680,6 +1681,30 @@ def get_megatron_ddp_config(args: argparse.Namespace) -> DistributedDataParallel
     kwargs["megatron_fsdp_use_decoupled_grad"] = args.use_precision_aware_optimizer
 
     return DistributedDataParallelConfig(**kwargs)
+
+
+def reset_optimizer_moments(optimizer):
+    """Zero the optimizer moment/EMA buffers while keeping learnable gains.
+
+    Walks Megatron's optimizer wrapper (a ChainedOptimizer — incl. the
+    layer-wise distributed optimizer — or a single MegatronOptimizer) down to
+    each inner torch optimizer and calls its ``reset_optimizer_moments`` if it
+    has one (MasterOptimizer/GainsMasterOptimizer). See
+    ``--reset-optimizer-moments``.
+    """
+    if hasattr(optimizer, 'chained_optimizers'):
+        inner = [getattr(o, 'optimizer', None) for o in optimizer.chained_optimizers]
+    else:
+        inner = [getattr(optimizer, 'optimizer', None)]
+    total = 0
+    n_opts = 0
+    for io in inner:
+        if io is not None and hasattr(io, 'reset_optimizer_moments'):
+            total += io.reset_optimizer_moments()
+            n_opts += 1
+    print_rank_0(f' > --reset-optimizer-moments: zeroed {total} moment buffers across '
+                 f'{n_opts} optimizer(s); learnable gains preserved.')
+    return total
 
 
 def setup_model_and_optimizer(
@@ -1805,6 +1830,11 @@ def setup_model_and_optimizer(
                 'load_checkpoint_time': timers('load-checkpoint').active_time(),
             }
         )
+        # Warm restart: keep the loaded gains (model reparameterization) but
+        # throw away the loaded momentum/variance. Must run AFTER the optimizer
+        # state is loaded above.
+        if getattr(args, 'reset_optimizer_moments', False):
+            reset_optimizer_moments(optimizer)
     else:
         args.iteration = 0
         args.num_floating_point_operations_so_far = 0

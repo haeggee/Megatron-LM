@@ -178,6 +178,7 @@ class OptimizerParamScheduler:
         override_opt_param_scheduler: Optional[bool] = False,
         wsd_decay_steps: Optional[int] = None,
         lr_wsd_decay_style: Optional[str] = None,
+        lr_warmup_start_steps: int = 0,
     ) -> None:
 
         # Class values.
@@ -191,12 +192,21 @@ class OptimizerParamScheduler:
         assert self.init_lr <= self.max_lr
 
         self.lr_warmup_steps = lr_warmup_steps
+        # Step at which the warmup ramp begins (default 0 = ramp anchored at the
+        # start of training, the standard behavior). Setting it > 0 shifts the
+        # warmup window to [lr_warmup_start_steps, lr_warmup_steps], so a run
+        # that RESUMES at step lr_warmup_start_steps performs a fresh init_lr->
+        # max_lr ramp from that point — a "warm restart" warmup that the global,
+        # step-0-anchored warmup cannot express. Used by the master-length
+        # warm-restart experiments (see _research/launch/framework).
+        self.lr_warmup_start_steps = lr_warmup_start_steps
         self.num_steps = 0
         self.lr_decay_steps = lr_decay_steps
         self.wsd_decay_steps = wsd_decay_steps
         self.lr_wsd_decay_style = lr_wsd_decay_style
         assert self.lr_decay_steps > 0
         assert self.lr_warmup_steps < self.lr_decay_steps
+        assert 0 <= self.lr_warmup_start_steps <= self.lr_warmup_steps
 
         self.lr_decay_style = lr_decay_style
         if self.lr_decay_style == "WSD":
@@ -265,10 +275,23 @@ class OptimizerParamScheduler:
         max_lr = param_group.get('max_lr', self.max_lr)
         min_lr = param_group.get('min_lr', self.min_lr)
 
-        # Use linear warmup for the initial part.
-        if self.lr_warmup_steps > 0 and self.num_steps <= self.lr_warmup_steps:
+        # Use linear warmup over the window [lr_warmup_start_steps, lr_warmup_steps].
+        # With lr_warmup_start_steps == 0 (the default) this is the standard
+        # ramp anchored at step 0; a non-zero start shifts the ramp so a resumed
+        # run warms up from that step (see __init__).
+        warmup_start = self.lr_warmup_start_steps
+        if self.lr_warmup_steps > warmup_start and self.num_steps <= self.lr_warmup_steps:
+            # Before the (possibly shifted) window begins, sit at init_lr. This
+            # also covers the num_steps == 0 evaluation in __init__ that happens
+            # before the checkpoint's num_steps is loaded — without it a shifted
+            # window (warmup_start > 0) would fall through to the decay branch
+            # with a negative offset and trip its decay_ratio >= 0 assert.
+            if self.num_steps <= warmup_start:
+                return self.init_lr
             return self.init_lr + (
-                (max_lr - self.init_lr) * float(self.num_steps) / float(self.lr_warmup_steps)
+                (max_lr - self.init_lr)
+                * float(self.num_steps - warmup_start)
+                / float(self.lr_warmup_steps - warmup_start)
             )
 
         # If the learning rate is constant, just return the initial value.

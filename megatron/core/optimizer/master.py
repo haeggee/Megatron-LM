@@ -191,6 +191,34 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         return loss
 
+    # Per-param state keys that ARE the learnable gains (the model
+    # reparameterization), as opposed to optimizer moment/EMA buffers. Used by
+    # reset_optimizer_moments to decide what to keep.
+    _GAIN_STATE_KEYS = ("row_gain", "col_gain", "flat_gain")
+
+    @torch.no_grad()
+    def reset_optimizer_moments(self) -> int:
+        """Zero every optimizer moment/EMA buffer — Adam exp_avg / exp_avg_sq /
+        exp_avg_slow, the Muon momentum, the NorMuon 2nd-moment, and the gains'
+        own Adam state (row/col/flat_gain_m and _v) — and reset the per-group
+        step, while PRESERVING the learnable gains themselves (row/col/
+        flat_gain). This is a "warm restart" that keeps the model's gain
+        reparameterization (p = normalize(w) * phi(gains)) but throws away
+        momentum/variance. Driven by --reset-optimizer-moments; call AFTER the
+        checkpoint's optimizer state has been loaded.
+
+        Returns the number of tensors zeroed (for logging).
+        """
+        zeroed = 0
+        for group in self.param_groups:
+            group["step"] = 0
+            for p in group["params"]:
+                for key, val in self.state.get(p, {}).items():
+                    if key not in self._GAIN_STATE_KEYS and torch.is_tensor(val):
+                        val.zero_()
+                        zeroed += 1
+        return zeroed
+
     def _param_step(self, p, group):
         grad = p.grad
         state = self.state[p]

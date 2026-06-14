@@ -41,7 +41,8 @@ done
 # Geometric x2 grids centered on each recipe's default.
 ADAMW_LRS=${ADAMW_LRS:-"1.5e-4 3e-4 6e-4 1.2e-3 2.4e-3 4.8e-3"}
 # ADAMW_LRS=${ADAMW_LRS:-"2.4e-3 4.8e-3"}
-MUON_MLRS=${MUON_MLRS:-"5e-3 1e-2 2e-2 4e-2"}
+# MUON_MLRS=${MUON_MLRS:-"1e-3 5e-3 1e-2 2e-2 4e-2"}
+MUON_MLRS=${MUON_MLRS:-"5e-3"}
 
 submit() {  # submit <env assignments...> -- passed straight to submit.sh
     local env_args=()
@@ -82,9 +83,14 @@ n=0
 #     submit MATRIX_LR="$mlr" -- --recipe muown; n=$((n+1))
 # done
 
-# normuon with kimi scaling
-for mlr in $ADAMW_LRS; do
-    submit MATRIX_LR="$mlr" -- --recipe normuon_kimi_scaling; n=$((n+1))
+# muon without warmup
+for mlr in $MUON_MLRS; do
+    submit LR_WARMUP_SAMPLES=0 MATRIX_LR="$mlr" -- --recipe muon; n=$((n+1))
 done
+
+# normuon with kimi scaling
+# for mlr in $ADAMW_LRS; do
+#     submit MATRIX_LR="$mlr" -- --recipe normuon_kimi_scaling; n=$((n+1))
+# done
 
 echo ">>> $n jobs ${DRY:+(dry run, nothing submitted) }for SIZE=$SIZE CLUSTER=$CLUSTER NODES=$NODES${MBS:+ MBS=$MBS}"
