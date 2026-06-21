@@ -752,13 +752,11 @@ class GainsMasterOptimizer(MasterOptimizer):
             gain_grads["col_gain"] = torch.sum(p_times_pgrad, dim=0)
 
         # Sync gains with TP group.
-        if self.pg_collection is not None:  # TODO(Ale). Uncomment for correct behaviour.
-        #if False:  # TODO(Ale). Uncomment for fast mode.
+        if self.pg_collection is not None:
             # partition_dim=0 -> column parallel sharding.
             # partition_dim=1 -> row paralellel sharding.
             partition_dim = getattr(p, "partition_dim", None)
             if partition_dim in {0, 1}:  # Otherwise, p is not sharded so we don't need to sync it.
-                # TODO(Ale) make comm async.
                 tp_group = self.pg_collection.expt_tp if getattr(p, "expert_tp", False) else self.pg_collection.tp
                 if flat is not None:  # Flat gains always need to all-reduce to complete the decomposition.
                     torch.distributed.all_reduce(gain_grads["flat_gain"], group=tp_group)
