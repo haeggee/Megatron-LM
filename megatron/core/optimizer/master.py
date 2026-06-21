@@ -469,34 +469,25 @@ class MasterOptimizer(torch.optim.Optimizer):
             raise ValueError(f"Unsupported hypersphere mode: {mode}")
 
         # Find norm of x, sync with TP group if needed.
-        if self.pg_collection is not None and partition_dim in {0, 1}:
-            # TODO(Ale) make it async.
+        tp_group = self.pg_collection.expt_tp if is_expert_tp else self.pg_collection.tp
+        if  partition_dim in {0, 1} and (mode == "flat" or partition_dim == dim):
             norm = torch.norm(x, dim=dim, keepdim=True)
-            if mode == "flat" or partition_dim == dim:
-                tp_group = self.pg_collection.expt_tp if is_expert_tp else self.pg_collection.tp
-                norm_squared = norm**2
-                torch.distributed.all_reduce(norm_squared, group=tp_group)
-                norm = torch.sqrt(norm_squared).clamp_min(self.hypersphere_eps)
-            else:
-                norm = norm.clamp_min(self.hypersphere_eps)
+            norm_squared = norm**2
+            torch.distributed.all_reduce(norm_squared, group=tp_group)
+            norm = torch.sqrt(norm_squared).clamp_min(self.hypersphere_eps)
         else:
             norm = torch.norm(x, dim=dim, keepdim=True).clamp_min(self.hypersphere_eps)
 
         # Normalize x.
         x.div_(norm)
         if mode == "flat":
-            tp_size = get_pg_size(tp_group) if partition_dim in {0, 1} else 1                                                                                                         
+            tp_size = get_pg_size(tp_group) if partition_dim in {0, 1} else 1
             global_sizes = [x.size(-2), x.size(-1)]
             if partition_dim in {0, 1}:
                 global_sizes[partition_dim] *= tp_size
             x.mul_(max(global_sizes) ** 0.5)
         if radius_scale != 1.0:
             x.mul_(radius_scale)
-
-        # row_l2_after = x.norm(dim=-1).mean()
-        # col_l2_after = x.norm(dim=-2).mean()
-        # frob_norm = x.norm()
-        # print(f"Hypersphere normalization: {x.shape} | row_norm avg: {row_l2_after.item():.5f}, col_norm avg: {col_l2_after.item():.5f}, frob_norm: {frob_norm.item():.5f}")
 
 
 class GainsMasterOptimizer(MasterOptimizer):
@@ -599,8 +590,8 @@ class GainsMasterOptimizer(MasterOptimizer):
         across the TP group when the reduced axis is the TP-sharded one — so the
         preserve_init gains absorb the SAME global magnitude on TP=1 and TP>1.
         Mirrors the distributed-norm logic in _normalize_single:
-            dim is None (flat) → reduce iff the param is sharded (partition_dim in {0,1})
-            dim in {0, 1}      → reduce iff partition_dim == dim (reduced axis is sharded)
+            dim is None (flat) -> reduce iff the param is sharded (partition_dim in {0,1})
+            dim in {0, 1}      -> reduce iff partition_dim == dim (reduced axis is sharded)
         """
         norm = torch.norm(x) if dim is None else torch.norm(x, dim=dim)
         should_reduce = self.pg_collection is not None and (
@@ -708,39 +699,6 @@ class GainsMasterOptimizer(MasterOptimizer):
             with torch.enable_grad():
                 loss = closure()
 
-        # >>>
-        # TODO(Ale) Remove this extra tensor saving logic.
-        import os
-        from megatron.core import parallel_state
-        save_tensors = os.environ.get("ENABLE_SAVE_TENSORS", "0") == "1"
-        def save(extra=""):
-            if not save_tensors:
-                return
-            rank = torch.distributed.get_rank()
-            data = {
-                "groups": [[p for p in group["params"]] for group in self.param_groups],
-                "state": self.state,
-                "distributed": {
-                    "dp": parallel_state.get_data_parallel_group().rank(),
-                    "tp": parallel_state.get_tensor_model_parallel_group().rank(),
-                    "pp": parallel_state.get_pipeline_model_parallel_group().rank(),
-                    "ep": parallel_state.get_expert_model_parallel_group().rank(),
-                    "rank": rank,
-                },
-            }
-            it = next(group["step"] for group in self.param_groups)
-            print("saving", it, rank)
-            path = os.path.join(root, f"states_{it}_{rank}{extra}.pt")
-            torch.save(data, path)
-
-        name = os.environ["RUN_TAG"]
-        root = os.path.join("/iopsstor/scratch/cscs/ahernnde/megatron-lm-research-baseline/_research/temps/", name)
-        os.makedirs(root, exist_ok=True)
-        it = next(group["step"] for group in self.param_groups)
-        if it == 0:
-            save(extra="init")
-        # <<<
-
         for group in self.param_groups:
             group["step"] += 1
             if "momentum_beta" not in group:
@@ -752,11 +710,6 @@ class GainsMasterOptimizer(MasterOptimizer):
                     self._param_step(p, group)
                     self._gains_step(p, group, gain_grads)
                     self._apply_gains(p)
-
-        # >>>
-        if it == 0 or (it + 1) % 10 == 0:
-            save()
-        # <<<
 
         return loss
 
@@ -799,7 +752,8 @@ class GainsMasterOptimizer(MasterOptimizer):
             gain_grads["col_gain"] = torch.sum(p_times_pgrad, dim=0)
 
         # Sync gains with TP group.
-        if self.pg_collection is not None:
+        if self.pg_collection is not None:  # TODO(Ale). Uncomment for correct behaviour.
+        #if False:  # TODO(Ale). Uncomment for fast mode.
             # partition_dim=0 -> column parallel sharding.
             # partition_dim=1 -> row paralellel sharding.
             partition_dim = getattr(p, "partition_dim", None)

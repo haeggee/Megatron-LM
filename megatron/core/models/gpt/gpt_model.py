@@ -676,20 +676,6 @@ class GPTModel(LanguageModule):
         # Apply MuP output scaling to logits
         logits = self._scale_logits(logits)
 
-        # >>>
-        import os
-        save_tensors = os.environ.get("ENABLE_SAVE_TENSORS", "0") == "1"
-        if save_tensors:
-            name = os.environ["RUN_TAG"]
-            root = os.path.join("/iopsstor/scratch/cscs/ahernnde/megatron-lm-research-baseline/_research/temps/", name)
-            os.makedirs(root, exist_ok=True)
-            rank = torch.distributed.get_rank()
-            mbs = 0
-            while os.path.exists(path := os.path.join(root, f"logits_{rank}_mbs{mbs}.pt")):
-                mbs += 1
-            torch.save(logits, path)
-        # <<<
-
         # Restore sequence parallel execution to the output layer if necessary.
         if sequence_parallel_override:
             assert (

@@ -465,14 +465,7 @@ def model_parallel_cuda_manual_seed(
         etp_rank = get_expert_tensor_parallel_rank()
     # 2718 is just for fun and any POSITIVE value will work.
     offset = seed + 2718
-    # >>>
-    import os
-    if os.environ.get("USE_DETERMINISTIC_TP_INIT", "false") != "false":
-        print("Using deterministic TP mode:", os.environ["USE_DETERMINISTIC_TP_INIT"])
-        tensor_model_parallel_seed = offset
-    else:
-        tensor_model_parallel_seed = offset + tp_rank
-    # <<<
+    tensor_model_parallel_seed = offset + tp_rank
     # Data parallel gets the original seed.
     data_parallel_seed = seed
 
@@ -487,14 +480,7 @@ def model_parallel_cuda_manual_seed(
     # and model parallel state.
     _CUDA_RNG_STATE_TRACKER.add(_MODEL_PARALLEL_RNG_TRACKER_NAME, tensor_model_parallel_seed)
 
-    # >>>
-    if os.environ.get("USE_DETERMINISTIC_MOE_INIT", "false") == "true":
-        print("Using deterministic TP mode")
-        expert_parallel_seed = seed + 1024
-    else:
-        expert_parallel_seed = seed + 1024 + 100 * ep_rank + etp_rank  # TODO(Ale) restore old method
-    # <<<
-    #expert_parallel_seed = seed + 1024 + 100 * ep_rank + etp_rank  # TODO(Ale) restore old method
+    expert_parallel_seed = seed + 1024 + 100 * ep_rank + etp_rank
     _CUDA_RNG_STATE_TRACKER.add(_EXPERT_PARALLEL_RNG_TRACKER_NAME, expert_parallel_seed)
 
 
