@@ -546,23 +546,38 @@ class GainsMasterOptimizer(MasterOptimizer):
     Requires --ckpt-format torch.
     """
 
-    _GAIN_KEYS = ("flat_gain", "row_gain", "col_gain", "q_col_gain", "k_col_gain", "v_col_gain")
+    _GAIN_KEYS = ("flat_gain", "row_gain", "col_gain", "q_col_gain", "k_col_gain", "v_col_gain",
+                  "lowrank_a", "lowrank_b")
 
     def __init__(
         self,
         params,
-        hypersphere_gains_mode: Optional[Literal["flat", "embed", "row", "col", "rowcol"]] = None,
-        hypersphere_gains_mode_output: Optional[Literal["flat", "row", "col", "rowcol", "none"]] = None,
-        hypersphere_gains_mode_embedding: Optional[Literal["flat", "row", "col", "rowcol", "none"]] = None,
+        hypersphere_gains_mode: Optional[Literal["flat", "embed", "row", "col", "rowcol", "lowrank"]] = None,
+        hypersphere_gains_mode_output: Optional[Literal["flat", "row", "col", "rowcol", "lowrank", "none"]] = None,
+        hypersphere_gains_mode_embedding: Optional[Literal["flat", "row", "col", "rowcol", "lowrank", "none"]] = None,
         split_qkv_gains: bool = False,
         gains_lr: Optional[float] = None,
         gains_betas: tuple[float, float] = (0.9, 0.999),
         gains_eps: float = 1e-8,
         gains_weight_decay: float = 0.0,
+        gains_bias_correction: bool = True,
+        gains_min: float = 0.0,
         gain_parametrization: Literal["direct", "offset", "softplus", "exp"] = "direct",
+        gains_rank: int = 4,
+        gains_lowrank_init_std: Optional[float] = None,
+        gains_lowrank_min: float = 1e-2,
+        scale_min_lr: bool = False,
         **kwargs,
     ):
         assert hypersphere_gains_mode is not None
+        self.scale_min_lr = scale_min_lr
+        self.gains_rank = gains_rank
+        self.gains_lowrank_init_std = gains_lowrank_init_std
+        self.gains_lowrank_min = gains_lowrank_min
+        # Deterministic per-parameter seed for the random A factor of lowrank
+        # gains, so DP replicas initialise identically (B starts at zero).
+        self._lowrank_seed_base = 1234
+        self._lowrank_counter = 0
         self.hypersphere_gains_mode = hypersphere_gains_mode
         self.hypersphere_gains_mode_output = hypersphere_gains_mode_output
         self.hypersphere_gains_mode_embedding = hypersphere_gains_mode_embedding
@@ -571,7 +586,14 @@ class GainsMasterOptimizer(MasterOptimizer):
         self.gains_betas = gains_betas
         self.gains_eps = gains_eps
         self.gains_weight_decay = gains_weight_decay
+        self.gains_bias_correction = gains_bias_correction
+        self.gains_min = gains_min
         self.gain_parametrization = gain_parametrization
+        # Precompute the raw-gain clamp from the desired floor on phi(g) (monotonic phi).
+        if gains_min > 0:
+            self._gain_clamp_min = float(self._phi_inv(torch.tensor(float(gains_min))).item())
+        else:
+            self._gain_clamp_min = None
         super().__init__(params, **kwargs)
         self._setup_gains()
 
@@ -644,6 +666,10 @@ class GainsMasterOptimizer(MasterOptimizer):
         # Dispatch to split-QKV variant if applicable.
         if self.split_qkv_gains and self.is_qkv_fn(p) and "q_col_gain" in state:
             return self._preprocess_split_qkv_gains(p)
+
+        # Dispatch to the rank-k variant if applicable.
+        if "lowrank_a" in state:
+            return self._preprocess_lowrank_gains(p)
 
         flat = state.get("flat_gain")
         row = state.get("row_gain")
@@ -760,6 +786,60 @@ class GainsMasterOptimizer(MasterOptimizer):
 
         return gain_grads
 
+    def _lowrank_multiplier(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+        """Effective rank-k multiplier G = 1 + A@B, floored to stay safely positive.
+
+        The additive correction A@B is unbounded, so an entry of 1+A@B can drift
+        toward or past zero (especially with weight_decay=0, which leaves nothing
+        pulling it back to identity). Flooring at gains_lowrank_min bounds the undo
+        division p/G (preventing blow-up / sign-flip and the small-G -> large-gain
+        runaway), and is applied identically on undo, grad-rescale and re-apply so
+        the round-trip stays exact. It is a projected-gradient safety net in the
+        same spirit as gains_min for phi(g); the gain gradient below is the
+        unclamped d(1+A@B), so it is exact wherever the floor is inactive (the
+        common case, e.g. always at init where G=1).
+        """
+        G = 1.0 + A @ B
+        floor = self.gains_lowrank_min if self.gains_lowrank_min > 0 else 1e-8
+        return G.clamp_min(floor)
+
+    @torch.no_grad()
+    def _preprocess_lowrank_gains(self, p: torch.nn.Parameter) -> dict:
+        """_preprocess_gains variant for the rank-k multiplier G = 1 + A @ B.
+
+        A is [m,k], B is [k,n], so the effective elementwise multiplier on the
+        bare weight is the full-rank-capacity matrix G = 1 + A@B. It is exactly
+        the identity at init (B starts at zero) and reduces, conceptually, to the
+        rank-1 row/col case for k=1. Mirrors the row/col logic: undo G on p,
+        compute dL/dA and dL/dB, then rescale p.grad so MasterOptimizer sees
+        dL/d(bare p).
+
+        gain_parametrization (phi) does NOT apply here: the low-rank correction
+        is inherently additive (1 + A@B), with weight decay on A/B pulling the
+        multiplier back toward identity.
+        """
+        state = self.state[p]
+        A = state["lowrank_a"]            # [m, k]
+        B = state["lowrank_b"]            # [k, n]
+        G = self._lowrank_multiplier(A, B)  # [m, n], floored
+
+        # 1. Undo the (floored) gain to recover the bare weight.
+        p.div_(G)
+
+        # 2. dL/dG = p_bare * dL/dp_full (p now holds p_bare, p.grad still
+        #    dL/dp_full). The +1 constant drops out of dG/dA, dG/dB. Uses the
+        #    unclamped factors A,B; exact wherever the floor is inactive.
+        P = p * p.grad
+        gain_grads = {
+            "lowrank_a": P @ B.t(),  # [m, k]
+            "lowrank_b": A.t() @ P,  # [k, n]
+        }
+
+        # 3. Rescale p.grad so MasterOptimizer sees dL/d(bare p) = G * dL/dp_full.
+        #    Same floored G as the undo, keeping the round-trip consistent.
+        p.grad.mul_(G)
+        return gain_grads
+
     @torch.no_grad()
     def _gains_step(self, p, group, gain_grads: dict):
         """Inline Adam update for all gain tensors belonging to p."""
@@ -774,12 +854,27 @@ class GainsMasterOptimizer(MasterOptimizer):
         if self.gains_lr is None:
             lr = group["lr"]
         else:
+            # Decay gains_lr along the group's schedule *shape*, flooring at the
+            # same min_lr as every other group. With absolute min_lr the floor is
+            # the shared min_lr; with relative min_lr (scale_min_lr) the floor
+            # scales proportionally to gains_lr (matching the group's max_lr/min_lr
+            # ratio), reducing to the old pure-scaling behaviour.
             max_lr = group.get("max_lr", group["lr"])
-            schedule_mult = (group["lr"] / max_lr) if max_lr > 0 else 1.0
-            lr = self.gains_lr * schedule_mult
+            group_min_lr = group.get("min_lr", 0.0)
+            if self.scale_min_lr:
+                floor = (self.gains_lr * group_min_lr / max_lr) if max_lr > 0 else 0.0
+            else:
+                floor = group_min_lr
+            denom = max_lr - group_min_lr
+            decay_frac = ((group["lr"] - group_min_lr) / denom) if denom > 0 else 1.0
+            lr = floor + (self.gains_lr - floor) * decay_frac
 
-        bias_correction1 = 1.0 - beta1 ** step
-        bias_correction2 = 1.0 - beta2 ** step
+        if self.gains_bias_correction:
+            bias_correction1 = 1.0 - beta1 ** step
+            bias_correction2 = 1.0 - beta2 ** step
+        else:
+            bias_correction1 = 1.0
+            bias_correction2 = 1.0
 
         for name, grad in gain_grads.items():
             gain = state[name]
@@ -791,10 +886,21 @@ class GainsMasterOptimizer(MasterOptimizer):
             v.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
             denom = (v.sqrt() / math.sqrt(bias_correction2)).add_(eps)
             gain.addcdiv_(m, denom, value=-lr / bias_correction1)
+            # Floor the effective multiplier phi(g) >= gains_min (projected-gradient clamp).
+            # Not meaningful for the lowrank factors, whose product (not the raw
+            # entries) forms the multiplier.
+            if self._gain_clamp_min is not None and name not in ("lowrank_a", "lowrank_b"):
+                gain.clamp_(min=self._gain_clamp_min)
+
 
     @torch.no_grad()
     def _apply_gains(self, p):
         state = self.state[p]
+        A = state.get("lowrank_a")
+        if A is not None:
+            B = state["lowrank_b"]
+            p.mul_(self._lowrank_multiplier(A, B))
+            return
         q_col = state.get("q_col_gain")
         if q_col is not None:
             row = state.get("row_gain")
@@ -855,9 +961,38 @@ class GainsMasterOptimizer(MasterOptimizer):
                 is_qkv = self.is_qkv_fn(p)
                 state = self.state[p]
 
-                wants_row = ("row" in gains_mode) or (gains_mode == "embed" and not is_out_proj)
-                wants_col = ("col" in gains_mode) or (gains_mode == "embed" and is_out_proj)
+                wants_lowrank = (gains_mode == "lowrank")
+                wants_row = (not wants_lowrank) and (("row" in gains_mode) or (gains_mode == "embed" and not is_out_proj))
+                wants_col = (not wants_lowrank) and (("col" in gains_mode) or (gains_mode == "embed" and is_out_proj))
                 wants_flat = (gains_mode == "flat")
+
+                if wants_lowrank:
+                    # Rank-k multiplier G = 1 + A@B (A:[m,k], B:[k,n]). Identity at
+                    # init: B is zero, A is random (a fixed per-param seed keeps DP
+                    # replicas in sync). The random A breaks the symmetry between the
+                    # k components so the factorisation does not collapse to rank 1;
+                    # B grows from its (nonzero) gradient on the first step.
+                    # preserve_init is a no-op here — a rank-k correction cannot
+                    # absorb arbitrary per-element init norms, so we leave G = I.
+                    m, n = p.size(0), p.size(1)
+                    k = min(self.gains_rank, m, n)
+                    if "lowrank_a" not in state:
+                        std = self.gains_lowrank_init_std
+                        if std is None:
+                            std = (1.0 / k) ** 0.5
+                        gen = torch.Generator(device=p.device)
+                        gen.manual_seed(self._lowrank_seed_base + self._lowrank_counter)
+                        self._lowrank_counter += 1
+                        state["lowrank_a"] = torch.randn(
+                            m, k, dtype=torch.float32, device=p.device, generator=gen
+                        ) * std
+                        state["lowrank_b"] = torch.zeros(k, n, dtype=torch.float32, device=p.device)
+                    for key in ("lowrank_a", "lowrank_b"):
+                        if f"{key}_m" not in state:
+                            state[f"{key}_m"] = torch.zeros_like(state[key])
+                        if f"{key}_v" not in state:
+                            state[f"{key}_v"] = torch.zeros_like(state[key])
+                    continue
 
                 # All gain state stores raw `g`; the effective multiplier is phi(g).
                 # Initialisation maps the desired phi(g_init) (== 1.0, or the param norm
@@ -1223,10 +1358,21 @@ def get_megatron_master_optimizer(
         hypersphere_gains_mode_embedding=config.hypersphere_gains_mode_embedding,
         split_qkv_gains=config.split_qkv_gains,
         gains_lr=config.gains_lr,
-        gains_betas=(config.adam_beta1, config.adam_beta2),
-        gains_eps=config.adam_eps,
-        gains_weight_decay=config.weight_decay,
+        gains_betas=(
+            config.gains_beta1 if config.gains_beta1 is not None else config.adam_beta1,
+            config.gains_beta2 if config.gains_beta2 is not None else config.adam_beta2,
+        ),
+        gains_eps=config.gains_eps if config.gains_eps is not None else config.adam_eps,
+        gains_weight_decay=(
+            config.gains_weight_decay if config.gains_weight_decay is not None else config.weight_decay
+        ),
+        gains_bias_correction=config.gains_bias_correction,
+        gains_min=config.gains_min,
         gain_parametrization=config.gain_parametrization,
+        gains_rank=config.gains_rank,
+        gains_lowrank_init_std=config.gains_lowrank_init_std,
+        gains_lowrank_min=config.gains_lowrank_min,
+        scale_min_lr=config.scale_min_lr,
     )
     if config.hypersphere_gains_mode:
         optimizer = GainsMasterOptimizer(

@@ -87,10 +87,35 @@ BASE_LR=0.001
 # 		$*
 # done
 
-# # ---- master-muon + gains ----
-for k in 4 6 8; do
+# # # ---- master-muon + gains ----
+# for k in 3 4 5 6 7 8; do
+# # for k in 4 5 6; do
+# 	GAINS_LR=$(python3 -c "print(0.001 * 2**($k/2))")
+# 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+# 		--eval-every 1000 --eval-iters 50 \
+# 		--opt master --master-orthogonalize --alpha 0 \
+# 		--hs flat --hs-embed row --hs-embed-no-orthogonal \
+# 		--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
+# 		--hs-g rowcol --hs-g-embed none \
+# 		--post-norm \
+# 		--hs-g-param softplus \
+# 		--fixed-layer-scale $INV_LAYERS \
+# 		--upscale-embedding $SQRT_MODELDIM \
+# 		--qk-norm RMSNorm \
+# 		--wd 0 --decay linear --no-warmup \
+# 		--untie-embed \
+# 		--matrix-lr $MATRIX_LR --embedding-lr $EMB_LR --output-lr $OUT_LR --glr $GAINS_LR --lr $BASE_LR \
+# 		--extra-name glrfix \
+# 		$*
+# done
+
+
+
+# # ---- master-muon + gains, but sweeping matrix lr with gains fixed at 1e-3
+for k in 8; do
 # for k in 4 5 6; do
-	GAINS_LR=$(python3 -c "print(0.001 * 2**($k/2))")
+	MATRIX_LR=$(python3 -c "print(0.001 * 2**($k/2))")
+	GAINS_LR=0.001
 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
 		--eval-every 1000 --eval-iters 50 \
 		--opt master --master-orthogonalize --alpha 0 \
@@ -105,6 +130,6 @@ for k in 4 6 8; do
 		--wd 0 --decay linear --no-warmup \
 		--untie-embed \
 		--matrix-lr $MATRIX_LR --embedding-lr $EMB_LR --output-lr $OUT_LR --glr $GAINS_LR --lr $BASE_LR \
-		--extra-name exp1b-gains \
+		--extra-name mlrfix \
 		$*
 done

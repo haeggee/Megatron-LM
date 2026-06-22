@@ -2228,12 +2228,12 @@ def _add_regularization_args(parser):
                        help='Scale min_lr proportionally to max_lr for each param group, '
                             'keeping the same max_lr/min_lr ratio as the base lr.')
     group.add_argument('--hypersphere-mode', type=_float_or_str)
-    group.add_argument('--hypersphere-gains-mode', choices=["flat", "embed", "row", "col", "rowcol"])
-    group.add_argument('--hypersphere-gains-mode-output', choices=["flat", "row", "col", "rowcol", "none"],
+    group.add_argument('--hypersphere-gains-mode', choices=["flat", "embed", "row", "col", "rowcol", "lowrank"])
+    group.add_argument('--hypersphere-gains-mode-output', choices=["flat", "row", "col", "rowcol", "lowrank", "none"],
                        help='Override gains mode for the LM head output layer. '
                             'If not set, the output layer uses --hypersphere-gains-mode. '
                             'Set to "none" to disable gains on the output layer.')
-    group.add_argument('--hypersphere-gains-mode-embedding', choices=["flat", "row", "col", "rowcol", "none"],
+    group.add_argument('--hypersphere-gains-mode-embedding', choices=["flat", "row", "col", "rowcol", "lowrank", "none"],
                        help='Override gains mode for the embedding (input) layer. '
                             'If not set, the embedding layer uses --hypersphere-gains-mode. '
                             'Set to "none" to disable gains on the embedding layer.')
@@ -2242,6 +2242,34 @@ def _add_regularization_args(parser):
     group.add_argument('--gains-lr', type=float, default=None,
                        help='Absolute learning rate for gain parameters. '
                             'When None, gains follow the param group LR (same schedule as the weights).')
+    group.add_argument('--gains-beta1', type=float, default=None,
+                       help='Adam beta1 for the gain optimizer. When None, reuses --adam-beta1.')
+    group.add_argument('--gains-beta2', type=float, default=None,
+                       help='Adam beta2 for the gain optimizer. When None, reuses --adam-beta2.')
+    group.add_argument('--gains-eps', type=float, default=None,
+                       help='Adam eps for the gain optimizer. When None, reuses --adam-eps.')
+    group.add_argument('--gains-weight-decay', type=float, default=None,
+                       help='Weight decay for gain parameters. When None, reuses --weight-decay.')
+    group.add_argument('--no-gains-bias-correction', action='store_false', dest='gains_bias_correction',
+                       help='Disable Adam bias correction (the 1-beta^t terms) for the gain optimizer.')
+    group.add_argument('--gains-min', type=float, default=0.0,
+                       help='Floor on the effective multiplier phi(g): after each gain step the raw '
+                            'gain is clamped so phi(g) >= gains_min. Prevents gains collapsing through '
+                            'zero (sign flips for direct) and keeps the undo division bounded. 0 = off. '
+                            'Parametrization-agnostic (converted via phi^-1).')
+    group.add_argument('--gains-rank', type=int, default=4,
+                       help='Rank k of the "lowrank" gains multiplier G = 1 + A@B (A:[m,k], '
+                            'B:[k,n]). Capped at min(m, n) per parameter. k=1 is a single '
+                            'rank-1 correction.')
+    group.add_argument('--gains-lowrank-init-std', type=float, default=None,
+                       help='Init std for the random A factor of lowrank gains (B starts at '
+                            'zero, so the multiplier is exactly identity at init). '
+                            'When None, defaults to (1/k)**0.5.')
+    group.add_argument('--gains-lowrank-min', type=float, default=1e-2,
+                       help='Floor on the lowrank multiplier G = 1 + A@B (clamp_min on G, used '
+                            'identically on undo and re-apply). Bounds the undo division p/G at '
+                            '1/this, preventing blow-up / sign-flip / gain runaway when an entry '
+                            'of G drifts toward zero (likely with wd=0). <=0 -> tiny eps only.')
     group.add_argument('--gain-parametrization', choices=["direct", "offset", "softplus", "exp"], default="direct",
                        help='How the learned gain g maps to the effective multiplier phi(g) '
                             'applied to W_bare. "direct": phi(g)=g (current). "offset": '

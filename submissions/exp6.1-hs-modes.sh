@@ -34,8 +34,8 @@ EMB_LR=0.003
 # done
 
 # ---- without gains ----
-for hsmode in row embed; do
-	for k in 3 4 5 6 7 8; do
+for hsmode in row; do
+	for k in 16; do
 		matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
 		bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
 			--eval-every 1000 --eval-iters 50 \
@@ -43,6 +43,7 @@ for hsmode in row embed; do
 			--hs $hsmode --hs-embed row --hs-embed-no-orthogonal \
 			--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
 			--post-norm \
+			--hs-u \
 			--fixed-layer-scale $INV_LAYERS \
 			--upscale-embedding $SQRT_MODELDIM \
 			--qk-norm RMSNorm \

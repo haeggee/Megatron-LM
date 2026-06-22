@@ -94,9 +94,8 @@ EMB_LR=0.003
 # 		$*
 # done
 
-# ---- master + adam + hypersphere (no orthogonalize, no gains); warmup kept ----
-# edit 1: remove warmup
-for k in 0 1 2 3 4; do
+# ---- master + adam + hypersphere (no orthogonalize, no gains); warmup kept, wiht hs u ----
+for k in 12; do
 	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
 		--eval-every 1000 --eval-iters 50 \
@@ -106,17 +105,17 @@ for k in 0 1 2 3 4; do
 		--fixed-layer-scale $INV_LAYERS \
 		--upscale-embedding $SQRT_MODELDIM \
 		--qk-norm RMSNorm \
-		--wd 0 --decay linear --no-warmup \
+		--wd 0 --decay linear \
+		--warmup-iters 1000 \
 		--untie-embed \
+            --hs-u \
 		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
-		--extra-name exp1-master-adam-nogains-nw \
+		--extra-name expx-master-adam-update \
 		$*
-            # --warmup-iters 1000 \
 done
 
-# ---- master + adam + hypersphere + gains (no orthogonalize); warmup kept ----
-# edit1: remove warmup
-for k in 0 1 2 3 4; do
+# # ---- master + adam + hypersphere + gains (no orthogonalize); warmup kept ----
+for k in 12; do
 	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
 		--eval-every 1000 --eval-iters 50 \
@@ -128,11 +127,12 @@ for k in 0 1 2 3 4; do
 		--fixed-layer-scale $INV_LAYERS \
 		--upscale-embedding $SQRT_MODELDIM \
 		--qk-norm RMSNorm \
-		--wd 0 --decay linear --no-warmup  \
+		--wd 0 --decay linear \
+		--warmup-iters 1000 \
 		--untie-embed \
+            --hs-u \
 		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
-		--extra-name exp1-master-adam-gains-nw \
-            # --warmup-iters 1000 \
+		--extra-name expx-master-adam-gains \
 		$*
 done
 

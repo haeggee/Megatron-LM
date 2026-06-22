@@ -148,13 +148,22 @@ usage () {
 	echo " --hs-embed [<row/col/rowcol/invrowcol/flat>]: hypersphere normalize embeddings (optionally with a different HS mode)"
 	echo " --hs-emb-no-orthogonal: Don't use muon update on embeddings, but keep fixed to the sphere (if --hs-embed is also set, otherwise no effect)"
 	echo " --hs-split-heads: hypersphere normalize q,k,v heads separately"
-	echo " --hs-g <flat/embed/row/col/rowcol>: hypersphere gains mode"
-	echo " --hs-g-output <flat/row/col/rowcol/none>: gains mode override for LM head output layer"
-	echo " --hs-g-embed <flat/row/col/rowcol/none>: gains mode override for embedding input layer"
+	echo " --hs-g <flat/embed/row/col/rowcol/lowrank>: hypersphere gains mode (lowrank = rank-k multiplier 1+A@B)"
+	echo " --hs-g-output <flat/row/col/rowcol/lowrank/none>: gains mode override for LM head output layer"
+	echo " --hs-g-embed <flat/row/col/rowcol/lowrank/none>: gains mode override for embedding input layer"
 	echo " --glr <float>: absolute gains LR (default: follows param group LR)"
+	echo " --gb1 <float>: gains Adam beta1 (default: reuses --b1/--adam-beta1)"
+	echo " --gb2 <float>: gains Adam beta2 (default: reuses --b2/--adam-beta2)"
+	echo " --geps <float>: gains Adam eps (default: reuses --adam-eps)"
+	echo " --gwd <float>: gains weight decay (default: reuses --wd)"
+	echo " --g-no-bc: disable Adam bias correction for the gains optimizer"
+	echo " --gmin <float>: floor the effective gain phi(g) >= this (prevents collapse/sign-flip; 0=off)"
 	echo " --hs-preserve-init: skip init projection; absorb init norms into gains"
 	echo " --split-qkv-gains: separate column gains for Q, K, V"
 	echo " --hs-g-param <direct/offset/softplus/exp>: gain parametrization (phi). direct=g, offset=1+g, softplus=softplus(g), exp=exp(g)."
+	echo " --hs-g-rank <int>: rank k for --hs-g lowrank (default 4)"
+	echo " --hs-g-init-std <float>: init std for lowrank A factor (default (1/k)**0.5)"
+	echo " --hs-g-floor <float>: floor on lowrank multiplier G=1+A@B (default 1e-2; bounds undo p/G, prevents collapse through 0)"
 	echo " --hs-p: project gradient to tangent space"
 	echo " --hs-s: soft hyperball norm clipping."
 	# Validation.
@@ -669,12 +678,30 @@ while [[ $# -gt 0 ]]; do
 			HS_GAINS_MODE_EMBEDDING=$2; shift 2;;
 		--glr)
 			GAINS_LR=$2; shift 2;;
+		--gb1)
+			GAINS_BETA1=$2; shift 2;;
+		--gb2)
+			GAINS_BETA2=$2; shift 2;;
+		--geps)
+			GAINS_EPS=$2; shift 2;;
+		--gwd)
+			GAINS_WEIGHT_DECAY=$2; shift 2;;
+		--g-no-bc)
+			GAINS_NO_BIAS_CORRECTION=true; shift;;
+		--gmin)
+			GAINS_MIN=$2; shift 2;;
 		--hs-preserve-init)
 			HS_PRESERVE_INIT=true; shift;;
 		--split-qkv-gains)
 			SPLIT_QKV_GAINS=true; shift;;
 		--hs-g-param)
 			HS_GAINS_PARAM=$2; shift 2;;
+		--hs-g-rank)
+			GAINS_RANK=$2; shift 2;;
+		--hs-g-init-std)
+			GAINS_LOWRANK_INIT_STD=$2; shift 2;;
+		--hs-g-floor)
+			GAINS_LOWRANK_MIN=$2; shift 2;;
 		--hs-p)
 			HS_PROJECT=true; shift;;
 		--hs-s)
@@ -903,6 +930,30 @@ if [[ $HYPERBALL != false ]]; then
 			SUFFIX=${SUFFIX}_glr$(printf "%.1e" $GAINS_LR)
 			OPT_ARGS+=(--gains-lr $GAINS_LR)
 		fi
+		if [[ ! -z "${GAINS_BETA1+xxx}" ]]; then
+			SUFFIX=${SUFFIX}_gb1$GAINS_BETA1
+			OPT_ARGS+=(--gains-beta1 $GAINS_BETA1)
+		fi
+		if [[ ! -z "${GAINS_BETA2+xxx}" ]]; then
+			SUFFIX=${SUFFIX}_gb2$GAINS_BETA2
+			OPT_ARGS+=(--gains-beta2 $GAINS_BETA2)
+		fi
+		if [[ ! -z "${GAINS_EPS+xxx}" ]]; then
+			SUFFIX=${SUFFIX}_geps$(printf "%.0e" $GAINS_EPS)
+			OPT_ARGS+=(--gains-eps $GAINS_EPS)
+		fi
+		if [[ ! -z "${GAINS_WEIGHT_DECAY+xxx}" ]]; then
+			SUFFIX=${SUFFIX}_gwd$GAINS_WEIGHT_DECAY
+			OPT_ARGS+=(--gains-weight-decay $GAINS_WEIGHT_DECAY)
+		fi
+		if [[ $GAINS_NO_BIAS_CORRECTION = true ]]; then
+			SUFFIX=${SUFFIX}_gnbc
+			OPT_ARGS+=(--no-gains-bias-correction)
+		fi
+		if [[ ! -z "${GAINS_MIN+xxx}" ]]; then
+			SUFFIX=${SUFFIX}_gmin$(printf "%.0e" $GAINS_MIN)
+			OPT_ARGS+=(--gains-min $GAINS_MIN)
+		fi
 		if [[ ! -z "${HS_GAINS_PARAM+xxx}" ]] && [[ $HS_GAINS_PARAM != direct ]]; then
 			if [[ $HS_GAINS_PARAM = softplus ]]; then
 				SUFFIX=${SUFFIX}_gpsp
@@ -912,6 +963,18 @@ if [[ $HYPERBALL != false ]]; then
 				SUFFIX=${SUFFIX}_gp$HS_GAINS_PARAM
 			fi
 			OPT_ARGS+=(--gain-parametrization $HS_GAINS_PARAM)
+		fi
+		if [[ ! -z "${GAINS_RANK+xxx}" ]]; then
+			SUFFIX=${SUFFIX}_grk$GAINS_RANK
+			OPT_ARGS+=(--gains-rank $GAINS_RANK)
+		fi
+		if [[ ! -z "${GAINS_LOWRANK_INIT_STD+xxx}" ]]; then
+			SUFFIX=${SUFFIX}_gis$GAINS_LOWRANK_INIT_STD
+			OPT_ARGS+=(--gains-lowrank-init-std $GAINS_LOWRANK_INIT_STD)
+		fi
+		if [[ ! -z "${GAINS_LOWRANK_MIN+xxx}" ]]; then
+			SUFFIX=${SUFFIX}_gfl$(printf "%.0e" $GAINS_LOWRANK_MIN)
+			OPT_ARGS+=(--gains-lowrank-min $GAINS_LOWRANK_MIN)
 		fi
 		if [[ $HS_PRESERVE_INIT = true ]]; then
 			SUFFIX=${SUFFIX}_pi
@@ -1211,7 +1274,7 @@ fi
 
 # In order to make the name shorter, we will alias all the suffixes that correspond to
 # ngpt architecture to just show ngpt.
-NGPT_SUBSTRING=-L2Norm-fz-nPre-nFin-pst-ppst-usmr-ss-lsS-qklsS-mlplsG-lgsls
+NGPT_SUBSTRING="-L2Norm-fz-qkL2-nPre-nFin-ppst-usmr-ss-ls*-qklsS-mlplsG-lg1S"
 SUFFIX="${SUFFIX/$NGPT_SUBSTRING/-ngpt}"
 
 SUFFIX=$SUFFIX$EXTRA_NAME

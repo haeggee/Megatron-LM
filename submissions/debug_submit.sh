@@ -144,7 +144,14 @@ usage () {
 	echo " --hs-g-output <flat/row/col/rowcol/none>: gains mode override for LM head output layer"
 	echo " --hs-g-embed <flat/row/col/rowcol/none>: gains mode override for embedding input layer"
 	echo " --split-qkv-gains: separate column gains for Q, K, V"
-	echo " --hs-g-param <direct/offset/softplus>: gain parametrization (phi). direct=g, offset=1+g, softplus=softplus(g)."
+	echo " --glr <float>: absolute gains LR (default: follows param group LR)"
+	echo " --gb1 <float>: gains Adam beta1 (default: reuses --b1/--adam-beta1)"
+	echo " --gb2 <float>: gains Adam beta2 (default: reuses --b2/--adam-beta2)"
+	echo " --geps <float>: gains Adam eps (default: reuses --adam-eps)"
+	echo " --gwd <float>: gains weight decay (default: reuses --wd)"
+	echo " --g-no-bc: disable Adam bias correction for the gains optimizer"
+	echo " --gmin <float>: floor the effective gain phi(g) >= this (prevents collapse/sign-flip; 0=off)"
+	echo " --hs-g-param <direct/offset/softplus/exp>: gain parametrization (phi). direct=g, offset=1+g, softplus=softplus(g), exp=exp(g)."
 	echo " --hs-p: project gradient to tangent space"
 	echo " --hs-s: soft hyperball norm clipping."
 	# Validation.
@@ -517,6 +524,20 @@ while [[ $# -gt 0 ]]; do
 			SPLIT_QKV_GAINS=true; shift;;
 		--hs-g-param)
 			HS_GAINS_PARAM=$2; shift 2;;
+		--glr)
+			GAINS_LR=$2; shift 2;;
+		--gb1)
+			GAINS_BETA1=$2; shift 2;;
+		--gb2)
+			GAINS_BETA2=$2; shift 2;;
+		--geps)
+			GAINS_EPS=$2; shift 2;;
+		--gwd)
+			GAINS_WEIGHT_DECAY=$2; shift 2;;
+		--g-no-bc)
+			GAINS_NO_BIAS_CORRECTION=true; shift;;
+		--gmin)
+			GAINS_MIN=$2; shift 2;;
 		--hs-p)
 			HS_PROJECT=true; shift;;
 		--hs-s)
@@ -716,6 +737,34 @@ if [[ $HYPERBALL != false ]]; then
 			SUFFIX=${SUFFIX}_sqg
 			OPT_ARGS+=(--split-qkv-gains)
 		fi
+		if [[ ! -z "${GAINS_LR+xxx}" ]]; then
+			SUFFIX=${SUFFIX}_glr$(printf "%.1e" $GAINS_LR)
+			OPT_ARGS+=(--gains-lr $GAINS_LR)
+		fi
+		if [[ ! -z "${GAINS_BETA1+xxx}" ]]; then
+			SUFFIX=${SUFFIX}_gb1$GAINS_BETA1
+			OPT_ARGS+=(--gains-beta1 $GAINS_BETA1)
+		fi
+		if [[ ! -z "${GAINS_BETA2+xxx}" ]]; then
+			SUFFIX=${SUFFIX}_gb2$GAINS_BETA2
+			OPT_ARGS+=(--gains-beta2 $GAINS_BETA2)
+		fi
+		if [[ ! -z "${GAINS_EPS+xxx}" ]]; then
+			SUFFIX=${SUFFIX}_geps$(printf "%.0e" $GAINS_EPS)
+			OPT_ARGS+=(--gains-eps $GAINS_EPS)
+		fi
+		if [[ ! -z "${GAINS_WEIGHT_DECAY+xxx}" ]]; then
+			SUFFIX=${SUFFIX}_gwd$GAINS_WEIGHT_DECAY
+			OPT_ARGS+=(--gains-weight-decay $GAINS_WEIGHT_DECAY)
+		fi
+		if [[ $GAINS_NO_BIAS_CORRECTION = true ]]; then
+			SUFFIX=${SUFFIX}_gnbc
+			OPT_ARGS+=(--no-gains-bias-correction)
+		fi
+		if [[ ! -z "${GAINS_MIN+xxx}" ]]; then
+			SUFFIX=${SUFFIX}_gmin$(printf "%.0e" $GAINS_MIN)
+			OPT_ARGS+=(--gains-min $GAINS_MIN)
+		fi
 		if [[ ! -z "${HS_GAINS_PARAM+xxx}" ]] && [[ $HS_GAINS_PARAM != direct ]]; then
 			if [[ $HS_GAINS_PARAM = softplus ]]; then
 				SUFFIX=${SUFFIX}_gpsp
@@ -783,23 +832,23 @@ if [[ $NO_LEARNABLE_NORMS = true ]]; then
 	SUFFIX=$SUFFIX-fz
 	ARCH_ARGS+=(--no-learnable-norms)
 fi
-# if [[ ! -z "${QK_NORM+xxx}" ]]; then
-# 	if [[ $QK_NORM = RMSNorm ]]; then
-# 		if [[ $NORMALIZATION != RMSNorm ]]; then
-# 			echo When using qkRMSNorm you must also use --normalization RMSNorm
-# 			exit 1
-# 		fi
-# 		SUFFIX=$SUFFIX-qkRMS
-# 		ARCH_ARGS+=(--qk-layernorm)
-# 		if [[ $QK_FROZEN = true ]]; then
-# 			SUFFIX=${SUFFIX}fz
-# 			ARCH_ARGS+=(--qk-layernorm-frozen)
-# 		fi
-# 	elif [[ $QK_NORM = L2Norm ]]; then
-# 		SUFFIX=$SUFFIX-qkL2
-# 		ARCH_ARGS+=(--qk-l2-norm)
-# 	fi
-# fi
+if [[ ! -z "${QK_NORM+xxx}" ]]; then
+	if [[ $QK_NORM = RMSNorm ]]; then
+		if [[ $NORMALIZATION != RMSNorm ]]; then
+			echo When using qkRMSNorm you must also use --normalization RMSNorm
+			exit 1
+		fi
+		SUFFIX=$SUFFIX-qkRMS
+		ARCH_ARGS+=(--qk-layernorm)
+		if [[ $QK_FROZEN = true ]]; then
+			SUFFIX=${SUFFIX}fz
+			ARCH_ARGS+=(--qk-layernorm-frozen)
+		fi
+	elif [[ $QK_NORM = L2Norm ]]; then
+		SUFFIX=$SUFFIX-qkL2
+		ARCH_ARGS+=(--qk-l2-norm)
+	fi
+fi
 
 if [[ $NO_PRE_NORM = true ]]; then
 	SUFFIX=$SUFFIX-nPre
@@ -1016,10 +1065,10 @@ if [[ -z ${WANDB_NAME+x} ]]; then
 	WANDB_NAME=$EXP_NAME
 fi
 
-if [[ ${#WANDB_NAME} -gt 117 ]]; then
-	>&2 echo "WANDB_NAME is too long (it shouldn't exceed 117 characters): $WANDB_NAME"
-	exit 1
-fi
+# if [[ ${#WANDB_NAME} -gt 117 ]]; then
+# 	>&2 echo "WANDB_NAME is too long (it shouldn't exceed 117 characters): $WANDB_NAME"
+# 	exit 1
+# fi
 
 #= WRAPPING UP: Set up the _ARGS variables that are going to be used in the end =#
 

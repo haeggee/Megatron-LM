@@ -252,15 +252,17 @@ class OptimizerConfig:
     hypersphere_mode: Optional[Literal["row", "col", "rowcol", "flat"]] = None
     """When specified, enables hypersphere constraint of the parameters, either row-wise, column-wise, row+column-wise or of the flattened vector."""
 
-    hypersphere_gains_mode: Optional[Literal["row", "col", "rowcol", "flat", "embed"]] = None
-    """When specified, enables learnable gains for matrices :)."""
+    hypersphere_gains_mode: Optional[Literal["row", "col", "rowcol", "flat", "embed", "lowrank"]] = None
+    """When specified, enables learnable gains for matrices :). "lowrank" learns a rank-k
+    multiplier G = 1 + A@B (A:[m,k], B:[k,n], k = gains_rank) applied elementwise to the
+    weight — the full-capacity generalisation of the rank-1 "rowcol" mode."""
 
-    hypersphere_gains_mode_output: Optional[Literal["row", "col", "rowcol", "flat", "none"]] = None
+    hypersphere_gains_mode_output: Optional[Literal["row", "col", "rowcol", "flat", "lowrank", "none"]] = None
     """When specified, overrides the gains mode for the final LM head (output layer).
     If None, the output layer uses hypersphere_gains_mode like all other matrices.
     Set to "none" to disable gains on the output layer entirely."""
 
-    hypersphere_gains_mode_embedding: Optional[Literal["row", "col", "rowcol", "flat", "none"]] = None
+    hypersphere_gains_mode_embedding: Optional[Literal["row", "col", "rowcol", "flat", "lowrank", "none"]] = None
     """When specified, overrides the gains mode for the embedding (input) layer.
     If None, the embedding layer uses hypersphere_gains_mode like all other matrices.
     Set to "none" to disable gains on the embedding layer entirely."""
@@ -271,13 +273,50 @@ class OptimizerConfig:
     gains_lr: Optional[float] = None
     """Absolute learning rate for gain parameters. When None, gains follow the param group LR (i.e. the same schedule as the weights they scale)."""
 
-    gain_parametrization: Literal["direct", "offset", "softplus"] = "direct"
+    gains_beta1: Optional[float] = None
+    """Adam beta1 for the gain optimizer. When None, reuses adam_beta1."""
+
+    gains_beta2: Optional[float] = None
+    """Adam beta2 for the gain optimizer. When None, reuses adam_beta2."""
+
+    gains_eps: Optional[float] = None
+    """Adam eps for the gain optimizer. When None, reuses adam_eps."""
+
+    gains_weight_decay: Optional[float] = None
+    """Weight decay for gain parameters. When None, reuses weight_decay."""
+
+    gains_bias_correction: bool = True
+    """Whether to apply Adam bias correction (the 1-beta^t terms) in the gain optimizer."""
+
+    gains_min: float = 0.0
+    """Floor on the effective multiplier phi(g). After each gain step the raw gain is clamped to
+    g >= phi^-1(gains_min), keeping phi(g) >= gains_min. Prevents gains collapsing toward/through
+    zero (sign flips for direct), and keeps the undo division p/phi(g) bounded in every mode.
+    0 disables. Parametrization-agnostic: e.g. gains_min=1e-5 maps to raw clamp 1e-5 (direct),
+    ~-11.5 (softplus/exp), ~-1.0 (offset)."""
+
+    gain_parametrization: Literal["direct", "offset", "softplus", "exp"] = "direct"
     """How the learned gain `g` maps to the effective multiplier `phi(g)` applied to W_bare.
     - "direct":   phi(g) = g           (current behaviour; identity-init = 1.0)
     - "offset":   phi(g) = 1 + g       (identity-init = 0.0; wd attractor is identity)
     - "softplus": phi(g) = softplus(g) (identity-init = ln(e-1); phi'(g) = sigmoid(g) caps
                                        per-step change in phi(g) to ~lr, mitigating sudden
                                        grad-norm spikes from heavy-tailed gain gradients)."""
+
+    gains_rank: int = 4
+    """Rank k of the "lowrank" gains multiplier G = 1 + A@B. Capped at min(m, n) per param.
+    k=1 recovers a single rank-1 correction (cf. the multiplicative rowcol mode)."""
+
+    gains_lowrank_init_std: Optional[float] = None
+    """Init std for the random A factor of the lowrank gains (B is initialised to zero, so the
+    multiplier is exactly identity at init). When None, defaults to (1/k)**0.5."""
+
+    gains_lowrank_min: float = 1e-2
+    """Floor on the effective lowrank multiplier G = 1 + A@B (applied as clamp_min on G, used
+    identically on undo and re-apply so the round-trip stays exact). The additive A@B correction
+    is unbounded and can drift an entry of G toward/past zero (especially with weight_decay=0),
+    which would blow up the undo division p/G and trigger a small-G -> large-gain runaway. The
+    floor bounds the undo at 1/gains_lowrank_min. <= 0 falls back to a tiny eps (1e-8)."""
 
     hypersphere_preserve_init: bool = False
     """When True, skip the init-time projection onto the hypersphere. With gains, the init
