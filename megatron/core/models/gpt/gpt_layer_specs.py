@@ -287,7 +287,11 @@ def get_gpt_layer_with_transformer_engine_spec(
             raise NotImplementedError(f"Norm {config.normalization} nyi")
 
         # Prenorm logic: slightly more convoluted due to the TE fusion.
-        if config.pre_norm and config.learnable_norms and config.normalization in {"RMSNorm", "LayerNorm"}:
+        if config.pre_norm and config.pre_norm_no_gain:
+            input_layernorm = RMSNormNoGain
+            pre_mlp_layernorm = RMSNormNoGain
+            linear_qkv = backend.column_parallel_linear()
+        elif config.pre_norm and config.learnable_norms and config.normalization in {"RMSNorm", "LayerNorm"}:
             # prenorms can be identity as we use TELayerNormColumnParallelLinear fusion instead.
             input_layernorm = IdentityOp
             pre_mlp_layernorm = IdentityOp
@@ -563,7 +567,7 @@ def get_mlp_module_spec_for_backend(
         # Dense MLP w/ or w/o TE modules.
         module = TEFusedMLP if use_te_op_fuser else MLP
 
-        if config.pre_norm and config.learnable_norms and config.normalization in {"RMSNorm", "LayerNorm"} and backend.fuse_layernorm_and_linear():
+        if config.pre_norm and not config.pre_norm_no_gain and config.learnable_norms and config.normalization in {"RMSNorm", "LayerNorm"} and backend.fuse_layernorm_and_linear():
             linear_fc1 = backend.column_parallel_layer_norm_linear()
             assert linear_fc1 is not None
         else:

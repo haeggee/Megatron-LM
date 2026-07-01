@@ -59,6 +59,9 @@ class MasterOptimizer(torch.optim.Optimizer):
         hypersphere_project: bool = False,
         hypersphere_soft: bool = False,
 
+        # Lion.
+        use_lion: bool = False,  # Use Lion-style sign-momentum updates (no second moment).
+
         # Muon.
         use_orthogonal_updates: bool = False,  # Enable or disable muon entirely.
         poor_mans_ortho: bool = False,  # Use _normalize instead of _orthogonalize in the Muon branch.
@@ -77,8 +80,13 @@ class MasterOptimizer(torch.optim.Optimizer):
         extra_scale_factor: float = 1.0,
         pg_collection: Optional[ProcessGroupCollection] = None,
         mode: Literal["blockwise", "duplicated", "distributed"] = "duplicated",
+        preserve_init: bool = False,
     ):
 
+        assert not (use_lion and use_orthogonal_updates), \
+            "use_lion and use_orthogonal_updates are mutually exclusive."
+
+        self.preserve_init = preserve_init
         self.fp32_matmul_prec = fp32_matmul_prec
         self.use_nesterov = use_nesterov
         self.weight_decay_method = weight_decay_method
@@ -127,13 +135,14 @@ class MasterOptimizer(torch.optim.Optimizer):
             alpha_warmup=alpha_warmup,
             eps=eps,
 
+            use_lion=use_lion,
             use_orthogonal_updates=use_orthogonal_updates,
         )
         super().__init__(params, default_args_dict)
 
         # Normalize parameters at initialization so the first forward pass
         # uses weights that are already on the hypersphere.
-        if self.hypersphere_mode is not None:
+        if self.hypersphere_mode is not None and not self.preserve_init:
             with torch.no_grad():
                 for group in self.param_groups:
                     for p in group["params"]:
@@ -158,9 +167,6 @@ class MasterOptimizer(torch.optim.Optimizer):
 
         for group in self.param_groups:
             group["step"] += 1
-
-            if "momentum_beta" not in group:  # To be able to use old checkpoints.
-                group["momentum_beta"] = group["beta1"]
             for p in group["params"]:
                 if p.grad is not None:
                     self._param_step(p, group)
@@ -173,10 +179,11 @@ class MasterOptimizer(torch.optim.Optimizer):
         state = self.state[p]
 
         # Initialization.
-        if len(state) == 0:
+        if "exp_avg" not in state:  # row_gain could be already in state if we are using learnable gains.
             state["exp_avg"] = torch.zeros_like(grad)
             # TODO: Make it such that we can use ademamix-like updates with muon.
-            if not group["use_orthogonal_updates"]: 
+            # Lion only needs the first-moment buffer (no second moment, no slow EMA).
+            if not group["use_orthogonal_updates"] and not group["use_lion"]:
                 if group["beta2"] != 0: # Enables g^2 EMA as in adam & ademamix.
                     state["exp_avg_sq"] = torch.zeros_like(grad)
                 if group["alpha"] != 0:  # Enables slow momentum as in ademamix.
@@ -198,7 +205,7 @@ class MasterOptimizer(torch.optim.Optimizer):
             assert emerging_optimizers is not None
 
             # Weight deacy.
-            self._apply_weight_decay_inplace(p, p.grad, group)
+            self._apply_weight_decay_inplace(p, group)
 
             # Update momentum buffer with EMA of gradient
             exp_avg.lerp_(grad, 1 - momentum_beta)
@@ -217,6 +224,19 @@ class MasterOptimizer(torch.optim.Optimizer):
                 with emerging_optimizers.utils.fp32_matmul_precision(self.fp32_matmul_prec):
                     group_kwargs = {k: v for k, v in group.items() if k != "params"}
                     update = self.orthogonalize(p, grad, **group_kwargs, is_qkv=is_qkv)
+
+        elif group["use_lion"]:  # Lion branch.
+            beta2 = group["beta2"]
+
+            # Update direction is the sign of an interpolation between the (old)
+            # momentum and the current gradient. mul() (not mul_) keeps the buffer
+            # intact so we can update it separately below.
+            update = exp_avg.mul(beta1).add_(grad, alpha=1 - beta1).sign_()
+
+            # Momentum EMA uses beta2 (decoupled from the interpolation coefficient).
+            exp_avg.mul_(beta2).add_(grad, alpha=1 - beta2)
+
+            self._apply_weight_decay_inplace(p, group)
 
         else: # AdamW & Ademamix branch.
             beta2 = group["beta2"]
@@ -268,7 +288,7 @@ class MasterOptimizer(torch.optim.Optimizer):
                     update = (exp_avg.div(bias_correction1) + alpha * exp_avg_slow) / denom  # TODO Original equation.
                     #update = exp_avg.div(bias_correction1).add_(exp_avg_slow, alpha=alpha).div_(denom)  # TODO is this equivalent?
 
-            self._apply_weight_decay_inplace(p, update, group)
+            self._apply_weight_decay_inplace(p, group)
 
         # Optionally, normalize update.
         apply_update_norm = self.hypersphere_update and (self.hypersphere_update_embeddings or not is_embedding)
@@ -286,7 +306,7 @@ class MasterOptimizer(torch.optim.Optimizer):
         if self.hypersphere_mode is not None:
             self._normalize(p, p, is_qkv=is_qkv, is_out_proj=is_out_proj, is_embedding=is_embedding)
 
-    def _apply_weight_decay_inplace(self, p, update, group):
+    def _apply_weight_decay_inplace(self, p, group):
         weight_decay = group["weight_decay"]
         lr = group["lr"]
         if weight_decay != 0:
@@ -297,7 +317,6 @@ class MasterOptimizer(torch.optim.Optimizer):
                 p.add_(p, alpha=-weight_decay)
             else:
                 raise ValueError(f"Unknown weight decode method {weight_decay_method}")
-
 
     def orthogonalize(self, p: torch.Tensor, grad: torch.Tensor, ignore_scale: bool = False,
                       is_qkv: bool = False, **kwargs) -> torch.Tensor:
@@ -392,7 +411,7 @@ class MasterOptimizer(torch.optim.Optimizer):
             return
         if is_qkv and self.split_qkv:
             qs, ks, vs = split_qkv(x, self.qkv_split_shapes)
-            if self.split_qkv_heads and mode in {"col", "rowcol", "invrowcol", "flat", "rowcol", "equi"}:
+            if self.split_qkv_heads and mode in {"col", "rowcol", "invrowcol", "flat", "equi"}:
                 # When splitting heads using torch.split, we only get views of the
                 # original tensor, meaning the qs tensor gets modified in-place,
                 # no need to copy the updated q to qs after.
@@ -475,7 +494,7 @@ class MasterOptimizer(torch.optim.Optimizer):
             return
         if is_qkv and self.split_qkv and mode not in {"row", "embed"}:
             p_qs, p_ks, p_vs = split_qkv(p, self.qkv_split_shapes)
-            g_qs, g_ks, g_vs = split_qkv(g.copy(), self.qkv_split_shapes)
+            g_qs, g_ks, g_vs = split_qkv(g.clone(), self.qkv_split_shapes)
             if self.split_qkv_heads:
                 for p_q, g_q in zip(split_heads(p_qs, self.qkv_dim), split_heads(g_qs, self.qkv_dim)):
                     g_q.copy_(self._project(p_q, g_q))
@@ -514,6 +533,544 @@ class MasterOptimizer(torch.optim.Optimizer):
         return g - (dots / self.hypersphere_radius**2) * p
 
 
+class GainsMasterOptimizer(MasterOptimizer):
+    """MasterOptimizer with learnable per-parameter gains (row, col, or flat scaling).
+
+    The gains are fused into the forward/backward pass: before each param step the
+    gains are undone, the base optimizer update is computed on the bare normalized
+    weights, and afterwards the (potentially updated) gains are re-applied.
+
+    Gain optimizer state (1st/2nd moments) is stored as plain tensors in
+    self.state[p] alongside the regular optimizer state, so it ships through
+    torch.optim.Optimizer.{state_dict,load_state_dict} without any override.
+    Requires --ckpt-format torch.
+    """
+
+    _GAIN_KEYS = ("flat_gain", "row_gain", "col_gain", "q_col_gain", "k_col_gain", "v_col_gain",
+                  "lowrank_a", "lowrank_b")
+
+    def __init__(
+        self,
+        params,
+        hypersphere_gains_mode: Optional[Literal["flat", "embed", "row", "col", "rowcol", "lowrank"]] = None,
+        hypersphere_gains_mode_output: Optional[Literal["flat", "row", "col", "rowcol", "lowrank", "none"]] = None,
+        hypersphere_gains_mode_embedding: Optional[Literal["flat", "row", "col", "rowcol", "lowrank", "none"]] = None,
+        split_qkv_gains: bool = False,
+        gains_lr: Optional[float] = None,
+        gains_betas: tuple[float, float] = (0.9, 0.999),
+        gains_eps: float = 1e-8,
+        gains_weight_decay: float = 0.0,
+        gains_bias_correction: bool = True,
+        gains_min: float = 0.0,
+        gains_no_clamp: bool = False,
+        gain_parametrization: Literal["direct", "offset", "softplus", "exp"] = "direct",
+        gains_rank: int = 4,
+        gains_lowrank_init_std: Optional[float] = None,
+        gains_lowrank_min: float = 1e-2,
+        scale_min_lr: bool = False,
+        **kwargs,
+    ):
+        assert hypersphere_gains_mode is not None
+        self.scale_min_lr = scale_min_lr
+        self.gains_rank = gains_rank
+        self.gains_lowrank_init_std = gains_lowrank_init_std
+        self.gains_lowrank_min = gains_lowrank_min
+        # Deterministic per-parameter seed for the random A factor of lowrank
+        # gains, so DP replicas initialise identically (B starts at zero).
+        self._lowrank_seed_base = 1234
+        self._lowrank_counter = 0
+        self.hypersphere_gains_mode = hypersphere_gains_mode
+        self.hypersphere_gains_mode_output = hypersphere_gains_mode_output
+        self.hypersphere_gains_mode_embedding = hypersphere_gains_mode_embedding
+        self.split_qkv_gains = split_qkv_gains
+        self.gains_lr = gains_lr
+        self.gains_betas = gains_betas
+        self.gains_eps = gains_eps
+        self.gains_weight_decay = gains_weight_decay
+        self.gains_bias_correction = gains_bias_correction
+        self.gains_min = gains_min
+        self.gains_no_clamp = gains_no_clamp
+        self.gain_parametrization = gain_parametrization
+        # Precompute the raw-gain clamp from the desired floor on phi(g) (monotonic phi).
+        if gains_min > 0:
+            self._gain_clamp_min = float(self._phi_inv(torch.tensor(float(gains_min))).item())
+        else:
+            self._gain_clamp_min = None
+        super().__init__(params, **kwargs)
+        self._setup_gains()
+
+    def _undo_divisor(self, phi: torch.Tensor) -> torch.Tensor:
+        """Divisor used to undo a gain in _preprocess_gains.
+
+        By default phi(g) is clamped to a positive floor (1e-8) before dividing
+        p by it. That clamp is unsafe when phi(g) can go negative or sub-eps
+        (e.g. direct/offset parametrization with gains_min=0): the undo would
+        divide by a clamped positive value while _apply_gains re-multiplies by
+        the true (possibly negative) phi(g), so the round-trip no longer
+        inverts and p drifts. With gains_no_clamp the true phi(g) is used, so
+        the undo division exactly inverts the re-apply multiplication.
+        """
+        if self.gains_no_clamp:
+            return phi
+        return phi.clamp_min(1e-8)
+
+    def _phi(self, g: torch.Tensor) -> torch.Tensor:
+        """Forward map from raw gain g to effective multiplier phi(g)."""
+        mode = self.gain_parametrization
+        if mode == "direct":
+            return g
+        if mode == "offset":
+            return 1.0 + g
+        if mode == "softplus":
+            return torch.nn.functional.softplus(g)
+        if mode == "exp":
+            return torch.exp(g)
+        raise ValueError(f"Unknown gain_parametrization {mode}")
+
+    def _phi_prime(self, g: torch.Tensor) -> torch.Tensor | float:
+        """Derivative phi'(g). Returns a scalar 1.0 for the linear modes to skip a multiply."""
+        mode = self.gain_parametrization
+        if mode in ("direct", "offset"):
+            return 1.0
+        if mode == "softplus":
+            return torch.sigmoid(g)
+        if mode == "exp":
+            return torch.exp(g)
+        raise ValueError(f"Unknown gain_parametrization {mode}")
+
+    def _phi_inv(self, x: torch.Tensor) -> torch.Tensor:
+        """Inverse map: given a target effective multiplier x>0, return g s.t. phi(g) = x."""
+        mode = self.gain_parametrization
+        if mode == "direct":
+            return x
+        if mode == "offset":
+            return x - 1.0
+        if mode == "softplus":
+            # Stable softplus_inv for x > 0: g = x + log1p(-exp(-x)).
+            # As x -> inf, g -> x. As x -> 0+, g -> -inf.
+            return x + torch.log1p(-torch.exp(-x))
+        if mode == "exp":
+            # phi(g) = exp(g) > 0; g = log(x) for target x > 0.
+            return torch.log(x)
+        raise ValueError(f"Unknown gain_parametrization {mode}")
+
+    @torch.no_grad()  # type: ignore[misc]
+    @override
+    def step(self, closure: Callable[[], float] | None = None) -> float | None:
+        if closure is None:
+            loss = None
+        else:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            group["step"] += 1
+            for p in group["params"]:
+                if p.grad is not None:
+                    gain_grads = self._preprocess_gains(p)
+                    self._param_step(p, group)
+                    self._gains_step(p, group, gain_grads)
+                    self._apply_gains(p)
+
+        return loss
+
+    @torch.no_grad()
+    def _preprocess_gains(self, p: torch.nn.Parameter) -> dict:
+        """Undo gains on p, compute ∂L/∂gain, rescale p.grad. Returns gain gradient dict."""
+        state = self.state[p]
+
+        # Dispatch to split-QKV variant if applicable.
+        if self.split_qkv_gains and self.is_qkv_fn(p) and "q_col_gain" in state:
+            return self._preprocess_split_qkv_gains(p)
+
+        # Dispatch to the rank-k variant if applicable.
+        if "lowrank_a" in state:
+            return self._preprocess_lowrank_gains(p)
+
+        flat = state.get("flat_gain")
+        row = state.get("row_gain")
+        col = state.get("col_gain")
+
+        if flat is None and row is None and col is None:
+            return {}
+
+        # Effective multipliers phi(g). Stored values are raw g; multiplication
+        # onto p uses phi(g). Computed once and reused for undo/rescale.
+        flat_phi = self._phi(flat) if flat is not None else None
+        row_phi = self._phi(row) if row is not None else None
+        col_phi = self._phi(col) if col is not None else None
+
+        # Undo gains to recover bare normalized weight.
+        if flat_phi is not None:
+            p.div_(self._undo_divisor(flat_phi))
+        if row_phi is not None:
+            p.div_(self._undo_divisor(row_phi)[:, None])
+        if col_phi is not None:
+            p.div_(self._undo_divisor(col_phi)[None, :])
+
+        # ∂L/∂phi(g) (must be computed before p.grad is rescaled).
+        p_times_pgrad = p * p.grad
+        gain_grads = {}
+        if flat_phi is not None:
+            assert row_phi is None and col_phi is None
+            gain_grads["flat_gain"] = torch.sum(p_times_pgrad)
+        elif row_phi is not None and col_phi is not None:
+            gain_grads["row_gain"] = torch.sum(p_times_pgrad * col_phi[None, :], dim=1)
+            gain_grads["col_gain"] = torch.sum(p_times_pgrad * row_phi[:, None], dim=0)
+        elif row_phi is not None:
+            gain_grads["row_gain"] = torch.sum(p_times_pgrad, dim=1)
+        else:
+            gain_grads["col_gain"] = torch.sum(p_times_pgrad, dim=0)
+
+        # Chain rule: ∂L/∂g = phi'(g) · ∂L/∂phi(g). For direct/offset phi' = 1.
+        if flat is not None:
+            gain_grads["flat_gain"] = gain_grads["flat_gain"] * self._phi_prime(flat)
+        if row is not None:
+            gain_grads["row_gain"] = gain_grads["row_gain"] * self._phi_prime(row)
+        if col is not None:
+            gain_grads["col_gain"] = gain_grads["col_gain"] * self._phi_prime(col)
+
+        # Rescale p.grad so MasterOptimizer sees ∂L/∂(bare p).
+        if flat_phi is not None:
+            p.grad.mul_(flat_phi)
+        if row_phi is not None:
+            p.grad.mul_(row_phi[:, None])
+        if col_phi is not None:
+            p.grad.mul_(col_phi[None, :])
+
+        return gain_grads
+
+    @torch.no_grad()
+    def _preprocess_split_qkv_gains(self, p: torch.nn.Parameter) -> dict:
+        """_preprocess_gains variant for QKV parameters with separate Q/K/V column gains."""
+        state = self.state[p]
+        row = state.get("row_gain")
+        q_col = state["q_col_gain"]
+        k_col = state["k_col_gain"]
+        v_col = state["v_col_gain"]
+        shapes = self.qkv_split_shapes
+
+        # Effective multipliers phi(g) for each stored raw g.
+        row_phi = self._phi(row) if row is not None else None
+        q_col_phi = self._phi(q_col)
+        k_col_phi = self._phi(k_col)
+        v_col_phi = self._phi(v_col)
+
+        # 1. Undo gains on p to recover the bare normalized weight.
+        if row_phi is not None:
+            p.div_(self._undo_divisor(row_phi)[:, None])
+        qs, ks, vs = split_qkv(p, shapes)
+        qs.div_(self._undo_divisor(q_col_phi)[None, :])
+        ks.div_(self._undo_divisor(k_col_phi)[None, :])
+        vs.div_(self._undo_divisor(v_col_phi)[None, :])
+        p.copy_(merge_qkv((qs, ks, vs), p.size(), shapes))
+
+        # 2. Gain gradients w.r.t. phi(g); chain rule by phi'(g) applied below.
+        p_times_pgrad = p * p.grad
+        ptp_q, ptp_k, ptp_v = split_qkv(p_times_pgrad, shapes)
+        gain_grads = {}
+        if row_phi is not None:
+            rq_phi, rk_phi, rv_phi = split_qkv_1d(row_phi, shapes)
+            gain_grads["q_col_gain"] = torch.sum(ptp_q * rq_phi[:, None], dim=0)
+            gain_grads["k_col_gain"] = torch.sum(ptp_k * rk_phi[:, None], dim=0)
+            gain_grads["v_col_gain"] = torch.sum(ptp_v * rv_phi[:, None], dim=0)
+            rg_q = torch.sum(ptp_q * q_col_phi[None, :], dim=1)
+            rg_k = torch.sum(ptp_k * k_col_phi[None, :], dim=1)
+            rg_v = torch.sum(ptp_v * v_col_phi[None, :], dim=1)
+            gain_grads["row_gain"] = merge_qkv_1d((rg_q, rg_k, rg_v), row.shape[0], shapes)
+        else:
+            gain_grads["q_col_gain"] = torch.sum(ptp_q, dim=0)
+            gain_grads["k_col_gain"] = torch.sum(ptp_k, dim=0)
+            gain_grads["v_col_gain"] = torch.sum(ptp_v, dim=0)
+
+        # Chain rule: ∂L/∂g = phi'(g) · ∂L/∂phi(g).
+        if row is not None:
+            gain_grads["row_gain"] = gain_grads["row_gain"] * self._phi_prime(row)
+        gain_grads["q_col_gain"] = gain_grads["q_col_gain"] * self._phi_prime(q_col)
+        gain_grads["k_col_gain"] = gain_grads["k_col_gain"] * self._phi_prime(k_col)
+        gain_grads["v_col_gain"] = gain_grads["v_col_gain"] * self._phi_prime(v_col)
+
+        # 3. Rescale p.grad by gains.
+        if row_phi is not None:
+            p.grad.mul_(row_phi[:, None])
+        gq, gk, gv = split_qkv(p.grad, shapes)
+        gq.mul_(q_col_phi[None, :])
+        gk.mul_(k_col_phi[None, :])
+        gv.mul_(v_col_phi[None, :])
+        p.grad.copy_(merge_qkv((gq, gk, gv), p.grad.size(), shapes))
+
+        return gain_grads
+
+    def _lowrank_multiplier(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+        """Effective rank-k multiplier G = 1 + A@B, floored to stay safely positive.
+
+        The additive correction A@B is unbounded, so an entry of 1+A@B can drift
+        toward or past zero (especially with weight_decay=0, which leaves nothing
+        pulling it back to identity). Flooring at gains_lowrank_min bounds the undo
+        division p/G (preventing blow-up / sign-flip and the small-G -> large-gain
+        runaway), and is applied identically on undo, grad-rescale and re-apply so
+        the round-trip stays exact. It is a projected-gradient safety net in the
+        same spirit as gains_min for phi(g); the gain gradient below is the
+        unclamped d(1+A@B), so it is exact wherever the floor is inactive (the
+        common case, e.g. always at init where G=1).
+        """
+        G = 1.0 + A @ B
+        floor = self.gains_lowrank_min if self.gains_lowrank_min > 0 else 1e-8
+        return G.clamp_min(floor)
+
+    @torch.no_grad()
+    def _preprocess_lowrank_gains(self, p: torch.nn.Parameter) -> dict:
+        """_preprocess_gains variant for the rank-k multiplier G = 1 + A @ B.
+
+        A is [m,k], B is [k,n], so the effective elementwise multiplier on the
+        bare weight is the full-rank-capacity matrix G = 1 + A@B. It is exactly
+        the identity at init (B starts at zero) and reduces, conceptually, to the
+        rank-1 row/col case for k=1. Mirrors the row/col logic: undo G on p,
+        compute dL/dA and dL/dB, then rescale p.grad so MasterOptimizer sees
+        dL/d(bare p).
+
+        gain_parametrization (phi) does NOT apply here: the low-rank correction
+        is inherently additive (1 + A@B), with weight decay on A/B pulling the
+        multiplier back toward identity.
+        """
+        state = self.state[p]
+        A = state["lowrank_a"]            # [m, k]
+        B = state["lowrank_b"]            # [k, n]
+        G = self._lowrank_multiplier(A, B)  # [m, n], floored
+
+        # 1. Undo the (floored) gain to recover the bare weight.
+        p.div_(G)
+
+        # 2. dL/dG = p_bare * dL/dp_full (p now holds p_bare, p.grad still
+        #    dL/dp_full). The +1 constant drops out of dG/dA, dG/dB. Uses the
+        #    unclamped factors A,B; exact wherever the floor is inactive.
+        P = p * p.grad
+        gain_grads = {
+            "lowrank_a": P @ B.t(),  # [m, k]
+            "lowrank_b": A.t() @ P,  # [k, n]
+        }
+
+        # 3. Rescale p.grad so MasterOptimizer sees dL/d(bare p) = G * dL/dp_full.
+        #    Same floored G as the undo, keeping the round-trip consistent.
+        p.grad.mul_(G)
+        return gain_grads
+
+    @torch.no_grad()
+    def _gains_step(self, p, group, gain_grads: dict):
+        """Inline Adam update for all gain tensors belonging to p."""
+        if not gain_grads:
+            return
+        state = self.state[p]
+        step = group["step"]
+        beta1, beta2 = self.gains_betas
+        eps = self.gains_eps
+        wd = self.gains_weight_decay
+
+        if self.gains_lr is None:
+            lr = group["lr"]
+        else:
+            # Decay gains_lr along the group's schedule *shape*, flooring at the
+            # same min_lr as every other group. With absolute min_lr the floor is
+            # the shared min_lr; with relative min_lr (scale_min_lr) the floor
+            # scales proportionally to gains_lr (matching the group's max_lr/min_lr
+            # ratio), reducing to the old pure-scaling behaviour.
+            max_lr = group.get("max_lr", group["lr"])
+            group_min_lr = group.get("min_lr", 0.0)
+            if self.scale_min_lr:
+                floor = (self.gains_lr * group_min_lr / max_lr) if max_lr > 0 else 0.0
+            else:
+                floor = group_min_lr
+            denom = max_lr - group_min_lr
+            decay_frac = ((group["lr"] - group_min_lr) / denom) if denom > 0 else 1.0
+            lr = floor + (self.gains_lr - floor) * decay_frac
+
+        if self.gains_bias_correction:
+            bias_correction1 = 1.0 - beta1 ** step
+            bias_correction2 = 1.0 - beta2 ** step
+        else:
+            bias_correction1 = 1.0
+            bias_correction2 = 1.0
+
+        for name, grad in gain_grads.items():
+            gain = state[name]
+            m = state[f"{name}_m"]
+            v = state[f"{name}_v"]
+            if wd != 0.0:
+                gain.mul_(1.0 - lr * wd)
+            m.mul_(beta1).add_(grad, alpha=1 - beta1)
+            v.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+            denom = (v.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+            gain.addcdiv_(m, denom, value=-lr / bias_correction1)
+            # Floor the effective multiplier phi(g) >= gains_min (projected-gradient clamp).
+            # Not meaningful for the lowrank factors, whose product (not the raw
+            # entries) forms the multiplier.
+            if self._gain_clamp_min is not None and name not in ("lowrank_a", "lowrank_b"):
+                gain.clamp_(min=self._gain_clamp_min)
+
+
+    @torch.no_grad()
+    def _apply_gains(self, p):
+        state = self.state[p]
+        A = state.get("lowrank_a")
+        if A is not None:
+            B = state["lowrank_b"]
+            p.mul_(self._lowrank_multiplier(A, B))
+            return
+        q_col = state.get("q_col_gain")
+        if q_col is not None:
+            row = state.get("row_gain")
+            k_col = state["k_col_gain"]
+            v_col = state["v_col_gain"]
+            if row is not None:
+                p.mul_(self._phi(row)[:, None])
+            qs, ks, vs = split_qkv(p, self.qkv_split_shapes)
+            qs.mul_(self._phi(q_col)[None, :])
+            ks.mul_(self._phi(k_col)[None, :])
+            vs.mul_(self._phi(v_col)[None, :])
+            p.copy_(merge_qkv((qs, ks, vs), p.size(), self.qkv_split_shapes))
+            return
+        flat = state.get("flat_gain")
+        row = state.get("row_gain")
+        col = state.get("col_gain")
+        if flat is not None:
+            p.mul_(self._phi(flat))
+        if row is not None:
+            p.mul_(self._phi(row)[:, None])
+        if col is not None:
+            p.mul_(self._phi(col)[None, :])
+
+    def _resolve_gains_mode(self, p):
+        """Return the effective gains mode for a parameter, respecting per-layer overrides."""
+        is_output = getattr(p, "is_output_parameter", False)
+        is_embedding = getattr(p, "is_embedding_parameter", False)
+        if is_output and self.hypersphere_gains_mode_output is not None:
+            return self.hypersphere_gains_mode_output
+        if is_embedding and self.hypersphere_gains_mode_embedding is not None:
+            return self.hypersphere_gains_mode_embedding
+        return self.hypersphere_gains_mode
+
+    @torch.no_grad()
+    def _setup_gains(self):
+        """Initialize gain tensors and their Adam m/v buffers in self.state[p].
+
+        Only creates missing entries (idempotent).
+
+        When self.preserve_init is True, new gain tensors are initialised to the
+        current parameter norms instead of ones. p is NOT modified — the forward
+        pass continues to see the original init weights. At the first optimizer
+        step _preprocess_gains divides p by the gains, yielding a bare weight
+        that is already approximately on the hypersphere.
+
+        For rowcol: row norms are absorbed first; col norms are then computed from
+        the (virtual) row-normalised p, matching the sequential undo in _preprocess_gains.
+        """
+        eps = self.hypersphere_eps
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.ndim < 2:
+                    continue
+                gains_mode = self._resolve_gains_mode(p)
+                if gains_mode is None or gains_mode == "none":
+                    continue
+                is_out_proj = getattr(p, "is_out_proj", False)
+                is_qkv = self.is_qkv_fn(p)
+                state = self.state[p]
+
+                wants_lowrank = (gains_mode == "lowrank")
+                wants_row = (not wants_lowrank) and (("row" in gains_mode) or (gains_mode == "embed" and not is_out_proj))
+                wants_col = (not wants_lowrank) and (("col" in gains_mode) or (gains_mode == "embed" and is_out_proj))
+                wants_flat = (gains_mode == "flat")
+
+                if wants_lowrank:
+                    # Rank-k multiplier G = 1 + A@B (A:[m,k], B:[k,n]). Identity at
+                    # init: B is zero, A is random (a fixed per-param seed keeps DP
+                    # replicas in sync). The random A breaks the symmetry between the
+                    # k components so the factorisation does not collapse to rank 1;
+                    # B grows from its (nonzero) gradient on the first step.
+                    # preserve_init is a no-op here — a rank-k correction cannot
+                    # absorb arbitrary per-element init norms, so we leave G = I.
+                    m, n = p.size(0), p.size(1)
+                    k = min(self.gains_rank, m, n)
+                    if "lowrank_a" not in state:
+                        std = self.gains_lowrank_init_std
+                        if std is None:
+                            std = (1.0 / k) ** 0.5
+                        gen = torch.Generator(device=p.device)
+                        gen.manual_seed(self._lowrank_seed_base + self._lowrank_counter)
+                        self._lowrank_counter += 1
+                        state["lowrank_a"] = torch.randn(
+                            m, k, dtype=torch.float32, device=p.device, generator=gen
+                        ) * std
+                        state["lowrank_b"] = torch.zeros(k, n, dtype=torch.float32, device=p.device)
+                    for key in ("lowrank_a", "lowrank_b"):
+                        if f"{key}_m" not in state:
+                            state[f"{key}_m"] = torch.zeros_like(state[key])
+                        if f"{key}_v" not in state:
+                            state[f"{key}_v"] = torch.zeros_like(state[key])
+                    continue
+
+                # All gain state stores raw `g`; the effective multiplier is phi(g).
+                # Initialisation maps the desired phi(g_init) (== 1.0, or the param norm
+                # for preserve_init) through phi^-1 to get the raw value to store.
+                if wants_row:
+                    if "row_gain" not in state:
+                        if self.preserve_init:
+                            target = p.detach().float().norm(dim=1).clamp_min(eps)
+                        else:
+                            target = torch.ones(p.size(0), dtype=torch.float32, device=p.device)
+                        state["row_gain"] = self._phi_inv(target)
+                    if "row_gain_m" not in state:
+                        state["row_gain_m"] = torch.zeros_like(state["row_gain"])
+                    if "row_gain_v" not in state:
+                        state["row_gain_v"] = torch.zeros_like(state["row_gain"])
+
+                if wants_col:
+                    if is_qkv and self.split_qkv_gains:
+                        if self.preserve_init and not wants_row:
+                            p_f32 = p.detach().float()
+                            qs, ks, vs = split_qkv(p_f32, self.qkv_split_shapes)
+                            slice_norms = {
+                                "q": qs.norm(dim=0).clamp_min(eps),
+                                "k": ks.norm(dim=0).clamp_min(eps),
+                                "v": vs.norm(dim=0).clamp_min(eps),
+                            }
+                        for prefix in ("q", "k", "v"):
+                            key = f"{prefix}_col_gain"
+                            if key not in state:
+                                if self.preserve_init and not wants_row:
+                                    target = slice_norms[prefix]
+                                else:
+                                    target = torch.ones(p.size(1), dtype=torch.float32, device=p.device)
+                                state[key] = self._phi_inv(target)
+                            if f"{key}_m" not in state:
+                                state[f"{key}_m"] = torch.zeros_like(state[key])
+                            if f"{key}_v" not in state:
+                                state[f"{key}_v"] = torch.zeros_like(state[key])
+                    else:
+                        if "col_gain" not in state:
+                            if self.preserve_init and not wants_row:
+                                target = p.detach().float().norm(dim=0).clamp_min(eps)
+                            else:
+                                target = torch.ones(p.size(1), dtype=torch.float32, device=p.device)
+                            state["col_gain"] = self._phi_inv(target)
+                        if "col_gain_m" not in state:
+                            state["col_gain_m"] = torch.zeros_like(state["col_gain"])
+                        if "col_gain_v" not in state:
+                            state["col_gain_v"] = torch.zeros_like(state["col_gain"])
+
+                if wants_flat:
+                    if "flat_gain" not in state:
+                        if self.preserve_init:
+                            shape_max = max(p.size(-2), p.size(-1))
+                            target = (p.detach().float().norm().clamp_min(eps) / shape_max ** 0.5).reshape(())
+                        else:
+                            target = torch.ones((), dtype=torch.float32, device=p.device)
+                        state["flat_gain"] = self._phi_inv(target)
+                    if "flat_gain_m" not in state:
+                        state["flat_gain_m"] = torch.zeros_like(state["flat_gain"])
+                    if "flat_gain_v" not in state:
+                        state["flat_gain_v"] = torch.zeros_like(state["flat_gain"])
+
 def split_qkv(x, shapes: tuple[int, int, int]) -> list[torch.Tensor]:
     # split grouped attention parameters (e.g., QKV, GQA, etc.)
     shape = x.shape
@@ -537,8 +1094,19 @@ def merge_qkv(qkv, xshape: tuple[int, int], shapes: tuple[int, int, int]) -> tor
     return torch.cat(qkv, dim=1).view(xshape)
 
 
+def split_qkv_1d(x: torch.Tensor, shapes: tuple[int, int, int]) -> list[torch.Tensor]:
+    """Split a 1D tensor (e.g. row_gain) along the same QKV boundaries as split_qkv."""
+    return [g.squeeze(-1) for g in split_qkv(x.unsqueeze(-1), shapes)]
+
+
+def merge_qkv_1d(parts: tuple[torch.Tensor, ...], full_len: int, shapes: tuple[int, int, int]) -> torch.Tensor:
+    """Inverse of split_qkv_1d."""
+    parts_2d = [g.unsqueeze(-1) for g in parts]
+    return merge_qkv(parts_2d, (full_len, 1), shapes).squeeze(-1)
+
+
 def merge_heads(xs) -> torch.Tensor:
-    return torch.cat(xs, dim=1)
+    return torch.cat(xs, dim=0)
 
 
 @torch.no_grad()
@@ -590,7 +1158,7 @@ def get_megatron_master_optimizer(
             Defaults to False.
     """
     # Muon currently use adam config. setting str here to call regular get for adam creation
-    # side effect is muon optimizer will have wrong name, i.e. config.optimizer == 'adam'
+    original_optimizer_name = config.optimizer
     config.optimizer = 'adam'
 
     # Dist-opt is not supported due to strong coupling with how DDP init grad buffer
@@ -615,9 +1183,10 @@ def get_megatron_master_optimizer(
     def master_init_state_fn(opt, config=None):
         for group in opt.param_groups:
             for p in group['params']:
-                if len(opt.state[p]) == 0:
+                if "exp_avg" not in opt.state[p]:
                     opt.state[p]["exp_avg"] = torch.zeros_like(p.data)
-                    if not group["use_orthogonal_updates"]:  # Enables g^2 EMA as in adam & ademamix.
+                    # Lion only needs the first-moment buffer (no second moment, no slow EMA).
+                    if not group["use_orthogonal_updates"] and not group["use_lion"]:
                         if group["beta2"] != 0:
                             opt.state[p]["exp_avg_sq"] = torch.zeros_like(p.data)
                         if group["alpha"] != 0:  # Enables slow momentum as in ademamix.
@@ -626,7 +1195,7 @@ def get_megatron_master_optimizer(
     def adam_init_state_fn(opt, config=None):
         for group in opt.param_groups:
             for p in group['params']:
-                if len(opt.state[p]) == 0:
+                if "exp_avg" not in opt.state[p]:
                     if config is None or not config.use_precision_aware_optimizer:
                         opt.state[p]['exp_avg'] = torch.zeros_like(p.data)
                         opt.state[p]['exp_avg_sq'] = torch.zeros_like(p.data)
@@ -660,7 +1229,7 @@ def get_megatron_master_optimizer(
             # TODO(deyuf): support MLA
             if 'linear_qkv.weight' in name and len(param.shape) == 2:
                 param.is_qkv = True
-            if "linear_fc2" in name or "linear_proj" in name and len(param.shape) == 2:
+            if ("linear_fc2" in name or "linear_proj" in name) and len(param.shape) == 2:
                 param.is_out_proj = True
             include_embeddings = config.hypersphere_embeddings or config.hypersphere_embedding_mode is not None
             if (
@@ -671,9 +1240,12 @@ def get_megatron_master_optimizer(
             else:
                 nonlinear_params.append(param)
 
+    matrix_lr = config.matrix_lr if config.matrix_lr is not None else config.muon_lr_factor * config.lr
+    lr_ratio = config.min_lr / config.lr if config.scale_min_lr and config.lr > 0 else None
+
     master_kwargs = {
         # Common.
-        "lr": config.muon_lr_factor * config.lr,
+        "lr": matrix_lr,
         "weight_decay": config.weight_decay,
         "weight_decay_method": config.weight_decay_method,
 
@@ -692,6 +1264,10 @@ def get_megatron_master_optimizer(
         "hypersphere_update": config.hypersphere_update,
         "hypersphere_update_embeddings": config.hypersphere_update_embeddings,
         "hypersphere_project": config.hypersphere_project,
+        "hypersphere_soft": config.hypersphere_soft,
+
+        # Lion.
+        "use_lion": config.use_lion,
 
         # Muon.
         "use_orthogonal_updates": config.use_orthogonal_updates,
@@ -711,6 +1287,7 @@ def get_megatron_master_optimizer(
 
         "qkv_split_shapes": qkv_split_shapes,
         "qkv_dim": kv_channels,  # head dim for split_heads when split_qkv_heads=True
+        "preserve_init": config.hypersphere_preserve_init,
     }
 
     # freezing nonlinear params and get param groups for muon
@@ -719,39 +1296,106 @@ def get_megatron_master_optimizer(
 
     config_overrides_master = {**config_overrides}
 
+    # Resolve effective embedding / output LRs: absolute (--embedding-lr /
+    # --output-lr) wins, else fall back to the multiplier form.
+    if config.embedding_lr is not None:
+        effective_embedding_lr = config.embedding_lr
+    elif config.embedding_lr_multiplier is not None:
+        effective_embedding_lr = config.embedding_lr_multiplier * config.lr
+    else:
+        effective_embedding_lr = None
+
+    if config.output_lr is not None:
+        effective_output_lr = config.output_lr
+    elif config.embedding_lr_multiplier is not None or config.embedding_lr is not None:
+        # When an embedding-specific LR is set, the LM head decouples from the
+        # embedding and defaults to the base lr (historical behaviour).
+        effective_output_lr = config.lr
+    else:
+        effective_output_lr = None  # no override; stays on the matrix group
+
     embedding_override = {}
-    if config.embedding_lr_multiplier is not None:
-        embedding_override["max_lr"] = config.embedding_lr_multiplier * config.lr
-    if config.use_orthogonal_updates and not config.use_orthogonal_embeddings:
+    if effective_embedding_lr is not None:
+        embedding_override["max_lr"] = effective_embedding_lr
+    no_ortho_emb = config.use_orthogonal_updates and not config.use_orthogonal_embeddings
+    if no_ortho_emb:
         embedding_override["use_orthogonal_updates"] = False
 
+    matrix_override = ParamGroupOverride(max_lr=matrix_lr)
+    if lr_ratio is not None:
+        matrix_override["min_lr"] = matrix_lr * lr_ratio
+
     if "max_lr" in embedding_override:
+        if lr_ratio is not None:
+            embedding_override["min_lr"] = embedding_override["max_lr"] * lr_ratio
         # Exclude embedding/output params from the wildcard to avoid conflicting max_lr overrides.
         non_emb = ParamPredicate(
             name="non_embedding_or_output",
             fn=lambda p: not getattr(p, "is_embedding_or_output_parameter", False),
         )
-        config_overrides_master[ParamKey(predicate=non_emb)] = ParamGroupOverride(
-            max_lr=config.muon_lr_factor * config.lr
-        )
+        config_overrides_master[ParamKey(predicate=non_emb)] = matrix_override
     else:
-        config_overrides_master[ParamKey(name="*")] = ParamGroupOverride(
-            max_lr=config.muon_lr_factor * config.lr
-        )
+        config_overrides_master[ParamKey(name="*")] = matrix_override
 
     if embedding_override:
-        config_overrides_master[ParamKey(attr="is_embedding_or_output_parameter")] = ParamGroupOverride(**embedding_override)
+        # Embedding weights get the embedding LR override.
+        config_overrides_master[ParamKey(attr="is_embedding_parameter")] = ParamGroupOverride(**embedding_override)
+
+    if effective_output_lr is not None or no_ortho_emb:
+        # LM head (output layer) gets its own override when untied; when tied it
+        # shares the embedding tensor so is_embedding_parameter is also set and
+        # the embedding override already applies — we use a predicate to avoid
+        # a conflict.
+        output_override = {}
+        if effective_output_lr is not None:
+            output_override["max_lr"] = effective_output_lr
+            if lr_ratio is not None:
+                output_override["min_lr"] = effective_output_lr * lr_ratio
+        if no_ortho_emb:
+            output_override["use_orthogonal_updates"] = False
+        only_output = ParamPredicate(
+            name="output_not_embedding",
+            fn=lambda p: (getattr(p, "is_output_parameter", False)
+                          and not getattr(p, "is_embedding_parameter", False)),
+        )
+        config_overrides_master[ParamKey(predicate=only_output)] = ParamGroupOverride(**output_override)
 
     linear_param_groups = _get_param_groups(model_chunks, config, config_overrides_master)
     # if layerwise distributed optimizer is not used, need to handle ep params separately
     expert_param_groups = []
     if not layer_wise_distributed_optimizer:
-        for group in linear_param_groups:
-            if group['is_expert_parallel']:
-                expert_param_groups.append(group)
-                linear_param_groups.remove(group)
+        expert_param_groups = [g for g in linear_param_groups if g['is_expert_parallel']]
+        linear_param_groups = [g for g in linear_param_groups if not g['is_expert_parallel']]
 
-    optimizer = MasterOptimizer(linear_param_groups, **master_kwargs)
+    gains_kwargs = dict(
+        hypersphere_gains_mode=config.hypersphere_gains_mode,
+        hypersphere_gains_mode_output=config.hypersphere_gains_mode_output,
+        hypersphere_gains_mode_embedding=config.hypersphere_gains_mode_embedding,
+        split_qkv_gains=config.split_qkv_gains,
+        gains_lr=config.gains_lr,
+        gains_betas=(
+            config.gains_beta1 if config.gains_beta1 is not None else config.adam_beta1,
+            config.gains_beta2 if config.gains_beta2 is not None else config.adam_beta2,
+        ),
+        gains_eps=config.gains_eps if config.gains_eps is not None else config.adam_eps,
+        gains_weight_decay=(
+            config.gains_weight_decay if config.gains_weight_decay is not None else config.weight_decay
+        ),
+        gains_bias_correction=config.gains_bias_correction,
+        gains_min=config.gains_min,
+        gains_no_clamp=config.gains_no_clamp,
+        gain_parametrization=config.gain_parametrization,
+        gains_rank=config.gains_rank,
+        gains_lowrank_init_std=config.gains_lowrank_init_std,
+        gains_lowrank_min=config.gains_lowrank_min,
+        scale_min_lr=config.scale_min_lr,
+    )
+    if config.hypersphere_gains_mode:
+        optimizer = GainsMasterOptimizer(
+            linear_param_groups, **gains_kwargs, **master_kwargs
+        )
+    else:
+        optimizer = MasterOptimizer(linear_param_groups, **master_kwargs)
 
     reset_config_bf16 = False
     if config.bf16:
@@ -773,7 +1417,12 @@ def get_megatron_master_optimizer(
 
     # expert optimizer exists meaning layerwise distributed optimizer is not used
     if len(expert_param_groups) > 0:
-        expert_optimizer = MasterOptimizer(expert_param_groups, **master_kwargs)
+        if config.hypersphere_gains_mode:
+            expert_optimizer = GainsMasterOptimizer(
+                expert_param_groups, **gains_kwargs, **master_kwargs
+            )
+        else:
+            expert_optimizer = MasterOptimizer(expert_param_groups, **master_kwargs)
         if config.bf16:
             expert_optimizer = Float16OptimizerWithFloat16Params(
                 expert_optimizer, config, None, master_init_state_fn
@@ -795,7 +1444,24 @@ def get_megatron_master_optimizer(
         config_overrides_adam[ParamKey(name="*q_layernorm*")] = ParamGroupOverride(max_lr=0)
         config_overrides_adam[ParamKey(name="*k_layernorm*")] = ParamGroupOverride(max_lr=0)
 
-
+    # Propagate the embedding / output LR overrides into chained_adam. Without
+    # this, when --hs-embed is not set the embedding (and untied output) live
+    # in chained_adam and silently ignore --embedding-lr / --output-lr / --elr.
+    if effective_embedding_lr is not None:
+        adam_emb_override = {"max_lr": effective_embedding_lr}
+        if lr_ratio is not None:
+            adam_emb_override["min_lr"] = effective_embedding_lr * lr_ratio
+        config_overrides_adam[ParamKey(attr="is_embedding_parameter")] = ParamGroupOverride(**adam_emb_override)
+    if effective_output_lr is not None:
+        only_output_adam = ParamPredicate(
+            name="output_not_embedding",
+            fn=lambda p: (getattr(p, "is_output_parameter", False)
+                          and not getattr(p, "is_embedding_parameter", False)),
+        )
+        adam_out_override = {"max_lr": effective_output_lr}
+        if lr_ratio is not None:
+            adam_out_override["min_lr"] = effective_output_lr * lr_ratio
+        config_overrides_adam[ParamKey(predicate=only_output_adam)] = ParamGroupOverride(**adam_out_override)
 
     # call original get. linear params will be skipped since they're freezed
     chained_adam = get_megatron_optimizer(
@@ -813,6 +1479,7 @@ def get_megatron_master_optimizer(
     init_fns = [master_init_state_fn] + len(chained_adam.chained_optimizers) * [adam_init_state_fn]
     optimizers += chained_adam.chained_optimizers
 
+    config.optimizer = original_optimizer_name
     if layer_wise_distributed_optimizer:
         log_single_rank(logger, logging.INFO, 'Using LayerWiseDistributedOptimizer for Muon')
         if reset_config_bf16:

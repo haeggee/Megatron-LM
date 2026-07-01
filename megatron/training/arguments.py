@@ -1842,6 +1842,7 @@ def _add_network_size_args(parser):
     group.add_argument('--post-norm', action='store_true')
     group.add_argument('--post-block-norm', action='store_true')
     group.add_argument('--no-learnable-norms', action='store_false', dest='learnable_norms')
+    group.add_argument('--pre-norm-no-gain', action='store_true')
     group.add_argument('--post-norm-no-gain', action='store_true')
     group.add_argument('--final-layernorm-no-gain', action='store_true')
     group.add_argument('--qk-layer-scale', type=float)
@@ -2210,10 +2211,84 @@ def _add_regularization_args(parser):
     group.add_argument('--muon-extra-scale-factor', type=float, default=1.0,
                        help='Additional scale factor for the muon update')
     group.add_argument('--muon-lr-factor', type=float, default=1.0)
+    group.add_argument('--matrix-lr', type=float, default=None,
+                       help='Absolute learning rate for matrix (linear) parameters. '
+                            'When set, overrides muon-lr-factor * lr.')
     group.add_argument('--embedding-lr-multiplier', type=float, default=None,
                        help='LR multiplier for embedding/output parameters in the master optimizer. '
                             'Final LR = embedding_lr_multiplier * lr. If None, uses muon-lr-factor * lr.')
+    group.add_argument('--embedding-lr', type=float, default=None,
+                       help='Absolute LR for the input embedding. When set, overrides '
+                            'embedding-lr-multiplier * lr. Applies whether or not '
+                            '--hypersphere-embeddings is set.')
+    group.add_argument('--output-lr', type=float, default=None,
+                       help='Absolute LR for the LM head output layer (when untied). '
+                            'When set, overrides the default.')
+    group.add_argument('--scale-min-lr', action='store_true',
+                       help='Scale min_lr proportionally to max_lr for each param group, '
+                            'keeping the same max_lr/min_lr ratio as the base lr.')
     group.add_argument('--hypersphere-mode', type=_float_or_str)
+    group.add_argument('--hypersphere-gains-mode', choices=["flat", "embed", "row", "col", "rowcol", "lowrank"])
+    group.add_argument('--hypersphere-gains-mode-output', choices=["flat", "row", "col", "rowcol", "lowrank", "none"],
+                       help='Override gains mode for the LM head output layer. '
+                            'If not set, the output layer uses --hypersphere-gains-mode. '
+                            'Set to "none" to disable gains on the output layer.')
+    group.add_argument('--hypersphere-gains-mode-embedding', choices=["flat", "row", "col", "rowcol", "lowrank", "none"],
+                       help='Override gains mode for the embedding (input) layer. '
+                            'If not set, the embedding layer uses --hypersphere-gains-mode. '
+                            'Set to "none" to disable gains on the embedding layer.')
+    group.add_argument('--split-qkv-gains', action="store_true",
+                       help='Give Q, K, V separate column gains instead of one shared column gain.')
+    group.add_argument('--gains-lr', type=float, default=None,
+                       help='Absolute learning rate for gain parameters. '
+                            'When None, gains follow the param group LR (same schedule as the weights).')
+    group.add_argument('--gains-beta1', type=float, default=None,
+                       help='Adam beta1 for the gain optimizer. When None, reuses --adam-beta1.')
+    group.add_argument('--gains-beta2', type=float, default=None,
+                       help='Adam beta2 for the gain optimizer. When None, reuses --adam-beta2.')
+    group.add_argument('--gains-eps', type=float, default=None,
+                       help='Adam eps for the gain optimizer. When None, reuses --adam-eps.')
+    group.add_argument('--gains-weight-decay', type=float, default=None,
+                       help='Weight decay for gain parameters. When None, reuses --weight-decay.')
+    group.add_argument('--no-gains-bias-correction', action='store_false', dest='gains_bias_correction',
+                       help='Disable Adam bias correction (the 1-beta^t terms) for the gain optimizer.')
+    group.add_argument('--gains-min', type=float, default=0.0,
+                       help='Floor on the effective multiplier phi(g): after each gain step the raw '
+                            'gain is clamped so phi(g) >= gains_min. Prevents gains collapsing through '
+                            'zero (sign flips for direct) and keeps the undo division bounded. 0 = off. '
+                            'Parametrization-agnostic (converted via phi^-1).')
+    group.add_argument('--gains-no-clamp', action='store_true', dest='gains_no_clamp',
+                       help='Do not clamp the divisor when undoing gains. By default the undo '
+                            'division p/phi(g) floors phi(g) at 1e-8 while _apply_gains '
+                            're-multiplies by the true (possibly negative/sub-eps) phi(g), so a '
+                            'gain below the floor breaks the round-trip and p drifts. This uses the '
+                            'true phi(g) on undo so it exactly inverts the re-apply.')
+    group.add_argument('--gains-rank', type=int, default=4,
+                       help='Rank k of the "lowrank" gains multiplier G = 1 + A@B (A:[m,k], '
+                            'B:[k,n]). Capped at min(m, n) per parameter. k=1 is a single '
+                            'rank-1 correction.')
+    group.add_argument('--gains-lowrank-init-std', type=float, default=None,
+                       help='Init std for the random A factor of lowrank gains (B starts at '
+                            'zero, so the multiplier is exactly identity at init). '
+                            'When None, defaults to (1/k)**0.5.')
+    group.add_argument('--gains-lowrank-min', type=float, default=1e-2,
+                       help='Floor on the lowrank multiplier G = 1 + A@B (clamp_min on G, used '
+                            'identically on undo and re-apply). Bounds the undo division p/G at '
+                            '1/this, preventing blow-up / sign-flip / gain runaway when an entry '
+                            'of G drifts toward zero (likely with wd=0). <=0 -> tiny eps only.')
+    group.add_argument('--gain-parametrization', choices=["direct", "offset", "softplus", "exp"], default="direct",
+                       help='How the learned gain g maps to the effective multiplier phi(g) '
+                            'applied to W_bare. "direct": phi(g)=g (current). "offset": '
+                            'phi(g)=1+g (init g=0, wd attracts to identity). "softplus": '
+                            'phi(g)=softplus(g) (init g=ln(e-1); phi prime=sigmoid caps the '
+                            'per-step change in phi(g) to ~lr, mitigating gain-grad spikes). '
+                            '"exp": phi(g)=exp(g) (init g=0, strictly positive multiplicative '
+                            'gain; phi prime=exp(g)=phi, so updates scale with the current gain).')
+    group.add_argument('--hypersphere-preserve-init', action='store_true', default=False,
+                       help='Skip init-time projection onto the hypersphere; preserve the model '
+                            'init magnitude. With gains, the init norms are absorbed into the '
+                            'gains so p * gains = p_init. Without gains, the param is left '
+                            'as-is and gets projected at the first optimizer step.')
     group.add_argument('--hypersphere-kind', type=_float_or_str, default="l2")
     group.add_argument('--hypersphere-radius', type=_float_or_str, default=1.0)
     group.add_argument('--hypersphere-no-update', action="store_false", dest="hypersphere_update")
@@ -2231,6 +2306,9 @@ def _add_regularization_args(parser):
     group.add_argument('--no-use-orthogonal-embeddings', action="store_false", dest="use_orthogonal_embeddings")
     group.add_argument('--poor-mans-ortho', action="store_true",
                        help='Use _normalize instead of _orthogonalize in the Muon branch (cheaper approximation).')
+    group.add_argument('--use-lion', action="store_true",
+                       help='Use Lion-style sign-momentum updates (like Adam but without the second moment). '
+                            'beta1 controls the update interpolation, beta2 controls the momentum EMA.')
     return parser
 
 
@@ -2635,6 +2713,12 @@ def _add_initialization_args(parser):
                        )
     group.add_argument('--init-method-xavier-uniform', action='store_true',
                        help='Enable Xavier uniform parameter initialization')
+    group.add_argument('--no-scaled-output-layer-init', dest='scaled_output_layer_init',
+                       action='store_false',
+                       help='Disable the 1/sqrt(2*num_layers) scaling for the output layers of '
+                       'attention and MLP blocks. If set, those output layers are initialized '
+                       'with the same unscaled normal(0, init_method_std) as other weights.')
+    parser.set_defaults(scaled_output_layer_init=True)
 
     return parser
 

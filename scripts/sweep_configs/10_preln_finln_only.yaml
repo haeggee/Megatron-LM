@@ -1,0 +1,62 @@
+title: "Runs with preLN and final LN"
+subplots:
+  - title: "Runs with both preLN and final LN"
+    x_label: "Learning Rate"
+    x_param: lr
+    series:
+      - label: "Master A0 embed with preLN and final LN"
+        default_x_value: 0.002
+        runs:
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.001-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.002-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.004-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.005-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+
+      - label: "Master A0 flat with preLN and final LN"
+        default_x_value: 0.002
+        runs:
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.001-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.002-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.004-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+          # - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.005-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+      - label: "Master A0 flat with preLN and final LN, layerscale 1"
+        default_x_value: 0.002
+        runs:
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.002-elr-qkRMS-pst-png-ls-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.003-elr-qkRMS-pst-png-ls-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.004-elr-qkRMS-pst-png-ls-lgsls1S-ue-nw-cos-n2"
+          - "110M1-master_h_a0-wd0-HSflat1_l2_it0_emb-lr0.005-elr-qkRMS-pst-png-ls-lgsls1S-ue-nw-cos-n2"
+      - label: "AdamW with WRONG early stopped cosine"
+        default_x_value: 0.002
+        runs:
+          - "110M1-lr0.002-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-cos-n2"
+          - "110M1-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-cos-n2"
+          - "110M1-lr0.004-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-cos-n2"
+          - "110M1-lr0.005-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-cos-n2"
+          - "110M1-lr0.006-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-cos-n2"
+          - "110M1-lr0.007-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-cos-n2"
+          - "110M1-lr0.008-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-cos-n2"
+          - "110M1-lr0.009-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-cos-n2"
+          - "110M1-lr0.010-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-cos-n2"
+      - label: "AdamW with correct linear"
+        default_x_value: 0.002
+        runs:
+          - "110M1-lr0.002-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-lin-n2"
+          - "110M1-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-lin-n2"
+          - "110M1-lr0.004-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-lin-n2"
+          - "110M1-lr0.005-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-lin-n2"
+          - "110M1-lr0.006-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-lin-n2"
+          - "110M1-lr0.007-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-lin-n2"
+          - "110M1-lr0.008-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-lin-n2"
+          # - "110M1-lr0.010-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-lin-n2"
+          - "110M1-lr0.012-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-lin-n2"
+      - label: "Master Orth flat with shape up and mlr 4, preln + final"
+        default_x_value: 0.002
+        runs:
+          - "110M1-master_h_o_b0.9_mlr4_shup_a0-wd0-HSflat1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"
+      - label: "Master Orth embed with shape up and mlr 4, preln + final"
+        default_x_value: 0.002
+        runs:
+          - "110M1-master_h_o_b0.9_mlr4_shup_a0-wd0-HSembed1_l2_it0_embNO-lr0.003-elr-qkRMS-pst-png-ls1S0.044-lgsls1S-ue-nw-cos-n2"

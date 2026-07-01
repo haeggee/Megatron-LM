@@ -1,8 +1,9 @@
 #= Prelude =#
 # General settings.
+#CONTAINER=/iopsstor/scratch/cscs/ahernnde/ngc_25-12-alps1.toml
 CONTAINER=/iopsstor/scratch/cscs/ahernnde/ncg_new_v3.toml
 
-SCRIPT_VERSION=vf
+SCRIPT_VERSION=debugv1
 SEQ_LEN=4096
 TOKENIZER=mistralai/Mistral-Nemo-Base-2407
 TOKENIZED_DATA_PATH=/iopsstor/scratch/cscs/jpcoles/a06/swissai-fineweb-edu-filterrobots-merge
@@ -36,8 +37,7 @@ BETA3=0.999
 MUON_MOMENTUM=0.95
 ADAMBETA1=0.95
 ALPHA=5
-MUON_SCALE_MODE=none
-MUON_EXTRA_SCALE_FACTOR=1.0
+MUON_SCALE_MODE=spectral
 MUON_NUM_NS_STEPS=5
 EMBEDDING_LR_MULTIPLIER=1.0
 
@@ -59,7 +59,7 @@ WSD=minus_sqrt
 
 # Validation defaults.
 EVAL_INTERVAL=0
-EVAL_ITERS=50
+EVAL_ITERS=10
 
 # Misc. defaults.
 EXTRA_LOG=true
@@ -67,7 +67,7 @@ NO_SAVE=false
 
 # Usage function.
 usage () {
-	echo "Usage: submit.sh <size> [options...]"
+	echo "Usage: debug_run.sh <size> [options...]"
 	echo "<size>: 110/390/1"
 	echo "Options:"
 	# Misc settings.
@@ -77,7 +77,6 @@ usage () {
 	echo " --time (default=$TIME): Change the sbatch time limit"
 	echo " --no-extra-logs: Disable costly logging"
 	echo " --no-save: Disable saving checkpoint"
-	echo " --apertus-reservation: Add #SBATCH --reservation=SD-69241-apertus-1-5-0"
 	# FP8 settings.
 	echo " --fp8: Enables fp8"
 	echo " --fp8dpa: Enables fp8dpa"
@@ -86,14 +85,11 @@ usage () {
 	echo " --lr <float>: Learning rate."
 	echo " --no-warmup: Deactivates learning rate warmup"
 	echo " --warmup-iters <int> (default=$WARMUP_ITERS): LR warmup steps (\`--lr-warmup-iters\`)"
-	echo " --decay <wsd/cos/linear/inverse-square-root/isrwsd>"
+	echo " --decay <wsd/cos>"
 	echo " --cooldown <float>: Fraction to do cooldown"
-	echo " --branch-from <dir>: Seed run from another run's checkpoint (its root or checkpoints/ dir); for cooldown-shape experiments from a fixed ckpt"
-	echo " --branch-iter <int>: Iteration to branch from (default: that run's latest checkpoint)"
 	echo " --clip-grad <float>: Gradient clipping"
 	# Architecture settings.
 	echo " --init <float>: Change init std."
-	echo " --scaled-output-init: Enable the 1/sqrt(2*L) scaling of the output layer init (off by default)"
 	echo " --activation (default=$ACTIVATION): MLP activation. Choices=[swiglu, gelu]."
 	echo " --no-pre-norm"
 	echo " --no-final-layernorm"
@@ -102,7 +98,6 @@ usage () {
 	echo " --post-norm"
 	echo " --pre-norm-no-gain"
 	echo " --post-norm-no-gain"
-	echo " --final-layernorm-no-gain"
 	echo " --post-block-norm"
 	echo " --use-stream-minus-residual"
 	echo " --layer-scale <float>"
@@ -129,14 +124,11 @@ usage () {
 	echo " --b3: beta3 (master&ademamix)"
 	echo " --alpha: ademamix alpha"
 	echo " --muon-scale <spectral/shape_scaling/unit_rms_norm/none>"
-	echo " --muon-extra-scale-factor <float>: extra multiplicative factor on the muon scale (default=$MUON_EXTRA_SCALE_FACTOR)"
 	echo " --muon-nesterov: Enables muon nesterov momentum"
 	echo " --muon-num-ns-steps <int>: Number of Newton-Schulz steps for the Muon optimizer"
 	echo " --mlr: muon learning rate factor"
 	echo " --matrix-lr <float>: absolute matrix LR (overrides mlr * lr)"
 	echo " --elr <float>: embedding/output LR multiplier (final LR = elr * lr)"
-	echo " --embedding-lr <float>: absolute embedding LR (overrides --elr; applies whether or not --hs-embed is set)"
-	echo " --output-lr <float>: absolute LM-head output LR (when untied)"
 	echo " --scale-min-lr: scale min_lr proportionally to each group's max_lr"
 	echo " --wd: weight decay"
 	echo " --wd-method (decoupled/independent): weight decay method"
@@ -148,9 +140,10 @@ usage () {
 	echo " --hs-embed [<row/col/rowcol/invrowcol/flat>]: hypersphere normalize embeddings (optionally with a different HS mode)"
 	echo " --hs-emb-no-orthogonal: Don't use muon update on embeddings, but keep fixed to the sphere (if --hs-embed is also set, otherwise no effect)"
 	echo " --hs-split-heads: hypersphere normalize q,k,v heads separately"
-	echo " --hs-g <flat/embed/row/col/rowcol/lowrank>: hypersphere gains mode (lowrank = rank-k multiplier 1+A@B)"
-	echo " --hs-g-output <flat/row/col/rowcol/lowrank/none>: gains mode override for LM head output layer"
-	echo " --hs-g-embed <flat/row/col/rowcol/lowrank/none>: gains mode override for embedding input layer"
+	echo " --hs-g <flat/embed/row/col/rowcol>: hypersphere gains mode"
+	echo " --hs-g-output <flat/row/col/rowcol/none>: gains mode override for LM head output layer"
+	echo " --hs-g-embed <flat/row/col/rowcol/none>: gains mode override for embedding input layer"
+	echo " --split-qkv-gains: separate column gains for Q, K, V"
 	echo " --glr <float>: absolute gains LR (default: follows param group LR)"
 	echo " --gb1 <float>: gains Adam beta1 (default: reuses --b1/--adam-beta1)"
 	echo " --gb2 <float>: gains Adam beta2 (default: reuses --b2/--adam-beta2)"
@@ -158,13 +151,7 @@ usage () {
 	echo " --gwd <float>: gains weight decay (default: reuses --wd)"
 	echo " --g-no-bc: disable Adam bias correction for the gains optimizer"
 	echo " --gmin <float>: floor the effective gain phi(g) >= this (prevents collapse/sign-flip; 0=off)"
-	echo " --gains-no-clamp: don't clamp the undo divisor; use true phi(g) so undo exactly inverts re-apply (no round-trip mismatch when gains go negative/sub-eps)"
-	echo " --hs-preserve-init: skip init projection; absorb init norms into gains"
-	echo " --split-qkv-gains: separate column gains for Q, K, V"
 	echo " --hs-g-param <direct/offset/softplus/exp>: gain parametrization (phi). direct=g, offset=1+g, softplus=softplus(g), exp=exp(g)."
-	echo " --hs-g-rank <int>: rank k for --hs-g lowrank (default 4)"
-	echo " --hs-g-init-std <float>: init std for lowrank A factor (default (1/k)**0.5)"
-	echo " --hs-g-floor <float>: floor on lowrank multiplier G=1+A@B (default 1e-2; bounds undo p/G, prevents collapse through 0)"
 	echo " --hs-p: project gradient to tangent space"
 	echo " --hs-s: soft hyperball norm clipping."
 	# Validation.
@@ -186,7 +173,8 @@ SCALE=B  # M or B.
 TP=1
 PP=1
 UNTIE=true
-if [[ $1 -eq 110 ]]; then 
+INIT_STD=0.02
+if [[ $1 -eq 110 ]]; then
 	# batch_size: ~0.52M.
 	LAYERS=12
 	HIDDEN_SIZE=512
@@ -196,14 +184,14 @@ if [[ $1 -eq 110 ]]; then
 	MBS="${MBS:-8}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.001
+	LR=0.002
 	SIZE=110
-	SAVE_FREQ=10000
-	DEF_TOKENS=25
+	SAVE_FREQ=1000
+	DEF_TOKENS=5
 	INTERMEDIATE_METRICS_INTERVAL=10
 	SCALE=M
 	UNTIE=false
-	LOG_FREQ=50
+	LOG_FREQ=1
 elif [[ $1 -eq 47 ]]; then # 0.5x=256 dim from 110m
 	# batch_size: ~0.52M.
 	LAYERS=12
@@ -214,44 +202,8 @@ elif [[ $1 -eq 47 ]]; then # 0.5x=256 dim from 110m
 	MBS="${MBS:-8}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.001
+	LR=0.002
 	SIZE=47
-	SAVE_FREQ=10000
-	DEF_TOKENS=25
-	INTERMEDIATE_METRICS_INTERVAL=10
-	SCALE=M
-	UNTIE=false
-	LOG_FREQ=50
-elif [[ $1 -eq 70 ]]; then # 0.75x=384 dim, 9L (ratio-preserving with 110m)
-	# batch_size: ~0.52M.
-	LAYERS=9
-	HIDDEN_SIZE=384
-	FFN_SIZE=1536
-	NUM_HEADS=6
-	NUM_QUERY_GROUPS=3
-	MBS="${MBS:-8}"
-	GBS=128
-	ITERS_PER_BT=2000
-	LR=0.001
-	SIZE=70
-	SAVE_FREQ=10000
-	DEF_TOKENS=25
-	INTERMEDIATE_METRICS_INTERVAL=10
-	SCALE=M
-	UNTIE=false
-	LOG_FREQ=50
-elif [[ $1 -eq 90 ]]; then # 0.5x layers from 110m
-	# batch_size: ~0.52M.
-	LAYERS=6
-	HIDDEN_SIZE=512
-	FFN_SIZE=2048
-	NUM_HEADS=4
-	NUM_QUERY_GROUPS=2
-	MBS="${MBS:-8}"
-	GBS=128
-	ITERS_PER_BT=2000
-	LR=0.001
-	SIZE=90
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
 	INTERMEDIATE_METRICS_INTERVAL=10
@@ -268,7 +220,7 @@ elif [[ $1 -eq 130 ]]; then # 1.5x layers from 110m
 	MBS="${MBS:-8}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.001
+	LR=0.002
 	SIZE=130
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
@@ -286,26 +238,8 @@ elif [[ $1 -eq 150 ]]; then # 2x layers from 110m
 	MBS="${MBS:-8}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.001
+	LR=0.002
 	SIZE=150
-	SAVE_FREQ=10000
-	DEF_TOKENS=25
-	INTERMEDIATE_METRICS_INTERVAL=10
-	SCALE=M
-	UNTIE=false
-	LOG_FREQ=50
-elif [[ $1 -eq 170 ]]; then # 2.5x layers from 110m
-	# batch_size: ~0.52M.
-	LAYERS=30
-	HIDDEN_SIZE=512
-	FFN_SIZE=2048
-	NUM_HEADS=4
-	NUM_QUERY_GROUPS=2
-	MBS="${MBS:-4}"
-	GBS=128
-	ITERS_PER_BT=2000
-	LR=0.001
-	SIZE=170
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
 	INTERMEDIATE_METRICS_INTERVAL=10
@@ -322,7 +256,7 @@ elif [[ $1 -eq 190 ]]; then # 1.5x=768 dim, but WRONG heads/query groups
 	MBS="${MBS:-8}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.001
+	LR=0.002
 	SIZE=190
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
@@ -340,26 +274,8 @@ elif [[ $1 -eq 193 ]]; then # 1.5x=768 dim, correct heads/query groups
 	MBS="${MBS:-8}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.001
+	LR=0.002
 	SIZE=193
-	SAVE_FREQ=10000
-	DEF_TOKENS=25
-	INTERMEDIATE_METRICS_INTERVAL=10
-	SCALE=M
-	UNTIE=false
-	LOG_FREQ=50
-elif [[ $1 -eq 232 ]]; then # 1.5x=768 dim, 18L (ratio-preserving with 110m)
-	# batch_size: ~0.52M.
-	LAYERS=18
-	HIDDEN_SIZE=768
-	FFN_SIZE=3072
-	NUM_HEADS=6
-	NUM_QUERY_GROUPS=3
-	MBS="${MBS:-8}"
-	GBS=128
-	ITERS_PER_BT=2000
-	LR=0.001
-	SIZE=232
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
 	INTERMEDIATE_METRICS_INTERVAL=10
@@ -376,7 +292,7 @@ elif [[ $1 -eq 290 ]]; then # 2x=1024 dim, but wrong heads/query groups
 	MBS="${MBS:-8}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.001
+	LR=0.002
 	SIZE=290
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
@@ -394,7 +310,7 @@ elif [[ $1 -eq 292 ]]; then # 2x=1024 dim, correct heads/query groups
 	MBS="${MBS:-8}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.001
+	LR=0.002
 	SIZE=292
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
@@ -402,61 +318,7 @@ elif [[ $1 -eq 292 ]]; then # 2x=1024 dim, correct heads/query groups
 	SCALE=M
 	UNTIE=false
 	LOG_FREQ=50
-elif [[ $1 -eq 543 ]]; then # 3x=1536 dim, correct heads/query groups
-	# batch_size: ~0.52M.
-	LAYERS=12
-	HIDDEN_SIZE=1536
-	FFN_SIZE=6144
-	NUM_HEADS=12
-	NUM_QUERY_GROUPS=6
-	MBS="${MBS:-4}"
-	GBS=128
-	ITERS_PER_BT=2000
-	LR=0.001
-	SIZE=543
-	SAVE_FREQ=10000
-	DEF_TOKENS=25
-	INTERMEDIATE_METRICS_INTERVAL=10
-	SCALE=M
-	UNTIE=false
-	LOG_FREQ=50
-elif [[ $1 -eq 430 ]]; then # 2x=1024 dim, 24L (ratio-preserving with 110m)
-	# batch_size: ~0.52M.
-	LAYERS=24
-	HIDDEN_SIZE=1024
-	FFN_SIZE=4096
-	NUM_HEADS=8
-	NUM_QUERY_GROUPS=4
-	MBS="${MBS:-4}"
-	GBS=128
-	ITERS_PER_BT=2000
-	LR=0.001
-	SIZE=430
-	SAVE_FREQ=10000
-	DEF_TOKENS=25
-	INTERMEDIATE_METRICS_INTERVAL=10
-	SCALE=M
-	UNTIE=false
-	LOG_FREQ=50
-elif [[ $1 -eq 860 ]]; then # 4x=2048 dim, correct heads/query groups
-	# batch_size: ~0.52M.
-	LAYERS=12
-	HIDDEN_SIZE=2048
-	FFN_SIZE=8192
-	NUM_HEADS=16
-	NUM_QUERY_GROUPS=8
-	MBS="${MBS:-4}"
-	GBS=128
-	ITERS_PER_BT=2000
-	LR=0.001
-	SIZE=860
-	SAVE_FREQ=10000
-	DEF_TOKENS=25
-	INTERMEDIATE_METRICS_INTERVAL=10
-	SCALE=M
-	UNTIE=false
-	LOG_FREQ=50
-elif [[ $1 -eq 390 ]]; then 
+elif [[ $1 -eq 390 ]]; then
 	# batch_size: ~0.52M.
 	LAYERS=16
 	HIDDEN_SIZE=1024
@@ -466,7 +328,7 @@ elif [[ $1 -eq 390 ]]; then
 	MBS="${MBS:-4}"
 	GBS=128
 	ITERS_PER_BT=2000
-	LR=0.001
+	LR=0.002
 	SIZE=390
 	SAVE_FREQ=10000
 	DEF_TOKENS=25
@@ -474,7 +336,7 @@ elif [[ $1 -eq 390 ]]; then
 	SCALE=M
 	UNTIE=false
 	LOG_FREQ=50
-elif [[ $1 -eq 1 ]]; then 
+elif [[ $1 -eq 1 ]]; then
 	# batch_size: ~1.05M.
 	LAYERS=16
 	HIDDEN_SIZE=2048
@@ -497,9 +359,6 @@ else
 fi
 shift
 
-# Default init std: 1/sqrt(hidden_size). Can be overridden by --init.
-INIT_STD=$(python3 -c "import math; print(1/math.sqrt($HIDDEN_SIZE))")
-
 # Now get the general options.
 TOKENS=$DEF_TOKENS
 SUFFIX=""
@@ -519,18 +378,18 @@ while [[ $# -gt 0 ]]; do
 			EXTRA_LOG=false; shift;;
 		--no-save)
 			NO_SAVE=true; shift;;
-		--apertus-reservation)
-			APERTUS_RESERVATION=true; shift;;
 		# FP8 settings.
 		--fp8)
 			FP8=true; shift;;
-		--fp8dpa)
+		--fp8-dpa)
 			FP8DPA=true; shift;;
 		# Training settings.
 		--tokens)
 			TOKENS=$2; shift 2;;
 		--lr)
-			LR=$2; shift 2;;
+			LR=$2;
+			CHANGED_LR=true
+			shift 2;;
 		--no-warmup)
 			NO_WARMUP=true; shift;;
 		--warmup-iters)
@@ -539,17 +398,11 @@ while [[ $# -gt 0 ]]; do
 			DECAY=$2; shift 2;;
 		--cooldown)
 			COOLDOWN=$2; shift 2;;
-		--branch-from)
-			BRANCH_FROM=$2; shift 2;;
-		--branch-iter)
-			BRANCH_ITER=$2; shift 2;;
 		--clip-grad)
 			CLIP_GRAD=$2; shift 2;;
 		# Architecture settings.
 		--init)
 			NEW_INIT_STD=$2; shift 2;;
-		--scaled-output-init)
-			SCALED_OUTPUT_INIT=true; shift;;
 		--activation)
 			ACTIVATION=$2; shift 2;;
 		--no-pre-norm)
@@ -566,8 +419,6 @@ while [[ $# -gt 0 ]]; do
 			PRE_NORM_NO_GAIN=true; shift;;
 		--post-norm-no-gain)
 			POST_NORM_NO_GAIN=true; shift;;
-		--final-layernorm-no-gain)
-			FINAL_LAYERNORM_NO_GAIN=true; shift;;
 		--post-block-norm)
 			POST_BLOCK_NORM=true; shift;;
 		--use-stream-minus-residual)
@@ -613,8 +464,6 @@ while [[ $# -gt 0 ]]; do
 			MASTER_ORTHOGONALIZE=true; shift;;
 		--poor-mans-ortho)
 			POOR_MANS_ORTHO=true; shift;;
-		--use-lion)
-			USE_LION=true; shift;;
 		--b1)
 			BETA1=$2; shift 2;;
 		--b2)
@@ -629,18 +478,12 @@ while [[ $# -gt 0 ]]; do
 			MATRIX_LR=$2; shift 2;;
 		--elr)
 			EMBEDDING_LR_MULTIPLIER=$2; shift 2;;
-		--embedding-lr)
-			EMBEDDING_LR=$2; shift 2;;
-		--output-lr)
-			OUTPUT_LR=$2; shift 2;;
 		--scale-min-lr)
 			SCALE_MIN_LR=true; shift;;
 		--alpha)
 			ALPHA=$2; shift 2;;
 		--muon-scale)
 			MUON_SCALE_MODE=$2; shift 2;;
-		--muon-extra-scale-factor)
-			MUON_EXTRA_SCALE_FACTOR=$2; shift 2;;
 		--muon-nesterov)
 			MUON_NESTEROV=true; shift;;
 		--muon-num-ns-steps)
@@ -677,6 +520,10 @@ while [[ $# -gt 0 ]]; do
 			HS_GAINS_MODE_OUTPUT=$2; shift 2;;
 		--hs-g-embed)
 			HS_GAINS_MODE_EMBEDDING=$2; shift 2;;
+		--split-qkv-gains)
+			SPLIT_QKV_GAINS=true; shift;;
+		--hs-g-param)
+			HS_GAINS_PARAM=$2; shift 2;;
 		--glr)
 			GAINS_LR=$2; shift 2;;
 		--gb1)
@@ -691,20 +538,6 @@ while [[ $# -gt 0 ]]; do
 			GAINS_NO_BIAS_CORRECTION=true; shift;;
 		--gmin)
 			GAINS_MIN=$2; shift 2;;
-		--gains-no-clamp)
-			GAINS_NO_CLAMP=true; shift;;
-		--hs-preserve-init)
-			HS_PRESERVE_INIT=true; shift;;
-		--split-qkv-gains)
-			SPLIT_QKV_GAINS=true; shift;;
-		--hs-g-param)
-			HS_GAINS_PARAM=$2; shift 2;;
-		--hs-g-rank)
-			GAINS_RANK=$2; shift 2;;
-		--hs-g-init-std)
-			GAINS_LOWRANK_INIT_STD=$2; shift 2;;
-		--hs-g-floor)
-			GAINS_LOWRANK_MIN=$2; shift 2;;
 		--hs-p)
 			HS_PROJECT=true; shift;;
 		--hs-s)
@@ -724,22 +557,6 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-# Resolve branch checkpoint (cooldown-shape experiments from a fixed ckpt).
-if [[ ! -z "${BRANCH_FROM+xxx}" ]]; then
-	BRANCH_FROM=${BRANCH_FROM%/}
-	if [[ -d "$BRANCH_FROM/checkpoints" ]]; then
-		BRANCH_FROM=$BRANCH_FROM/checkpoints
-	fi
-	if [[ -z "${BRANCH_ITER+xxx}" ]]; then
-		BRANCH_ITER=$(cat "$BRANCH_FROM/latest_checkpointed_iteration.txt")
-	fi
-	BRANCH_ITER_DIR=$(printf "iter_%07d" "$BRANCH_ITER")
-	if [[ ! -d "$BRANCH_FROM/$BRANCH_ITER_DIR" ]]; then
-		>&2 echo "Branch checkpoint not found: $BRANCH_FROM/$BRANCH_ITER_DIR"
-		exit 1
-	fi
-fi
-
 #= MIDDLE: Set up arguments. =#
 # Opt settings.
 OPT_ARGS=()
@@ -757,7 +574,7 @@ elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
 		SUFFIX=${SUFFIX}_b$ADAMBETA1
 	fi
 	if [[ ! -z "${MUON_LR_FACTOR+xxx}" ]]; then
-		SUFFIX=${SUFFIX}_mlr$(printf "%.1f" "$MUON_LR_FACTOR")
+		SUFFIX=${SUFFIX}_mlr$MUON_LR_FACTOR
 		OPT_ARGS+=(--muon-lr-factor $MUON_LR_FACTOR)
 	fi
 	if [[ $MUON_NUM_NS_STEPS != 5 ]]; then
@@ -778,25 +595,24 @@ elif [[ $OPT = muon ]] || [[ $OPT = dmuon ]]; then
 		fi
 	fi
 	if [[ $MUON_NESTEROV = true ]]; then
-		# SUFFIX=${SUFFIX}_nest
+		SUFFIX=${SUFFIX}_nest
 		OPT_ARGS+=(--muon-use-nesterov)
 	fi
 	MUON_MOMENTUM=$BETA1
 	BETA1=$ADAMBETA1
 elif [[ $OPT = dmaster ]] || [[ $OPT = master ]]; then
-	# SUFFIX=$SUFFIX-${OPT}_h
-	SUFFIX=$SUFFIX-mas
+	SUFFIX=$SUFFIX-${OPT}_h
 	IS_MASTER_OPT=true
 	if [[ $MASTER_ORTHOGONALIZE = true ]]; then
 		SUFFIX=${SUFFIX}_o
 		if [[ $BETA1 != 0.95 ]]; then
 			SUFFIX=${SUFFIX}_m$BETA1
 		fi
-		if [[ $ADAMBETA1 != 0.9 ]]; then
+		if [[ $ADAMBETA1 != 0.95 ]]; then
 			SUFFIX=${SUFFIX}_b$ADAMBETA1
 		fi
 		if [[ ! -z "${MUON_LR_FACTOR+xxx}" ]]; then
-			SUFFIX=${SUFFIX}_mlr$(printf "%.1f" "$MUON_LR_FACTOR")
+			SUFFIX=${SUFFIX}_mlr$MUON_LR_FACTOR
 			OPT_ARGS+=(--muon-lr-factor $MUON_LR_FACTOR)
 		fi
 		if [[ $MUON_NUM_NS_STEPS != 5 ]]; then
@@ -815,31 +631,23 @@ elif [[ $OPT = dmaster ]] || [[ $OPT = master ]]; then
 			elif [[ $MUON_SCALE_MODE = shape_scaling ]]; then
 				SUFFIX=${SUFFIX}_shsc
 			elif [[ $MUON_SCALE_MODE = shape_up ]]; then
-				SUFFIX=${SUFFIX}
+				SUFFIX=${SUFFIX}_shup
 			else
 				SUFFIX=${SUFFIX}_$MUON_SCALE_MODE
 			fi
 		fi
-		if [[ $MUON_NESTEROV = true ]]; then
-			SUFFIX=${SUFFIX}_nest
-			OPT_ARGS+=(--muon-use-nesterov)
-		fi
 	else
-		if [[ $USE_LION = true ]]; then
-			SUFFIX=${SUFFIX}_lion
-			OPT_ARGS+=(--use-lion)
-		fi
 		if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.99 ]] || [[ $BETA3 != 0.999 ]]; then
 			SUFFIX=${SUFFIX}_b${BETA1}_${BETA2}_$BETA3
 		fi
 		if [[ ! -z "${MUON_LR_FACTOR+xxx}" ]]; then
-			SUFFIX=${SUFFIX}_mlr$(printf "%.1f" "$MUON_LR_FACTOR")
+			SUFFIX=${SUFFIX}_mlr$MUON_LR_FACTOR
 			OPT_ARGS+=(--muon-lr-factor $MUON_LR_FACTOR)
 		fi
 	fi
-	# if [[ $ALPHA != 5 ]]; then
-	# 	SUFFIX=${SUFFIX}_a$ALPHA
-	# fi
+	if [[ $ALPHA != 5 ]]; then
+		SUFFIX=${SUFFIX}_a$ALPHA
+	fi
 	if [[ $OPT = dmaster ]]; then
 		OPT=dist_master
 	fi
@@ -849,9 +657,9 @@ elif [[ $OPT = ademamix ]]; then
 	if [[ $BETA1 != 0.9 ]] || [[ $BETA2 != 0.95 ]] || [[ $BETA3 != 0.999 ]]; then
 		SUFFIX=${SUFFIX}_b${BETA1}_${BETA2}_$BETA3
 	fi
-	# if [[ $ALPHA != 5 ]]; then
-	# 	SUFFIX=${SUFFIX}_a$ALPHA
-	# fi
+	if [[ $ALPHA != 5 ]]; then
+		SUFFIX=${SUFFIX}_a$ALPHA
+	fi
 	if [[ $HYPERBALL = false ]]; then
 		OPT_ARGS+=(--use-distributed-optimizer)
 	fi
@@ -862,7 +670,7 @@ if [[ $CLIP_GRAD != 1.0 ]]; then
 	ARCH_ARGS+=(--clip-grad $CLIP_GRAD)
 fi
 
-if [[ $WEIGHT_DECAY != 0.0 ]]; then
+if [[ $WEIGHT_DECAY != 0.1 ]]; then
 	SUFFIX=$SUFFIX-wd$WEIGHT_DECAY
 fi
 if [[ $WEIGHT_DECAY_METHOD != decoupled ]]; then
@@ -957,10 +765,6 @@ if [[ $HYPERBALL != false ]]; then
 			SUFFIX=${SUFFIX}_gmin$(printf "%.0e" $GAINS_MIN)
 			OPT_ARGS+=(--gains-min $GAINS_MIN)
 		fi
-		if [[ $GAINS_NO_CLAMP = true ]]; then
-			SUFFIX=${SUFFIX}_gnc
-			OPT_ARGS+=(--gains-no-clamp)
-		fi
 		if [[ ! -z "${HS_GAINS_PARAM+xxx}" ]] && [[ $HS_GAINS_PARAM != direct ]]; then
 			if [[ $HS_GAINS_PARAM = softplus ]]; then
 				SUFFIX=${SUFFIX}_gpsp
@@ -971,31 +775,14 @@ if [[ $HYPERBALL != false ]]; then
 			fi
 			OPT_ARGS+=(--gain-parametrization $HS_GAINS_PARAM)
 		fi
-		if [[ ! -z "${GAINS_RANK+xxx}" ]]; then
-			SUFFIX=${SUFFIX}_grk$GAINS_RANK
-			OPT_ARGS+=(--gains-rank $GAINS_RANK)
-		fi
-		if [[ ! -z "${GAINS_LOWRANK_INIT_STD+xxx}" ]]; then
-			SUFFIX=${SUFFIX}_gis$GAINS_LOWRANK_INIT_STD
-			OPT_ARGS+=(--gains-lowrank-init-std $GAINS_LOWRANK_INIT_STD)
-		fi
-		if [[ ! -z "${GAINS_LOWRANK_MIN+xxx}" ]]; then
-			SUFFIX=${SUFFIX}_gfl$(printf "%.0e" $GAINS_LOWRANK_MIN)
-			OPT_ARGS+=(--gains-lowrank-min $GAINS_LOWRANK_MIN)
-		fi
-		if [[ $HS_PRESERVE_INIT = true ]]; then
-			SUFFIX=${SUFFIX}_pi
-			OPT_ARGS+=(--hypersphere-preserve-init)
-		fi
 	fi
 fi
 
-if [[ $LR != 0.001 ]]; then
-	SUFFIX=$SUFFIX-lr$(printf "%.1e" $LR)
+if [[ $CHANGED_LR = true ]]; then
+	SUFFIX=$SUFFIX-lr$LR
 fi
-
 if [[ ! -z "${MATRIX_LR+xxx}" ]]; then
-	SUFFIX=${SUFFIX}-Mlr$(printf "%.1e" $MATRIX_LR)
+	SUFFIX=${SUFFIX}-Mlr$MATRIX_LR
 	OPT_ARGS+=(--matrix-lr $MATRIX_LR)
 fi
 if [[ $SCALE_MIN_LR = true ]]; then
@@ -1003,21 +790,11 @@ if [[ $SCALE_MIN_LR = true ]]; then
 	OPT_ARGS+=(--scale-min-lr)
 fi
 if [[ ! -z "${EMBEDDING_LR_MULTIPLIER+xxx}" ]]; then
-	# SUFFIX=${SUFFIX}-elr
+	SUFFIX=${SUFFIX}-elr
 	if [[ $EMBEDDING_LR_MULTIPLIER != 1.0 ]]; then
 		SUFFIX=${SUFFIX}$EMBEDDING_LR_MULTIPLIER
 	fi
 	OPT_ARGS+=(--embedding-lr-multiplier $EMBEDDING_LR_MULTIPLIER)
-fi
-if [[ ! -z "${EMBEDDING_LR+xxx}" ]]; then
-	# if [[ $EMBEDDING_LR != 0.003 ]]; then
-	SUFFIX=${SUFFIX}-Elr$(printf "%.1e" $EMBEDDING_LR)
-	# fi
-	OPT_ARGS+=(--embedding-lr $EMBEDDING_LR)
-fi
-if [[ ! -z "${OUTPUT_LR+xxx}" ]]; then
-	SUFFIX=${SUFFIX}-Olr$(printf "%.1e" $OUTPUT_LR)
-	OPT_ARGS+=(--output-lr $OUTPUT_LR)
 fi
 
 # FP8 settings.
@@ -1036,11 +813,6 @@ ARCH_ARGS=()
 if [[ ! -z ${NEW_INIT_STD+x} ]]; then
 	SUFFIX=$SUFFIX-std$NEW_INIT_STD
 	INIT_STD=$NEW_INIT_STD
-fi
-if [[ $SCALED_OUTPUT_INIT = true ]]; then
-	SUFFIX=$SUFFIX-soi
-else
-	ARCH_ARGS+=(--no-scaled-output-layer-init)
 fi
 
 if [[ $ACTIVATION = gelu ]]; then
@@ -1066,23 +838,16 @@ if [[ ! -z "${QK_NORM+xxx}" ]]; then
 			echo When using qkRMSNorm you must also use --normalization RMSNorm
 			exit 1
 		fi
+		SUFFIX=$SUFFIX-qkRMS
 		ARCH_ARGS+=(--qk-layernorm)
 		if [[ $QK_FROZEN = true ]]; then
+			SUFFIX=${SUFFIX}fz
 			ARCH_ARGS+=(--qk-layernorm-frozen)
 		fi
 	elif [[ $QK_NORM = L2Norm ]]; then
 		SUFFIX=$SUFFIX-qkL2
 		ARCH_ARGS+=(--qk-l2-norm)
-	else
-		# If not RMSNorm, must indicate in suffix
-		SUFFIX=$SUFFIX-qk$QK_NORM
 	fi
-elif [[ $NORMALIZATION = RMSNorm ]]; then
-	# no QK_NORM specified, nothing to add
-	:
-else
-	# If neither/QK_NORM set to something else, reflect it
-	SUFFIX=$SUFFIX-nqkRMS
 fi
 
 if [[ $NO_PRE_NORM = true ]]; then
@@ -1105,10 +870,6 @@ if [[ $POST_NORM_NO_GAIN = true ]]; then
 	SUFFIX=$SUFFIX-png
 	ARCH_ARGS+=(--post-norm-no-gain)
 fi
-if [[ $FINAL_LAYERNORM_NO_GAIN = true ]]; then
-	SUFFIX=$SUFFIX-fng
-	ARCH_ARGS+=(--final-layernorm-no-gain)
-fi
 if [[ $POST_BLOCK_NORM = true ]]; then
 	SUFFIX=$SUFFIX-ppst
 	ARCH_ARGS+=(--post-block-norm)
@@ -1128,7 +889,7 @@ if [[ ! -z "${SOFT_MAX_SCALE+xxx}" ]]; then
 fi
 
 if [[ ! -z "${LAYER_SCALE+xxx}" ]]; then
-	SUFFIX=$SUFFIX-ls${LAYER_SCALE}
+	SUFFIX=$SUFFIX-ls
 	LONG_SUFFIX=$LONG_SUFFIX-ls$LAYER_SCALE
 	ARCH_ARGS+=(--layer-scale $LAYER_SCALE)
 	if [[ ! -z "${LAYER_SCALE_SCALE+xxx}" ]]; then
@@ -1186,7 +947,7 @@ if [[ ! -z "${FIXED_LAYER_SCALE+xxx}" ]]; then
 	ARCH_ARGS+=(--fixed-layer-scale $FIXED_LAYER_SCALE)
 fi
 if [[ ! -z "${LOGITS_LAYER_SCALE+xxx}" ]]; then
-	SUFFIX=$SUFFIX-lg$LOGITS_LAYER_SCALE
+	SUFFIX=$SUFFIX-lgsls$LOGITS_LAYER_SCALE
 	LONG_SUFFIX=$LONG_SUFFIX-lgsls$LOGITS_LAYER_SCALE
 	ARCH_ARGS+=(--logits-layer-scale $LOGITS_LAYER_SCALE)
 	if [[ ! -z "${LOGITS_LAYER_SCALE_SCALE+xxx}" ]]; then
@@ -1196,7 +957,7 @@ if [[ ! -z "${LOGITS_LAYER_SCALE+xxx}" ]]; then
 	fi
 fi
 if [[ ! -z "${UPSCALE_EMBEDDING+xxx}" ]]; then
-	# SUFFIX=$SUFFIX-ue
+	SUFFIX=$SUFFIX-ue
 	LONG_SUFFIX=$LONG_SUFFIX-up$UPSCALE_EMBEDDING
 	ARCH_ARGS+=(--upscale-embedding $UPSCALE_EMBEDDING)
 fi
@@ -1204,12 +965,12 @@ fi
 
 # Training settings.
 if [[ $NO_WARMUP = true ]]; then
-	# SUFFIX=$SUFFIX-nw
+	SUFFIX=$SUFFIX-nw
 	LONG_SUFFIX=$LONG_SUFFIX-nw
 	WARMUP=0
 else
 	WARMUP=$WARMUP_ITERS
-	if [[ $WARMUP_ITERS -ne 1000 ]]; then
+	if [[ $WARMUP_ITERS -ne 5000 ]]; then
 		SUFFIX=$SUFFIX-wu$WARMUP_ITERS
 		LONG_SUFFIX=$LONG_SUFFIX-wu$WARMUP_ITERS
 	fi
@@ -1218,7 +979,7 @@ if [[ $TOKENS != $DEF_TOKENS ]]; then
 	SUFFIX=$SUFFIX-${TOKENS}BT
 	LONG_SUFFIX=$LONG_SUFFIX-${TOKENS}BT
 fi
-ITERS=$(python3 -c "print(int($ITERS_PER_BT*$TOKENS))")  # python so --tokens can be fractional (e.g. 37.5 -> 75k iters)
+ITERS=$((ITERS_PER_BT*TOKENS))
 
 DECAY_ARGS=()
 if [[ $DECAY = wsd ]]; then
@@ -1250,30 +1011,6 @@ elif [[ $DECAY = linear ]]; then
 		--lr-decay-style linear
 		--lr-decay-iters $ITERS
 	)
-elif [[ $DECAY = inverse-square-root ]]; then
-	SUFFIX=$SUFFIX-invsq
-	LONG_SUFFIX=$LONG_SUFFIX-invsq
-	DECAY_ARGS+=(
-		--lr-decay-style inverse-square-root
-		--lr-decay-iters $ITERS
-	)
-elif [[ $DECAY = isrwsd ]]; then
-	SUFFIX=$SUFFIX-isrwsd
-	LONG_SUFFIX=$LONG_SUFFIX-isrwsd
-	if [[ $COOLDOWN != 0.2 ]]; then
-		SUFFIX=$SUFFIX-cd$COOLDOWN
-		LONG_SUFFIX=$LONG_SUFFIX-cd${COOLDOWN}
-	fi
-	if [[ $WSD != minus_sqrt ]]; then
-		SUFFIX=$SUFFIX-$WSD
-		LONG_SUFFIX=$LONG_SUFFIX-$WSD
-	fi
-	DECAY_ITERS=$(python3 -c "print(int($ITERS * $COOLDOWN))")
-	DECAY_ARGS+=(
-		--lr-decay-style inverse-square-root-WSD
-		--lr-wsd-decay-style $WSD
-		--lr-wsd-decay-iters $DECAY_ITERS
-	)
 else
 	echo "Unknown decay method $DECAY"
 	exit 1
@@ -1281,7 +1018,7 @@ fi
 
 # In order to make the name shorter, we will alias all the suffixes that correspond to
 # ngpt architecture to just show ngpt.
-NGPT_SUBSTRING="-L2Norm-fz-qkL2-nPre-nFin-ppst-usmr-ss-ls*-qklsS-mlplsG-lg1S"
+NGPT_SUBSTRING=-L2Norm-fz-nPre-nFin-pst-ppst-usmr-ss-lsS-qklsS-mlplsG-lgsls
 SUFFIX="${SUFFIX/$NGPT_SUBSTRING/-ngpt}"
 
 SUFFIX=$SUFFIX$EXTRA_NAME
@@ -1312,7 +1049,7 @@ if [ "$DEBUG" = true ]; then
 else
 	WANDB_ENTITY=epfl-relay
 fi
-WANDB_PROJECT=megatron_opt_$SCRIPT_VERSION
+WANDB_PROJECT=megatron_debug_$SCRIPT_VERSION
 EXP_NAME=$SIZE$SCALE"1"$SUFFIX
 ROOT_PATH=$TRAIN_ROOT/$SCRIPT_VERSION/$SIZE$SCALE"1"$LONG_SUFFIX
 DEBUG_ROOT=$ROOT_PATH/debug
@@ -1324,28 +1061,14 @@ mkdir -p $SAVE_PATH
 mkdir -p $DIFFS_PATH
 mkdir -p $TRIGGER_DIR
 
-# For branch runs: seed the (new) save dir once with the source checkpoint, then
-# load/save from this dir as usual so the run stays preemption-safe.
-if [[ ! -z "${BRANCH_FROM+xxx}" ]]; then
-	if [[ ! -f $SAVE_PATH/latest_checkpointed_iteration.txt ]]; then
-		ln -s "$BRANCH_FROM/$BRANCH_ITER_DIR" "$SAVE_PATH/$BRANCH_ITER_DIR"
-		echo "$BRANCH_ITER" > "$SAVE_PATH/latest_checkpointed_iteration.txt"
-		echo "Seeded $SAVE_PATH <- $BRANCH_FROM/$BRANCH_ITER_DIR (iter $BRANCH_ITER)"
-	else
-		echo "$SAVE_PATH already has checkpoints; not re-seeding (resume-safe)."
-	fi
-fi
-
 if [[ -z ${WANDB_NAME+x} ]]; then
 	WANDB_NAME=$EXP_NAME
 fi
 
-if [[ ${#WANDB_NAME} -gt 117 ]]; then
-	# We compare against 117 because WANDB_NAME gets appended -n$NODE_COUNT-$JOB_ID in the final sbatch.
-	CHARS=${#WANDB_NAME}
-	>&2 echo "WANDB_NAME is too long (it has $CHARS characters, shouldn't exceed 117 characters): $WANDB_NAME"
-	exit 1
-fi
+# if [[ ${#WANDB_NAME} -gt 117 ]]; then
+# 	>&2 echo "WANDB_NAME is too long (it shouldn't exceed 117 characters): $WANDB_NAME"
+# 	exit 1
+# fi
 
 #= WRAPPING UP: Set up the _ARGS variables that are going to be used in the end =#
 
@@ -1393,7 +1116,6 @@ TRAINING_ARGS=(
 	--adam-beta1 $BETA1
 	--muon-momentum $MUON_MOMENTUM
 	--muon-scale-mode $MUON_SCALE_MODE
-	--muon-extra-scale-factor $MUON_EXTRA_SCALE_FACTOR
 	--muon-num-ns-steps $MUON_NUM_NS_STEPS
 	--adam-beta2 $BETA2
 	--ademamix-beta3 $BETA3
@@ -1449,94 +1171,28 @@ SCHEDULER_ARGS=(
 )
 
 EXTRA_ARGS+=(
-	--ckpt-format torch
+	--async-save
 )
-if [[ ! -z "${BRANCH_FROM+xxx}" ]]; then
-	# Apply the new (cooldown) schedule from CLI args instead of the checkpoint's.
-	EXTRA_ARGS+=(--override-opt_param-scheduler)
-fi
 
 ARGS="${LLAMA_ARGS[@]} ${TRAINING_ARGS[@]} ${SCHEDULER_ARGS[@]} ${DATA_ARGS[@]} ${LOGGING[@]} ${EXTRA_ARGS[@]} ${FP8_ARGS[@]} ${ARCH_ARGS[@]} ${OPT_ARGS[@]} ${DECAY_ARGS[@]}"
 
-#= RUNNING: Prepare and launch a slurm script =#
-CMD="numactl --membind=0-3 env python3 pretrain_gpt.py $ARGS"
-
-RESERVATION_DIRECTIVE=""
-if [[ $APERTUS_RESERVATION = true ]]; then
-	RESERVATION_DIRECTIVE="#SBATCH --reservation=SD-69241-apertus-1-5-0"
-fi
-
-mkdir -p $ROOT_PATH
-cat > $ROOT_PATH/submission.sbatch <<- EOM
-#!/bin/bash
-#SBATCH --time=$TIME
-#SBATCH --job-name=$EXP_NAME
-#SBATCH --output=$ROOT_PATH/slurmlogs/%j.out
-#SBATCH --error=$ROOT_PATH/slurmlogs/%j.err
-#SBATCH --nodes=$NODES
-#SBATCH --ntasks-per-node=4
-#SBATCH --gpus-per-node=4
-#SBATCH --cpus-per-task=36
-#SBATCH --mem=460000
-#SBATCH --exclusive
-#SBATCH --account=infra01
-#SBATCH --partition=${PARTITION:-normal}
-#SBATCH --signal=SIGTERM@180
-#SBATCH --dependency=singleton
-$RESERVATION_DIRECTIVE
-
-
-# Wake up.
-echo [\$(date)] Starting job
-echo [\$(date)] Using nodes: \$SLURM_JOB_NODELIST
-srun --environment=$CONTAINER -l --mpi=pmix --network=disable_rdzv_get bash -c 'echo \$(hostname) \$(nvidia-smi | grep -o "|\\s*[0-9]*MiB")'
-
-
-# Log git status.
-cd $CODE_PATH
-echo ---------
-echo git status:
-git status
-echo git log:
-git log -n 1
-echo ---------
-git diff > $DIFFS_PATH/\$SLURM_JOBID.diff
-
-export MASTER_ADDR=\$(hostname)
-export WORLD_SIZE=\$SLURM_NPROCS
+#= RUNNING: Launch directly for interactive srun debugging =#
+export MASTER_ADDR=$(hostname)
 export MASTER_PORT=25678
-
+export WORLD_SIZE=$((NODES * 4))
 export WANDB__FILE_STREAM_RETRY_MAX=10
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
-export OMP_NUM_THREADS=\$SLURM_CPUS_PER_TASK
-
+export OMP_NUM_THREADS=36
 export TRITON_HOME=$TRITON_HOME_DIR
 export TRITON_CACHE_DIR=$TRITON_HOME_DIR/cache
+export PYTHONPATH=$CODE_PATH:$EMERGING_OPTIMIZERS_PATH
 
-# debug!
-DEBUG_DIR=$DEBUG_ROOT/\$SLURM_JOB_ID
-mkdir -p \$DEBUG_DIR
-cp \$0 \$DEBUG_DIR/submit.sbatch
-cat \$SLURM_SPANK__SLURM_SPANK_OPTION_pyxis_environment > \$DEBUG_DIR/env.toml
-echo "\\nMegatron path: $CODE_PATH (\$(git -C $CODE_PATH rev-parse --verify HEAD))" > \$DEBUG_DIR/git
-git diff > \$DEBUG_DIR/git.diff
-pip list > \$DEBUG_DIR/pip.txt
-nvidia-smi > \$DEBUG_DIR/cuda
-printenv > \$DEBUG_DIR/env.sh
+mkdir -p $TRITON_CACHE_DIR
 
-srun --environment=$CONTAINER -lu --cpus-per-task \$SLURM_CPUS_PER_TASK --mpi=pmix --network=disable_rdzv_get bash -c "
-	cd $CODE_PATH
-	export PYTHONPATH=\$PWD:$EMERGING_OPTIMIZERS_PATH
-	export RANK=\\\$SLURM_PROCID
-	export LOCAL_RANK=\\\$SLURM_LOCALID
-	mkdir -p \\\$TRITON_CACHE_DIR
-	$CMD --wandb-exp-name $EXP_NAME-n$NODES-\\\$SLURM_JOBID
-"
+cd $CODE_PATH
+echo "Run arguments:"
+echo $ARGS
+echo "Run name: $WANDB_NAME"
 
-# Goodbye lol.
-echo [\$(date)] Goodbye
-EOM
-echo "Saved sbatch to $ROOT_PATH/submission.sbatch"
-
-sbatch $ROOT_PATH/submission.sbatch
+torchrun --nproc_per_node=4 pretrain_gpt.py $ARGS --wandb-exp-name $WANDB_NAME

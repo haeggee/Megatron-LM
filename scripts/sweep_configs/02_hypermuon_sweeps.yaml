@@ -1,0 +1,295 @@
+title: "Hypermuon w/ Sweeps"
+subplots:
+  - title: "Muon vs HMuon (nFOG)"
+    x_label: "Matrix LR Multiplier (mlr)"
+    x_param: mlr
+    series:
+      - label: "Baseline (Llama + WSD + AdamW)"
+        default_x_value: 1
+        runs:
+          - name: "110M-n1"
+            entity: alehc
+            project: opt_v1
+
+      - label: "OUR MAIN Master A0 + emb + no hs u + lg layerscale 1"
+        default_x_value: 1
+        runs:
+          - name: "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "Muon urm (lr 0.002)"
+        default_x_value: null
+        runs:
+          - name: "110M-muon_h_m0.95_mlr2_urm-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-muon_h_m0.95_mlr4_urm-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-muon_h_m0.95_mlr8_urm-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "HMuon urm, w/o hs u, no hs-embed, (lr=0.004)"
+        default_x_value: null
+        runs:
+          - name: "110M-master_h_o_b0.9_mlr2_urm_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "HMuon urm, w/ hs u, no hs-embed, (lr=0.002)"
+        default_x_value: null
+        runs:
+          - name: "110M-master_h_o_b0.9_mlr2_urm_a0-wd0-HSembed1_l2_it0_u-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0_u-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr8_urm_a0-wd0-HSembed1_l2_it0_u-lr0.002-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "HMuon urm, w/o hs u, embNO, elr, lr 0.002"
+        default_x_value: 1
+        runs:
+          - name: "110M-master_h_o_b0.9_mlr2_urm_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr8_urm_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr12_urm_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      # - label: "HMuon shsc, w/o hs u, no hs-embed, (lr=0.002)"
+      #   default_x_value: null
+      #   runs:
+      #     - name: "110M-master_h_o_b0.9_mlr2_shsc_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+      #     - name: "110M-master_h_o_b0.9_mlr4_shsc_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+      #     - name: "110M-master_h_o_b0.9_mlr8_shsc_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+
+      # - label: "HMuon shsc, w/o hs u, no hs-embed, (lr=0.004)"
+      #   default_x_value: null
+      #   runs:
+      #     - name: "110M-master_h_o_b0.9_mlr2_shsc_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+      #     - name: "110M-master_h_o_b0.9_mlr4_shsc_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+      #     - name: "110M-master_h_o_b0.9_mlr8_shsc_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+
+      # - label: "HMuon urm, w/ hs u, embNO, (lr=0.004)"
+      #   default_x_value: null
+      #   runs:
+      #     - name: "110M-master_h_o_b0.9_mlr2_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+      #     - name: "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+      #     - name: "110M-master_h_o_b0.9_mlr8_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+
+      # - label: "HMuon urm, w/ hs u, embNO, (lr=0.002)"
+      #   default_x_value: null
+      #   runs:
+      #     - name: "110M-master_h_o_b0.9_mlr2_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+      #     - name: "110M-master_h_o_b0.9_mlr4_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+      #     - name: "110M-master_h_o_b0.9_mlr8_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+      #     - name: "110M-master_h_o_b0.9_mlr12_urm_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+
+      - label: "HMuon none, w/o hs u, no hs-embed, (lr=0.002)"
+        default_x_value: null
+        runs:
+          - name: "110M-master_h_o_b0.9_mlr2_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr4_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr8_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr12_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr16_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "HMuon none, w/o hs u, no hs-embed, (lr=0.004)"
+        default_x_value: null
+        runs:
+          - name: "110M-master_h_o_b0.9_mlr2_none_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr4_none_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr8_none_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      # - label: "HMuon none, w/o hs u, embNO, (lr=0.004)"
+      #   default_x_value: null
+      #   runs:
+      #     - name: "110M-master_h_o_b0.9_mlr2_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+      #     - name: "110M-master_h_o_b0.9_mlr4_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+      #     - name: "110M-master_h_o_b0.9_mlr8_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+      #     - name: "110M-master_h_o_b0.9_mlr12_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+
+      # - label: "HMuon none, w/o hs u, embNO, (lr=0.002)"
+      #   default_x_value: null
+      #   runs:
+      #     - name: "110M-master_h_o_b0.9_mlr2_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+      #     - name: "110M-master_h_o_b0.9_mlr4_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+      #     - name: "110M-master_h_o_b0.9_mlr8_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+      #     - name: "110M-master_h_o_b0.9_mlr12_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+
+      - label: "HMuon shape up, w/o hs u, no hs embed (lr=0.002)"
+        default_x_value: null
+        runs:
+          - name: "110M-master_h_o_b0.9_mlr2_shape_up_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr4_shape_up_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr6_shup_a0-wd0-HSembed1_l2_it0-lr0.002-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr8_shup_a0-wd0-HSembed1_l2_it0-lr0.002-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr12_shup_a0-wd0-HSembed1_l2_it0-lr0.002-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "HMuon none, w/o hs u, embNO, elr (lr=0.002)"
+        default_x_value: null
+        runs:
+          - name: "110M-master_h_o_b0.9_mlr4_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr8_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr12_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr16_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "HMuon shape up, w/o hs u, embNO, elr (lr=0.002)"
+        default_x_value: null
+        runs:
+          - name: "110M-master_h_o_b0.9_mlr2_shup_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr4_shup_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr6_shup_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr8_shup_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr12_shup_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-elr-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+  - title: "Muon vs Poor mans muon"
+    x_label: "Matrix LR Multiplier (mlr)"
+    x_param: mlr
+    series:
+      - label: "Baseline (Llama + WSD + AdamW)"
+        default_x_value: 1
+        runs:
+          - name: "110M-n1"
+            entity: alehc
+            project: opt_v1
+
+      - label: "OUR MAIN Master A0 + emb + no hs u + lg layerscale 1"
+        default_x_value: 1
+        runs:
+          - name: "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "Muon urm (lr 0.002)"
+        default_x_value: null
+        runs:
+          - name: "110M-muon_h_m0.95_mlr2_urm-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-muon_h_m0.95_mlr4_urm-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-muon_h_m0.95_mlr8_urm-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "PMO, no hs u, no emb (lr=0.002)"
+        default_x_value: null
+        runs:
+          - name: "110M-master_h_o_b0.9_mlr2_pmo1_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr4_pmo1_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr8_pmo1_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr12_pmo1_none_a0-wd0-HSembed1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "PMO, no hs u, no emb (lr=0.004)"
+        default_x_value: null
+        runs:
+          - name: "110M-master_h_o_b0.9_mlr2_pmo1_none_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr4_pmo1_none_a0-wd0-HSembed1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "PMO, hs u, emb (lr=0.002)"
+        default_x_value: null
+        runs:
+          - name: "110M-master_h_o_b0.9_mlr2_pmo1_none_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr4_pmo1_none_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "PMO, hs u, emb (lr=0.004)"
+        default_x_value: null
+        runs:
+          - name: "110M-master_h_o_b0.9_mlr2_pmo1_none_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr4_pmo1_none_a0-wd0-HSembed1_l2_it0_u_embNO-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "PMO, no hs u, emb (lr=0.002)"
+        default_x_value: null
+        runs:
+          - name: "110M-master_h_o_b0.9_mlr2_pmo1_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr4_pmo1_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr8_pmo1_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_o_b0.9_mlr12_pmo1_none_a0-wd0-HSembed1_l2_it0_embNO-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1

@@ -179,8 +179,10 @@ class LanguageModule(MegatronModule):
         # Set `is_embedding_or_output_parameter` attribute.
         if self.pre_process:
             self.embedding.word_embeddings.weight.is_embedding_or_output_parameter = True
+            self.embedding.word_embeddings.weight.is_embedding_parameter = True
         if self.post_process and self.output_layer.weight is not None:
             self.output_layer.weight.is_embedding_or_output_parameter = True
+            self.output_layer.weight.is_output_parameter = True
 
         # If share_embeddings_and_output_weights is True, we need to maintain duplicated
         # embedding weights in post processing stage. If use Multi-Token Prediction (MTP),

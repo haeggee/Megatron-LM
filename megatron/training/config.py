@@ -109,6 +109,10 @@ class ValidationConfig:
     full_validation: bool = False
     """If set, each time validation occurs it uses the full validation dataset(s). This currently only works for GPT datasets!"""
 
+    deterministic_validation: bool = False
+    """If set, the validation data iterator is rebuilt before each evaluation so
+       that every eval pass uses the exact same batches starting from sample 0."""
+
     multiple_validation_sets: bool = False
     """If set, multiple datasets listed in the validation split are evaluated independently with a
        separate loss for each dataset in the list. This argument requires that no weights are 

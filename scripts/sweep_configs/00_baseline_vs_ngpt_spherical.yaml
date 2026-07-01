@@ -1,0 +1,197 @@
+title: "Baseline vs ngpt vs Spherical Adam"
+subplots:
+  - title: "Baseline vs Master A0 (with / without embed)"
+    x_label: "Learning Rate"
+    x_param: lr
+    series:
+      - label: "Baseline (Llama + WSD + AdamW)"
+        default_x_value: 0.002
+        runs:
+          - name: "110M-n1"
+            entity: alehc
+            project: opt_v1
+          - name: "110M-lr0.004-n1"
+            entity: alehc
+            project: opt_v1
+          - name: "110M-lr0.001-n1"
+            entity: alehc
+            project: opt_v1
+
+      - label: "OUR MAIN Master A0 + emb + no hs u + lg layerscale 1"
+        default_x_value: 0.002
+        runs:
+          - name: "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-qkRMS-nPre-nFin-pst-ls1S-lgslsS-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.001-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "OUR MAIN Master A0 + emb + no hs u + lg layerscale 0.044"
+        default_x_value: 0.002
+        runs:
+          - name: "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls0.083S-lgslsS-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "Baseline w/ cos"
+        default_x_value: 0.002
+        runs:
+          - name: "110M-lr0.004-cos-n1"
+            entity: alehc
+            project: opt_v1
+          - name: "110M-lr0.003-cos-n1"
+            entity: alehc
+            project: opt_v1
+
+      - label: "Master A0 + ngpt (hs emb, no hs u, logit layerscale)"
+        default_x_value: 0.002
+        runs:
+          - name: "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-lr0.003-std0.044-ngpt-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-lr0.004-std0.044-ngpt-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-lr0.001-std0.044-ngpt-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-std0.044-ngpt-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "Baseline Llama with HyperAdam"
+        default_x_value: 0.002
+        runs:
+          - name: "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-std0.044-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "Muon mlr4, m0.95, urm"
+        default_x_value: 0.002
+        runs:
+          - name: "110M-muon_h_m0.95_mlr4_urm-qkRMS-nPre-nFin-pst-lsS-lgslsS-ue-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+  - title: "Norm Axis Sweep"
+    x_label: "Learning Rate"
+    x_param: lr
+    series:
+      - label: "Baseline (Llama)"
+        default_x_value: 0.002
+        runs:
+          - name: "110M-n1"
+            entity: alehc
+            project: opt_v1
+          - name: "110M-lr0.004-n1"
+            entity: alehc
+            project: opt_v1
+          - name: "110M-lr0.001-n1"
+            entity: alehc
+            project: opt_v1
+
+      - label: "OUR MAIN Master A0 + emb + no hs u + lg layerscale 1"
+        default_x_value: 0.002
+        runs:
+          - name: "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-qkRMS-nPre-nFin-pst-ls1S-lgslsS-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.001-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSembed1_l2_it0_emb-lr0.003-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "MAIN Master A0 + emb + no hs u + lg ls 0.044"
+        default_x_value: 0.002
+        runs:
+          - name: "110M-master_h_a0-wd0-HSembed1_l2_it0_emb_sh-qkRMS-nPre-nFin-pst-ls0.083S-lgslsS-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "Frob R=22.62 (sqrt(d)) + no hs embed + no hs u + lg ls 1"
+        default_x_value: 0.002
+        runs:
+          - name: "110M-master_h_a0-wd0-HSflat22.62_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSflat22.62_l2_it0-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "Frob R=22.62 (sqrt(d)) + no hs-embed + hs u + lgls 1"
+        default_x_value: 0.002
+        runs:
+          - name: "110M-master_h_a0-wd0-HSflat22.62_l2_it0_u-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSflat22.62_l2_it0_u-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "Row + no hs-embed + no hs u + lg ls 1"
+        default_x_value: 0.002
+        runs:
+          - name: "110M-master_h_a0-wd0-HSrow1_l2_it0-lr0.001-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSrow1_l2_it0-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSrow1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "Row + hs-embed + no hs u + lg ls 1"
+        default_x_value: 0.002
+        runs:
+          - name: "110M-master_h_a0-wd0-HSrow1_l2_it0_emb-lr0.001-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSrow1_l2_it0_emb-lr0.002-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSrow1_l2_it0_emb-lr0.003-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSrow1_l2_it0_emb-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "Col  + no hs-embed + no hs u + lg ls 1"
+        default_x_value: 0.002
+        runs:
+          - name: "110M-master_h_a0-wd0-HScol1_l2_it0-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "RowCol + no hs-embed + no hs u + lg ls 1"
+        default_x_value: 0.002
+        runs:
+          - name: "110M-master_h_a0-wd0-HSrowcol1_l2_it0-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSrowcol1_l2_it0-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+
+      - label: "RowCol + no hs-embed + hs u + lg ls 1"
+        default_x_value: 0.002
+        runs:
+          - name: "110M-master_h_a0-wd0-HSrowcol1_l2_it0_u-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1
+          - name: "110M-master_h_a0-wd0-HSrowcol1_l2_it0_u-lr0.004-qkRMS-nPre-nFin-pst-lsS-lgsls1S-ue-nw-cos-n1"
+            entity: epfl-relay
+            project: megatron_opt_v1

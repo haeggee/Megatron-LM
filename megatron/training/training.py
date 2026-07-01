@@ -2727,6 +2727,8 @@ def train(
 
         # Evaluation.
         if args.eval_interval and iteration % args.eval_interval == 0 and args.do_valid:
+            if args.deterministic_validation:
+                valid_data_iterator = _rebuild_valid_data_iterator()
             if args.log_energy:
                 energy_monitor.pause()
             timers('interval-time').stop()
@@ -2886,8 +2888,8 @@ def evaluate(
             print_rank_0(f'Evaluating on {eval_iters * eval_batch_size} samples')
         while iteration < eval_iters:
             iteration += 1
-            if verbose:
-                print_rank_0(f'Evaluating iter {iteration}/{eval_iters}')
+            # if verbose:
+            #     print_rank_0(f'Evaluating iter {iteration}/{eval_iters}')
 
             # Don't care about timing during evaluation
             config.timers = None
@@ -3093,6 +3095,25 @@ def cyclic_iter(iter):
             yield x
 
 
+_VALID_DATALOADER = None
+
+
+def _rebuild_valid_data_iterator():
+    """Recreate the validation data iterator from the stored dataloader so that
+    evaluation always starts from sample 0 (deterministic validation)."""
+    global _VALID_DATALOADER
+    if _VALID_DATALOADER is None:
+        return None
+    args = get_args()
+    dl_type = args.dataloader_type
+    if dl_type == "single":
+        return RerunDataIterator(iter(_VALID_DATALOADER))
+    elif dl_type == "cyclic":
+        return RerunDataIterator(iter(cyclic_iter(_VALID_DATALOADER)))
+    else:
+        return RerunDataIterator(iter(_VALID_DATALOADER))
+
+
 def get_train_valid_test_num_samples():
     """Train/valid/test num samples."""
 
@@ -3175,7 +3196,7 @@ def build_train_valid_test_data_loaders(build_train_valid_test_datasets_provider
                 train_dataloader = build_pretraining_data_loader(train_ds, args.consumed_train_samples)
             valid_dataloaders = []
             for valid_d in valid_ds:
-                if args.skip_train or args.full_validation:
+                if args.skip_train or args.full_validation or args.deterministic_validation:
                     valid_dataloaders.append(build_pretraining_data_loader(valid_d, 0))
                 else:
                     if args.multiple_validation_sets:
@@ -3185,6 +3206,9 @@ def build_train_valid_test_data_loaders(build_train_valid_test_datasets_provider
                     valid_dataloaders.append(build_pretraining_data_loader(valid_d, args.consumed_valid_samples))
             if not args.multiple_validation_sets:
                 assert len(valid_dataloaders) == 1
+            if args.deterministic_validation:
+                global _VALID_DATALOADER
+                _VALID_DATALOADER = valid_dataloaders[0]
             test_dataloader = build_pretraining_data_loader(test_ds, 0)
             do_train = train_dataloader is not None and (args.skip_train or args.train_iters > 0)
             do_valid = valid_dataloaders is not None and (args.full_validation or args.eval_iters > 0)

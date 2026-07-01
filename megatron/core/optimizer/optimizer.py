@@ -394,8 +394,12 @@ class MegatronOptimizer(ABC):
         Raises:
             ValueError: If parameter groups in state dict don't match current optimizer.
         """
-        # Some optimizers have extra keys.
-        extra_keys = "use_orthogonal_updates",
+        # Some optimizers have extra keys. max_lr/min_lr are included so that
+        # groups with the same multiplier identifier but different absolute LR
+        # overrides (e.g. embedding vs LM-head when both have
+        # use_orthogonal_updates=False via --hs-embed-no-orthogonal but distinct
+        # --embedding-lr / --output-lr) don't collapse onto a single saved group.
+        extra_keys = "use_orthogonal_updates", "max_lr", "min_lr"
         use_param_group_identifier_keys = param_group_identifier_keys
         for extra_key in extra_keys:
             if all(extra_key in g for g in current_groups):
@@ -430,8 +434,13 @@ class MegatronOptimizer(ABC):
                     f"Parameter group key definition: {use_param_group_identifier_keys}"
                 )
 
-            # Update group's parameters to preserve state dict ordering
-            group = loaded_groups_map[key]
+            # Shallow-copy so multiple needed_groups that share the same identifier
+            # tuple don't alias the same dict in final_groups. Without this, a
+            # downstream torch.optim.Optimizer.load_state_dict deepcopy preserves
+            # the shared reference and update_group writes "params" into the same
+            # dict twice — the last write wins, collapsing two groups into one.
+            # GainsMasterOptimizer surfaces this immediately in _setup_inner_opts.
+            group = dict(loaded_groups_map[key])
             group['params'] = params
             final_groups.append(group)
 
@@ -688,6 +697,10 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                                 main_param.expert_tp = param.expert_tp
                             if hasattr(param, 'is_embedding_or_output_parameter'):
                                 main_param.is_embedding_or_output_parameter = param.is_embedding_or_output_parameter
+                            if hasattr(param, 'is_embedding_parameter'):
+                                main_param.is_embedding_parameter = param.is_embedding_parameter
+                            if hasattr(param, 'is_output_parameter'):
+                                main_param.is_output_parameter = param.is_output_parameter
                             # Replace the optimizer params with the new fp32 copy.
                             param_group['params'][i] = main_param
 
