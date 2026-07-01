@@ -71,14 +71,46 @@ HEAD_LR=0.001
 
 
 # with layerscale scale 1
-for k in 2 3 4 5; do
+# for k in 2 3 4 5; do
+# 	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
+# 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+# 		--eval-every 1000 --eval-iters 50 \
+# 		--no-pre-norm --no-final-layernorm \
+# 		--opt master --alpha 0 --hs embed --hs-embed --hs-split-heads \
+# 		--normalization L2Norm --no-learnable-norms --post-norm --post-block-norm --use-stream-minus-residual \
+# 		--layer-scale 1 --layer-scale-scale $INV_SQRTMODELDIM \
+# 		--softmax-scale $SQRT_KDIM --qk-norm L2Norm --qk-layer-scale 1 --qk-layer-scale-scale $INV_SQRTMODELDIM \
+# 		--mlp-layer-scale 1 --mlp-layer-scale-gate-scale $SQRT_MODELDIM \
+# 		--logits-layer-scale 1 --logits-layer-scale-scale $INV_SQRTMODELDIM \
+# 		--no-warmup --wd 0 --decay linear \
+# 		--init $INV_SQRTMODELDIM \
+# 		--untie-embed \
+# 		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR --output-lr $HEAD_LR \
+# 		--extra-name exp13-ngpt-ls1 \
+# 		$*
+# done
+
+
+# ============================================================================
+# Optimizer ablation on the nGPT architecture, matching exp1's optimization
+# setup: FLAT hypersphere for the matrices, embeddings normalized on ROWS with
+# NO gains (--hs flat --hs-embed row --hs-embed-no-orthogonal --hs-g-embed none),
+# for all four arms. The nGPT architecture (no pre/final norm, L2Norm + no
+# learnable norms, post/post-block norm, stream-minus-residual, fixed
+# layer/qk/mlp/logits scales, init 1/sqrt(d)) is kept throughout. The 2x2 grid
+# is {adam, muon} x {no gains, rowcol softplus gains}.
+# ============================================================================
+
+# ---- adam, no gains ----
+for k in 1 2; do # for k in 3 4 5 6 7 8; do
 	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
 		--eval-every 1000 --eval-iters 50 \
 		--no-pre-norm --no-final-layernorm \
-		--opt master --alpha 0 --hs embed --hs-embed --hs-split-heads \
+		--opt master --alpha 0 \
+		--hs flat --hs-embed row --hs-embed-no-orthogonal \
 		--normalization L2Norm --no-learnable-norms --post-norm --post-block-norm --use-stream-minus-residual \
-		--layer-scale 1 --layer-scale-scale $INV_SQRTMODELDIM \
+		--layer-scale $INV_LAYERS --layer-scale-scale $INV_SQRTMODELDIM \
 		--softmax-scale $SQRT_KDIM --qk-norm L2Norm --qk-layer-scale 1 --qk-layer-scale-scale $INV_SQRTMODELDIM \
 		--mlp-layer-scale 1 --mlp-layer-scale-gate-scale $SQRT_MODELDIM \
 		--logits-layer-scale 1 --logits-layer-scale-scale $INV_SQRTMODELDIM \
@@ -86,6 +118,76 @@ for k in 2 3 4 5; do
 		--init $INV_SQRTMODELDIM \
 		--untie-embed \
 		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR --output-lr $HEAD_LR \
-		--extra-name exp13-ngpt-ls1 \
+		--extra-name exp13-ngpt-adam \
 		$*
 done
+
+
+# # ---- muon, no gains ----
+# for k in 3 4 5 6 7 8; do
+# 	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
+# 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+# 		--eval-every 1000 --eval-iters 50 \
+# 		--no-pre-norm --no-final-layernorm \
+# 		--opt master --master-orthogonalize --alpha 0 \
+# 		--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
+# 		--hs flat --hs-embed row --hs-embed-no-orthogonal \
+# 		--normalization L2Norm --no-learnable-norms --post-norm --post-block-norm --use-stream-minus-residual \
+# 		--layer-scale $INV_LAYERS --layer-scale-scale $INV_SQRTMODELDIM \
+# 		--softmax-scale $SQRT_KDIM --qk-norm L2Norm --qk-layer-scale 1 --qk-layer-scale-scale $INV_SQRTMODELDIM \
+# 		--mlp-layer-scale 1 --mlp-layer-scale-gate-scale $SQRT_MODELDIM \
+# 		--logits-layer-scale 1 --logits-layer-scale-scale $INV_SQRTMODELDIM \
+# 		--no-warmup --wd 0 --decay linear \
+# 		--init $INV_SQRTMODELDIM \
+# 		--untie-embed \
+# 		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR --output-lr $HEAD_LR \
+# 		--extra-name exp13-ngpt-muon \
+# 		$*
+# done
+
+
+# ---- adam + rowcol softplus gains ----
+for k in 1 2; do # for k in 3 4 5 6 7 8; do
+	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
+	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+		--eval-every 1000 --eval-iters 50 \
+		--no-pre-norm --no-final-layernorm \
+		--opt master --alpha 0 \
+		--hs flat --hs-embed row --hs-embed-no-orthogonal \
+		--hs-g rowcol --hs-g-embed none \
+		--hs-g-param softplus \
+		--normalization L2Norm --no-learnable-norms --post-norm --post-block-norm --use-stream-minus-residual \
+		--layer-scale $INV_LAYERS --layer-scale-scale $INV_SQRTMODELDIM \
+		--softmax-scale $SQRT_KDIM --qk-norm L2Norm --qk-layer-scale 1 --qk-layer-scale-scale $INV_SQRTMODELDIM \
+		--mlp-layer-scale 1 --mlp-layer-scale-gate-scale $SQRT_MODELDIM \
+		--logits-layer-scale 1 --logits-layer-scale-scale $INV_SQRTMODELDIM \
+		--no-warmup --wd 0 --decay linear \
+		--untie-embed \
+		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR --output-lr $HEAD_LR \
+		--extra-name exp13-ngpt-adam-g \
+		$*
+done
+
+
+# ---- muon + rowcol softplus gains ----
+# for k in 3 4 5 6 7 8; do
+# 	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
+# 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+# 		--eval-every 1000 --eval-iters 50 \
+# 		--no-pre-norm --no-final-layernorm \
+# 		--opt master --master-orthogonalize --alpha 0 \
+# 		--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
+# 		--hs flat --hs-embed row --hs-embed-no-orthogonal \
+# 		--hs-g rowcol --hs-g-embed none \
+# 		--hs-g-param softplus \
+# 		--normalization L2Norm --no-learnable-norms --post-norm --post-block-norm --use-stream-minus-residual \
+# 		--layer-scale $INV_LAYERS --layer-scale-scale $INV_SQRTMODELDIM \
+# 		--softmax-scale $SQRT_KDIM --qk-norm L2Norm --qk-layer-scale 1 --qk-layer-scale-scale $INV_SQRTMODELDIM \
+# 		--mlp-layer-scale 1 --mlp-layer-scale-gate-scale $SQRT_MODELDIM \
+# 		--logits-layer-scale 1 --logits-layer-scale-scale $INV_SQRTMODELDIM \
+# 		--no-warmup --wd 0 --decay linear \
+# 		--untie-embed \
+# 		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR --output-lr $HEAD_LR \
+# 		--extra-name exp13-ngpt-muon-g \
+# 		$*
+# done

@@ -74,67 +74,67 @@ EMB_LR=0.003
 # done
 
 # # # ---- master-muon + gains (our method) ----
-# for k in 3 4 5 6 7 8; do
-# 	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
-# 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
-# 		--eval-every 1000 --eval-iters 50 \
-# 		--opt master --master-orthogonalize --alpha 0 \
-# 		--hs flat --hs-embed row --hs-embed-no-orthogonal \
-# 		--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
-# 		--hs-g rowcol --hs-g-embed none \
-# 		--post-norm \
-# 		--hs-g-param softplus \
-# 		--fixed-layer-scale $INV_LAYERS \
-# 		--upscale-embedding $SQRT_MODELDIM \
-# 		--qk-norm RMSNorm \
-# 		--wd 0 --decay linear --no-warmup \
-# 		--untie-embed \
-# 		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
-# 		--extra-name exp1-master-gains \
-# 		$*
-# done
-
-# ---- master + adam + hypersphere (no orthogonalize, no gains); warmup kept ----
-# edit 1: remove warmup
-for k in 0 1 2 3 4; do
+for k in 3 4 5 6 7 8; do
 	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
 		--eval-every 1000 --eval-iters 50 \
-		--opt master --alpha 0 \
+		--opt master --master-orthogonalize --alpha 0 \
 		--hs flat --hs-embed row --hs-embed-no-orthogonal \
-		--post-norm \
-		--fixed-layer-scale $INV_LAYERS \
-		--upscale-embedding $SQRT_MODELDIM \
-		--qk-norm RMSNorm \
-		--wd 0 --decay linear --no-warmup \
-		--untie-embed \
-		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
-		--extra-name exp1-master-adam-nogains-nw \
-		$*
-            # --warmup-iters 1000 \
-done
-
-# ---- master + adam + hypersphere + gains (no orthogonalize); warmup kept ----
-# edit1: remove warmup
-for k in 0 1 2 3 4; do
-	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
-	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
-		--eval-every 1000 --eval-iters 50 \
-		--opt master --alpha 0 \
-		--hs flat --hs-embed row --hs-embed-no-orthogonal \
+		--b1 0.95 --mb1 0.9 --muon-scale shape_up --muon-nesterov \
 		--hs-g rowcol --hs-g-embed none \
 		--post-norm \
 		--hs-g-param softplus \
 		--fixed-layer-scale $INV_LAYERS \
 		--upscale-embedding $SQRT_MODELDIM \
 		--qk-norm RMSNorm \
-		--wd 0 --decay linear --no-warmup  \
+		--wd 0 --decay linear --no-warmup \
 		--untie-embed \
 		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
-		--extra-name exp1-master-adam-gains-nw \
-            # --warmup-iters 1000 \
+		--extra-name exp1-muonmd-gains \
 		$*
 done
+
+# ---- master + adam + hypersphere (no orthogonalize, no gains); warmup kept ----
+# edit 1: remove warmup
+# for k in 0 1 2 3 4; do
+# 	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
+# 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+# 		--eval-every 1000 --eval-iters 50 \
+# 		--opt master --alpha 0 \
+# 		--hs flat --hs-embed row --hs-embed-no-orthogonal \
+# 		--post-norm \
+# 		--fixed-layer-scale $INV_LAYERS \
+# 		--upscale-embedding $SQRT_MODELDIM \
+# 		--qk-norm RMSNorm \
+# 		--wd 0 --decay linear --no-warmup \
+# 		--untie-embed \
+# 		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
+# 		--extra-name exp1-master-adam-nogains-nw \
+# 		$*
+#             # --warmup-iters 1000 \
+# done
+
+# ---- master + adam + hypersphere + gains (no orthogonalize); warmup kept ----
+# edit1: remove warmup
+# for k in 0 1 2 3 4; do
+# 	matrix_lr=$(python3 -c "print(0.001 * 2**($k/2))")
+# 	bash submissions/submit.sh $MODEL_SIZE --nodes $NODES \
+# 		--eval-every 1000 --eval-iters 50 \
+# 		--opt master --alpha 0 \
+# 		--hs flat --hs-embed row --hs-embed-no-orthogonal \
+# 		--hs-g rowcol --hs-g-embed none \
+# 		--post-norm \
+# 		--hs-g-param softplus \
+# 		--fixed-layer-scale $INV_LAYERS \
+# 		--upscale-embedding $SQRT_MODELDIM \
+# 		--qk-norm RMSNorm \
+# 		--wd 0 --decay linear --no-warmup  \
+# 		--untie-embed \
+# 		--lr $BASE_LR --matrix-lr $matrix_lr --embedding-lr $EMB_LR \
+# 		--extra-name exp1-master-adam-gains-nw \
+#             # --warmup-iters 1000 \
+# 		$*
+# done
 
 
 # ---- lion (master, no orthogonalize, hypersphere) ----

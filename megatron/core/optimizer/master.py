@@ -562,6 +562,7 @@ class GainsMasterOptimizer(MasterOptimizer):
         gains_weight_decay: float = 0.0,
         gains_bias_correction: bool = True,
         gains_min: float = 0.0,
+        gains_no_clamp: bool = False,
         gain_parametrization: Literal["direct", "offset", "softplus", "exp"] = "direct",
         gains_rank: int = 4,
         gains_lowrank_init_std: Optional[float] = None,
@@ -588,6 +589,7 @@ class GainsMasterOptimizer(MasterOptimizer):
         self.gains_weight_decay = gains_weight_decay
         self.gains_bias_correction = gains_bias_correction
         self.gains_min = gains_min
+        self.gains_no_clamp = gains_no_clamp
         self.gain_parametrization = gain_parametrization
         # Precompute the raw-gain clamp from the desired floor on phi(g) (monotonic phi).
         if gains_min > 0:
@@ -596,6 +598,21 @@ class GainsMasterOptimizer(MasterOptimizer):
             self._gain_clamp_min = None
         super().__init__(params, **kwargs)
         self._setup_gains()
+
+    def _undo_divisor(self, phi: torch.Tensor) -> torch.Tensor:
+        """Divisor used to undo a gain in _preprocess_gains.
+
+        By default phi(g) is clamped to a positive floor (1e-8) before dividing
+        p by it. That clamp is unsafe when phi(g) can go negative or sub-eps
+        (e.g. direct/offset parametrization with gains_min=0): the undo would
+        divide by a clamped positive value while _apply_gains re-multiplies by
+        the true (possibly negative) phi(g), so the round-trip no longer
+        inverts and p drifts. With gains_no_clamp the true phi(g) is used, so
+        the undo division exactly inverts the re-apply multiplication.
+        """
+        if self.gains_no_clamp:
+            return phi
+        return phi.clamp_min(1e-8)
 
     def _phi(self, g: torch.Tensor) -> torch.Tensor:
         """Forward map from raw gain g to effective multiplier phi(g)."""
@@ -661,7 +678,6 @@ class GainsMasterOptimizer(MasterOptimizer):
     def _preprocess_gains(self, p: torch.nn.Parameter) -> dict:
         """Undo gains on p, compute ∂L/∂gain, rescale p.grad. Returns gain gradient dict."""
         state = self.state[p]
-        eps = 1e-8
 
         # Dispatch to split-QKV variant if applicable.
         if self.split_qkv_gains and self.is_qkv_fn(p) and "q_col_gain" in state:
@@ -686,11 +702,11 @@ class GainsMasterOptimizer(MasterOptimizer):
 
         # Undo gains to recover bare normalized weight.
         if flat_phi is not None:
-            p.div_(flat_phi.clamp_min(eps))
+            p.div_(self._undo_divisor(flat_phi))
         if row_phi is not None:
-            p.div_(row_phi[:, None].clamp_min(eps))
+            p.div_(self._undo_divisor(row_phi)[:, None])
         if col_phi is not None:
-            p.div_(col_phi[None, :].clamp_min(eps))
+            p.div_(self._undo_divisor(col_phi)[None, :])
 
         # ∂L/∂phi(g) (must be computed before p.grad is rescaled).
         p_times_pgrad = p * p.grad
@@ -728,7 +744,6 @@ class GainsMasterOptimizer(MasterOptimizer):
     def _preprocess_split_qkv_gains(self, p: torch.nn.Parameter) -> dict:
         """_preprocess_gains variant for QKV parameters with separate Q/K/V column gains."""
         state = self.state[p]
-        eps = 1e-8
         row = state.get("row_gain")
         q_col = state["q_col_gain"]
         k_col = state["k_col_gain"]
@@ -743,11 +758,11 @@ class GainsMasterOptimizer(MasterOptimizer):
 
         # 1. Undo gains on p to recover the bare normalized weight.
         if row_phi is not None:
-            p.div_(row_phi[:, None].clamp_min(eps))
+            p.div_(self._undo_divisor(row_phi)[:, None])
         qs, ks, vs = split_qkv(p, shapes)
-        qs.div_(q_col_phi[None, :].clamp_min(eps))
-        ks.div_(k_col_phi[None, :].clamp_min(eps))
-        vs.div_(v_col_phi[None, :].clamp_min(eps))
+        qs.div_(self._undo_divisor(q_col_phi)[None, :])
+        ks.div_(self._undo_divisor(k_col_phi)[None, :])
+        vs.div_(self._undo_divisor(v_col_phi)[None, :])
         p.copy_(merge_qkv((qs, ks, vs), p.size(), shapes))
 
         # 2. Gain gradients w.r.t. phi(g); chain rule by phi'(g) applied below.
@@ -1368,6 +1383,7 @@ def get_megatron_master_optimizer(
         ),
         gains_bias_correction=config.gains_bias_correction,
         gains_min=config.gains_min,
+        gains_no_clamp=config.gains_no_clamp,
         gain_parametrization=config.gain_parametrization,
         gains_rank=config.gains_rank,
         gains_lowrank_init_std=config.gains_lowrank_init_std,

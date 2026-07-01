@@ -158,6 +158,7 @@ usage () {
 	echo " --gwd <float>: gains weight decay (default: reuses --wd)"
 	echo " --g-no-bc: disable Adam bias correction for the gains optimizer"
 	echo " --gmin <float>: floor the effective gain phi(g) >= this (prevents collapse/sign-flip; 0=off)"
+	echo " --gains-no-clamp: don't clamp the undo divisor; use true phi(g) so undo exactly inverts re-apply (no round-trip mismatch when gains go negative/sub-eps)"
 	echo " --hs-preserve-init: skip init projection; absorb init norms into gains"
 	echo " --split-qkv-gains: separate column gains for Q, K, V"
 	echo " --hs-g-param <direct/offset/softplus/exp>: gain parametrization (phi). direct=g, offset=1+g, softplus=softplus(g), exp=exp(g)."
@@ -690,6 +691,8 @@ while [[ $# -gt 0 ]]; do
 			GAINS_NO_BIAS_CORRECTION=true; shift;;
 		--gmin)
 			GAINS_MIN=$2; shift 2;;
+		--gains-no-clamp)
+			GAINS_NO_CLAMP=true; shift;;
 		--hs-preserve-init)
 			HS_PRESERVE_INIT=true; shift;;
 		--split-qkv-gains)
@@ -953,6 +956,10 @@ if [[ $HYPERBALL != false ]]; then
 		if [[ ! -z "${GAINS_MIN+xxx}" ]]; then
 			SUFFIX=${SUFFIX}_gmin$(printf "%.0e" $GAINS_MIN)
 			OPT_ARGS+=(--gains-min $GAINS_MIN)
+		fi
+		if [[ $GAINS_NO_CLAMP = true ]]; then
+			SUFFIX=${SUFFIX}_gnc
+			OPT_ARGS+=(--gains-no-clamp)
 		fi
 		if [[ ! -z "${HS_GAINS_PARAM+xxx}" ]] && [[ $HS_GAINS_PARAM != direct ]]; then
 			if [[ $HS_GAINS_PARAM = softplus ]]; then

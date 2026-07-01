@@ -2257,6 +2257,12 @@ def _add_regularization_args(parser):
                             'gain is clamped so phi(g) >= gains_min. Prevents gains collapsing through '
                             'zero (sign flips for direct) and keeps the undo division bounded. 0 = off. '
                             'Parametrization-agnostic (converted via phi^-1).')
+    group.add_argument('--gains-no-clamp', action='store_true', dest='gains_no_clamp',
+                       help='Do not clamp the divisor when undoing gains. By default the undo '
+                            'division p/phi(g) floors phi(g) at 1e-8 while _apply_gains '
+                            're-multiplies by the true (possibly negative/sub-eps) phi(g), so a '
+                            'gain below the floor breaks the round-trip and p drifts. This uses the '
+                            'true phi(g) on undo so it exactly inverts the re-apply.')
     group.add_argument('--gains-rank', type=int, default=4,
                        help='Rank k of the "lowrank" gains multiplier G = 1 + A@B (A:[m,k], '
                             'B:[k,n]). Capped at min(m, n) per parameter. k=1 is a single '

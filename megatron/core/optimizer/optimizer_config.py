@@ -295,6 +295,14 @@ class OptimizerConfig:
     0 disables. Parametrization-agnostic: e.g. gains_min=1e-5 maps to raw clamp 1e-5 (direct),
     ~-11.5 (softplus/exp), ~-1.0 (offset)."""
 
+    gains_no_clamp: bool = False
+    """When True, do not clamp the divisor when undoing gains in _preprocess_gains. By default the
+    undo division p / phi(g) floors phi(g) at 1e-8, but _apply_gains re-multiplies by the true
+    (unclamped, possibly negative or sub-eps) phi(g) — so when a gain runs below the floor the
+    round-trip stops inverting and p drifts. Setting this uses the true phi(g) on undo, making the
+    undo exactly invert the re-apply (no mismatch), at the cost of an unbounded undo division when a
+    gain approaches zero. Independent of gains_min (which still clamps the gain itself post-step)."""
+
     gain_parametrization: Literal["direct", "offset", "softplus", "exp"] = "direct"
     """How the learned gain `g` maps to the effective multiplier `phi(g)` applied to W_bare.
     - "direct":   phi(g) = g           (current behaviour; identity-init = 1.0)
